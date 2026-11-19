@@ -74,31 +74,33 @@ def update_rate(server: Relay.Server, command: String, unchanged: Bool) -> IO(Re
     case _ _:
       IO.pure(Relay.Server,server)
 
-def drive_live(fuel: Nat, +path: String, previous: String, server: Relay.Server) -> IO(Unit):
+def drive_commands(~update: Relay.Server -> String -> Bool -> IO(Relay.Server), fuel: Nat,
+    +path: String, previous: String, server: Relay.Server) -> IO(Unit):
   match fuel:
     case 1n+left:
       do IO<Unit>:
         opened : Result<&1,&1,U32 & String,File> <- File.open(path,"r")
         IO.bind(String,Unit,read_command(opened),+command =>
           do IO<Unit>:
-            updated : Relay.Server <- update_rate(server,command,String.eq(command,previous))
+            updated : Relay.Server <- update(server,command,String.eq(command,previous))
             next : Relay.Server <- Relay.step(updated)
             IO.sleep(5)
-            drive_live(left,path,command,next))
+            drive_commands(~update,left,path,command,next))
     case 0n:
       Relay.stop(server)
 
-def run_live(bound: Relay.Server & U32, path: String) -> IO(Unit):
+def run_commands(~update: Relay.Server -> String -> Bool -> IO(Relay.Server),
+    bound: Relay.Server & U32, path: String) -> IO(Unit):
   (server,port) = bound
   do IO<Unit>:
     IO.print(U32.show(port))
-    drive_live(10000n,path,"",server)
+    drive_commands(~update,10000n,path,"",server)
 
 def serve_live(cert: String, key: String, path: String) -> IO(Unit):
   do IO<Unit>:
     bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
       Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{10,Some{1}}))
-    run_live(bound,path)
+    run_commands(~update_rate,bound,path)
 
 def relay_path(path: List<&2,U32>) -> Bool:
   match path:
@@ -145,6 +147,64 @@ def access_fixture(fuel: Nat) -> Access.Control:
       Access.ControlWith{entry => check_event(entry,access_fixture(left))}
     case 0n:
       Access.ControlWith{_ => IO.die(Access.Control & Access.Decision,1,"fixture event limit exceeded")}
+
+def disconnect_key() -> List<&2,U32>:
+  [25,127,107,35,225,108,133,50,198,171,200,56,250,205,94,167,
+   137,190,12,118,178,146,3,52,3,155,250,139,61,54,141,97]
+
+def other_key() -> List<&2,U32>:
+  [119,44,138,68,43,125,176,110,22,108,251,193,204,188,188,222,
+   111,62,186,118,164,233,142,243,255,197,25,80,34,55,214,239]
+
+def report_disconnect(result: Relay.Server & Bool, command: String) -> IO(Relay.Server):
+  match result:
+    case (server,True{}):
+      do IO<Relay.Server>:
+        IO.print("disconnect applied " ++ command)
+        return server
+    case (server,False{}):
+      do IO<Relay.Server>:
+        IO.print("disconnect missing " ++ command)
+        return server
+
+def request_disconnect(server: Relay.Server, key: List<&2,U32>, id: Maybe<&2,U32>, command: String)
+    -> IO(Relay.Server):
+  do IO<Relay.Server>:
+    result : Relay.Server & Bool <- Relay.disconnect(server,key,id)
+    report_disconnect(result,command)
+
+def request_one(server: Relay.Server, key: List<&2,U32>, id: Maybe<&2,U32>, command: String) -> IO(Relay.Server):
+  match id:
+    case Some{n}:
+      request_disconnect(server,key,Some{n},command)
+    case None{}:
+      IO.pure(Relay.Server,server)
+
+def disconnect_command(server: Relay.Server, words: List<&2,String>) -> IO(Relay.Server):
+  match words:
+    case ["one",+id]:
+      request_one(server,disconnect_key(),U32.read(id),"one " ++ id)
+    case ["wrong",+id]:
+      request_one(server,other_key(),U32.read(id),"wrong " ++ id)
+    case ["all"]:
+      request_disconnect(server,disconnect_key(),None{},"all")
+    case ["other"]:
+      request_disconnect(server,other_key(),None{},"other")
+    case _:
+      IO.pure(Relay.Server,server)
+
+def update_connections(server: Relay.Server, command: String, unchanged: Bool) -> IO(Relay.Server):
+  match unchanged:
+    case True{}:
+      IO.pure(Relay.Server,server)
+    case False{}:
+      disconnect_command(server,String.split(command,Char.from_u32(32)))
+
+def serve_disconnect(cert: String, key: String, path: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
+      Relay.bind_with_access("127.0.0.1",0,cert,key,access_fixture(24n)))
+    run_commands(~update_connections,bound,path)
 
 def duplicate_standard(values: Maybe<&2,Net.RequestHeaderValues>) -> Bool:
   match values:
@@ -215,6 +275,10 @@ def run(args: List<String>) -> IO(Unit):
       serve_live("","",path)
     case Con{_,Con{"live-rate",Con{path,Con{cert,Con{key,Nil{}}}}}}:
       serve_live(cert,key,path)
+    case Con{_,Con{"disconnect",Con{path,Nil{}}}}:
+      serve_disconnect("","",path)
+    case Con{_,Con{"disconnect",Con{path,Con{cert,Con{key,Nil{}}}}}}:
+      serve_disconnect(cert,key,path)
     case Con{_,Con{"policy-test",Nil{}}}:
       policy_test()
     case Con{_,Con{"access",Con{cert,Con{key,Nil{}}}}}:

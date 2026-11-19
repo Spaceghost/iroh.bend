@@ -776,6 +776,79 @@ def step(server: Server) -> IO(Server):
   Relay{state,access} = server
   step_state(state,access)
 
+def selected_connection(id: U32, connection: Maybe<&2,U32>) -> Bool:
+  match connection:
+    case None{}:
+      True{}
+    case Some{wanted}:
+      U32.is_eq(id,wanted)
+
+def include_id(id: U32, rest: List<&2,U32>, include: Bool) -> List<&2,U32>:
+  match include:
+    case True{}:
+      Con{id,rest}
+    case False{}:
+      rest
+
+def matching_connections(sessions: List<&2,Client>, +endpoint: List<&2,U32>, +connection: Maybe<&2,U32>)
+    -> List<&2,U32>:
+  match sessions:
+    case Nil{}:
+      []
+    case Con{Authorized{+id,_,key,_,_},rest}:
+      tail = matching_connections(rest,endpoint,connection)
+      include_id(id,tail,bytes_equal(key,endpoint) && selected_connection(id,connection))
+    case Con{_,rest}:
+      matching_connections(rest,endpoint,connection)
+
+def close_connections(ids: List<&2,U32>, socket: Net.ServerSocket, matched: Bool)
+    -> IO(Net.ServerSocket & Bool):
+  match ids:
+    case Nil{}:
+      IO.pure(Net.ServerSocket & Bool,(socket,matched))
+    case Con{id,rest}:
+      do IO<Net.ServerSocket & Bool>:
+        next : Net.ServerSocket <- Net.relay_kick(socket,id,0)
+        close_connections(rest,next,True{})
+
+def disconnect_state_pair(result: Net.ServerSocket & Bool, rebuild: Net.ServerSocket -> State) -> State & Bool:
+  (socket,matched) = result
+  (rebuild(socket),matched)
+
+def close_selected(socket: Net.ServerSocket, clients: Clients, endpoint: List<&2,U32>, selected: Maybe<&2,U32>,
+    rebuild: Net.ServerSocket -> State) -> IO(State & Bool):
+  Registry{sessions,_,_} = clients
+  do IO<State & Bool>:
+    closed : Net.ServerSocket & Bool <- close_connections(matching_connections(sessions,endpoint,selected),socket,False{})
+    return disconnect_state_pair(closed,rebuild)
+
+def remain_ended(result: State & Bool, id: U32, key: List<&2,U32>) -> State & Bool:
+  (state,found) = result
+  (Ended{state,id,key},found)
+
+def disconnect_state(state: State, endpoint: List<&2,U32>, connection: Maybe<&2,U32>) -> IO(State & Bool):
+  match state:
+    case Serving{socket,+clients}:
+      close_selected(socket,clients,endpoint,connection,next => Serving{next,clients})
+    case AwaitingAccess{socket,+clients,id,protocol,key}:
+      close_selected(socket,clients,endpoint,connection,next => AwaitingAccess{next,clients,id,protocol,key})
+    case Ended{rest,id,key}:
+      do IO<State & Bool>:
+        closed : State & Bool <- disconnect_state(rest,endpoint,connection)
+        return remain_ended(closed,id,key)
+
+def disconnected(result: State & Bool, access: Access.Control) -> Server & Bool:
+  (state,found) = result
+  (Relay{state,access},found)
+
+# Close one admitted session, or every admitted session for an endpoint.
+# The next steps process departures through the normal relay event loop.
+def disconnect(server: Server, endpoint: List<&2,U32>, connection: Maybe<&2,U32>) -> IO(Server & Bool):
+  Relay{state,access} = server
+  do IO<Server & Bool>:
+    result : State & Bool <- disconnect_state(state,endpoint,connection)
+    return disconnected(result,access)
+
 def reset_buckets(sessions: List<&2,Client>, +limits: Rate.Limits, +now: U32) -> List<&2,Client>:
   match sessions:
     case Nil{}:

@@ -322,6 +322,33 @@ def test_poll_partial(url: String) -> IO(Unit):
     IO.print("relay message pending")
     finish_poll(paused)
 
+def check_disconnect(reply: Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>>,
+    again: Client.Connection -> IO(Unit)) -> IO(Unit):
+  match reply:
+    case Fail{(_,"relay closed or WebSocket read failed")}:
+      IO.print("relay watcher disconnected")
+    case Fail{(code,message)}:
+      IO.die(Unit,code,message)
+    case Done{(conn,_)}:
+      again(conn)
+
+def wait_disconnect(fuel: Nat, conn: Client.Connection) -> IO(Unit):
+  match fuel:
+    case 0n:
+      do IO<Unit>:
+        Client.close(conn)
+        IO.die(Unit,1,"the relay did not close the watched connection")
+    case 1n+left:
+      do IO<Unit>:
+        reply : Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>> <- Client.try_receive(conn,200)
+        check_disconnect(reply,next => wait_disconnect(left,next))
+
+def watch_connection(url: String, seed: U32) -> IO(Unit):
+  do IO<Unit>:
+    conn : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,seed)))
+    IO.print("relay watcher ready")
+    wait_disconnect(64n,conn)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{url,Nil{}}}:
@@ -344,6 +371,10 @@ def run(args: List<String>) -> IO(Unit):
       test_poll(url)
     case Con{_,Con{url,Con{"poll-partial",Nil{}}}}:
       test_poll_partial(url)
+    case Con{_,Con{url,Con{"watch-a",Nil{}}}}:
+      watch_connection(url,42)
+    case Con{_,Con{url,Con{"watch-b",Nil{}}}}:
+      watch_connection(url,73)
     case Con{_,Con{url,Con{"bearer",Nil{}}}}:
       test_token(url,2,2,Some{"allow"})
     case Con{_,Con{url,Con{"bearer-denied",Nil{}}}}:

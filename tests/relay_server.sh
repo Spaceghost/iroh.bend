@@ -7,6 +7,7 @@ upstream=$3
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/iroh-bend-relay-server.XXXXXXXX")
 pid=
 rate_pid=
+disconnect_pids=
 stop() {
     if [ -n "$pid" ]; then
         kill "$pid" 2>/dev/null || :
@@ -19,6 +20,10 @@ finish() {
         kill "$rate_pid" 2>/dev/null || :
         wait "$rate_pid" 2>/dev/null || :
     fi
+    for watcher in $disconnect_pids; do
+        kill "$watcher" 2>/dev/null || :
+        wait "$watcher" 2>/dev/null || :
+    done
     stop
     printf 'Relay server logs in %s\n' "$scratch"
 }
@@ -127,6 +132,71 @@ exercise_live_rate() {
     stop
 }
 
+write_disconnect_command() {
+    printf '%s' "$1" > "$scratch/disconnect-command.next"
+    mv "$scratch/disconnect-command.next" "$scratch/disconnect-command"
+}
+
+watch_connection() {
+    label=$1
+    timeout 14 "$client" "$relay" "$2" > "$scratch/$label.log" 2>&1 &
+    watcher=$!
+    disconnect_pids="$disconnect_pids $watcher"
+    await_marker 'relay watcher ready' "$scratch/$label.log" "$watcher"
+}
+
+wait_disconnect() {
+    await_marker 'relay watcher disconnected' "$scratch/$1.log" "$2"
+    wait "$2"
+}
+
+exercise_disconnect() {
+    transport=$1
+    shift
+    write_disconnect_command hold
+    start "$transport-disconnect" disconnect "$scratch/disconnect-command" "$@"
+    relay="$transport://127.0.0.1:$port/relay?token=allow"
+    watch_connection standby watch-a
+    first_pid=$watcher
+    first_id=$(awk '/^admitted / { print $2; exit }' "$scratch/port")
+    watch_connection survivor watch-a
+    second_pid=$watcher
+    watch_connection active watch-a
+    third_pid=$watcher
+    watch_connection other watch-b
+    other_pid=$watcher
+
+    write_disconnect_command "wrong $first_id"
+    await_marker "disconnect missing wrong $first_id" "$scratch/port" "$pid"
+    kill -0 "$first_pid"
+    write_disconnect_command "one $first_id"
+    await_marker "disconnect applied one $first_id" "$scratch/port" "$pid"
+    wait_disconnect standby "$first_pid"
+    await_marker "closed $first_id" "$scratch/port" "$pid"
+    kill -0 "$second_pid" "$third_pid" "$other_pid"
+
+    write_disconnect_command all
+    await_marker 'disconnect applied all' "$scratch/port" "$pid"
+    wait_disconnect survivor "$second_pid"
+    wait_disconnect active "$third_pid"
+    kill -0 "$other_pid"
+
+    write_disconnect_command other
+    await_marker 'disconnect applied other' "$scratch/port" "$pid"
+    wait_disconnect other "$other_pid"
+    disconnect_pids=
+    for _ in $(seq 1 100); do
+        test "$(awk '/^closed / { n++ } END { print n+0 }' "$scratch/port")" -lt 4 || break
+        sleep 0.05
+    done
+    awk '/^admitted / { print $2 }' "$scratch/port" | sort > "$scratch/disconnect-admitted"
+    awk '/^closed / { print $2 }' "$scratch/port" | sort > "$scratch/disconnect-closed"
+    test "$(wc -l < "$scratch/disconnect-admitted")" -eq 4
+    cmp "$scratch/disconnect-admitted" "$scratch/disconnect-closed"
+    printf 'PASS %s connection-specific and whole-endpoint disconnect callbacks\n' "$transport"
+    stop
+}
+
 start ws
 python3 tests/relay_server_auth.py "$port"
 python3 tests/relay_client_poll.py "$client"
@@ -180,6 +250,9 @@ stop
 start wss-access access "$scratch/cert.pem" "$scratch/key.pem"
 exercise_access wss
 stop
+
+exercise_disconnect ws
+exercise_disconnect wss "$scratch/cert.pem" "$scratch/key.pem"
 
 start headers-ws headers
 python3 tests/relay_server_headers.py "$port" "$client"
