@@ -28,6 +28,10 @@ client requires a libcurl build with WebSocket support.
    ALPN, identity seeds, and echo payload in [tests/direct.bend](tests/direct.bend),
    and prints its bound address. Set `UPSTREAM_IPV6` to a peer fixture whose
    listener binds to `::1` to exercise Bend dialing upstream over IPv6.
+   Run `make check-quic-streams` for overlapping streams over IPv4 and IPv6.
+   Set `UPSTREAM_STREAMS` to an Iroh peer that implements the exchange in
+   [tests/quic_streams.bend](tests/quic_streams.bend) and accepts `listen`,
+   `listen6`, and `dial ADDRESS` for mixed-peer checks.
 4. Run `make check-relay-live RELAY_URL=ws://127.0.0.1:3340/relay` against
    an upstream `iroh-relay` in development mode on the loopback interface.
    Both relay protocol versions are exercised. For a local TLS relay, use a
@@ -46,10 +50,13 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   connection, negotiates v1/v2, and authenticates with an Ed25519 challenge
   response. It sends datagrams and reads relay frames. A caller receiving
   a relay ping sends the given payload back through `pong`.
-- [Direct QUIC](src/direct.bend) opens one IPv4 or IPv6 connection with one
-  bidirectional stream. It pins both peers to explicitly supplied Ed25519
-  keys, negotiates the caller's ALPN, and exchanges bounded binary messages.
-  Listener, stream, and relay connection values are affine.
+- [Direct QUIC](src/direct.bend) pins each peer to an explicitly supplied
+  Ed25519 key and negotiates the caller's ALPN over IPv4 or IPv6.
+  `quic_connect` and `quic_accept_connection` return persistent connections
+  with independently owned bidirectional and unidirectional streams. Stream
+  operations are nonblocking. Retry on `Wait` and call `quic_tick` while
+  otherwise idle. Queue and flush writes before sending FIN. The listener
+  transfers ownership to one accepted connection.
 - [Discovery](src/discovery.bend) looks up Iroh TXT attributes through an
   caller-supplied IPv4 DNS resolver. It validates the UDP source, transaction
   ID, and question, expands compressed DNS names, and retries truncated
@@ -81,9 +88,9 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
-| Ed25519 endpoint identity, ALPN, direct QUIC | One authenticated request/response stream with upstream Iroh over IPv4 and IPv6 in both directions |
+| Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The TLS-exporter shortcut and native relay server are pending. |
-| Public endpoint lifecycle and QUIC features | Concurrent streams, native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
+| Public endpoint lifecycle and QUIC features | Persistent direct connections support concurrent streams. Reusable listeners, native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish and resolve passed against the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. The upstream Iroh DNS fallback resolves the replicated Bend publication. IPv6 DHT routing and automatic republishing are pending. |
 | Connectivity | NAT traversal, automatic relay fallback, and path migration are pending. |

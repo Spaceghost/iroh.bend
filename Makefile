@@ -155,3 +155,21 @@ $(BUILD)/pkarr-dht.c: tests/pkarr_dht.bend tests/pkarr.bend $(PKARR_DHT_SOURCES)
 $(BUILD)/iroh-bend-pkarr-dht: $(BUILD)/pkarr-dht.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-quic-streams
+UPSTREAM_STREAMS ?=
+
+check-quic-streams: $(BUILD)/iroh-bend-quic-streams
+	tests/quic_streams.sh "$(BUILD)/iroh-bend-quic-streams" "$(UPSTREAM_STREAMS)"
+
+$(BUILD)/quic-streams.c: tests/quic_streams.bend tests/direct.bend src/direct.bend src/direct.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/quic-streams-stage/src" "$(BUILD)/quic-streams-stage/tests"
+	cp src/direct.bend "$(BUILD)/quic-streams-stage/src/"
+	cp tests/direct.bend tests/quic_streams.bend "$(BUILD)/quic-streams-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/direct.nelua \
+		"$(abspath $(BUILD)/quic-streams-stage/src/direct.c)"
+	cd "$(BUILD)/quic-streams-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_streams.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-streams: $(BUILD)/quic-streams.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)

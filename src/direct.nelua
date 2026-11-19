@@ -3,6 +3,7 @@
 ## pragmas.nogc = true
 ## cinclude '<arpa/inet.h>'
 ## cinclude '<openssl/ssl.h>'
+## cinclude '<openssl/err.h>'
 ## cinclude '<openssl/x509_vfy.h>'
 ## cinclude '<unistd.h>'
 ## cdefine 'iroh_sockaddr_in struct sockaddr_in'
@@ -15,7 +16,12 @@ require 'C.string'
 -- The compiler resolves CID() within the importing Bend module.
 ##[[
 for _, name in ipairs{'bind','accept','respond','close','abort','exchange',
-                      'BoundUdp','AcceptedStream','Con','Unit'} do
+                      'BoundUdp','AcceptedStream','Con','Unit',
+                      'quic_connect','quic_accept_connection','quic_open_stream','quic_accept_stream',
+                      'quic_read','quic_queue_write','quic_flush','quic_finish',
+                      'quic_drop_stream','quic_tick','quic_shutdown','quic_drop_connection',
+                      'LiveConnection','LiveStream','Ready','Wait',
+                      'Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_tag_%s CID(%s)\n#else\n#define iroh_tag_%s UINT32_MAX\n#endif',
     name, name, name, name))
@@ -31,6 +37,25 @@ local iroh_tag_BoundUdp: uint32 <cimport,nodecl>
 local iroh_tag_AcceptedStream: uint32 <cimport,nodecl>
 local iroh_tag_Con: uint32 <cimport,nodecl>
 local iroh_tag_Unit: uint32 <cimport,nodecl>
+
+local iroh_tag_quic_connect: uint32 <cimport,nodecl>
+local iroh_tag_quic_accept_connection: uint32 <cimport,nodecl>
+local iroh_tag_quic_open_stream: uint32 <cimport,nodecl>
+local iroh_tag_quic_accept_stream: uint32 <cimport,nodecl>
+local iroh_tag_quic_read: uint32 <cimport,nodecl>
+local iroh_tag_quic_queue_write: uint32 <cimport,nodecl>
+local iroh_tag_quic_flush: uint32 <cimport,nodecl>
+local iroh_tag_quic_finish: uint32 <cimport,nodecl>
+local iroh_tag_quic_drop_stream: uint32 <cimport,nodecl>
+local iroh_tag_quic_tick: uint32 <cimport,nodecl>
+local iroh_tag_quic_shutdown: uint32 <cimport,nodecl>
+local iroh_tag_quic_drop_connection: uint32 <cimport,nodecl>
+local iroh_tag_LiveConnection: uint32 <cimport,nodecl>
+local iroh_tag_LiveStream: uint32 <cimport,nodecl>
+local iroh_tag_Ready: uint32 <cimport,nodecl>
+local iroh_tag_Wait: uint32 <cimport,nodecl>
+local iroh_tag_Some: uint32 <cimport,nodecl>
+local iroh_tag_None: uint32 <cimport,nodecl>
 
 local Env <cimport,nodecl> = @record{mem: *[0]uint64}
 local IoWork <cimport,nodecl> = @record{data: cstring}
@@ -51,6 +76,10 @@ local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> e
 local function io_tup(e: Env, first: Term, second: Term): Term <cimport,nodecl> end
 local function term_pak(tag: uint64, value: uint64): Term <cimport,nodecl> end
 local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_tag(t: Term): uint64 <cimport,nodecl> end
+local function term_loc(t: Term): uint64 <cimport,nodecl> end
+local TAG_PAK: uint64 <cimport,nodecl>
+local TAG_CTR: uint64 <cimport,nodecl>
 local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
 
 local SSL <cimport,nodecl> = @record{}
@@ -71,6 +100,9 @@ local sockaddr_in6 <cimport,nodecl,codename 'iroh_sockaddr_in6'> = @record{
 local Address = @record{family: cint, v4: sockaddr_in, v6: sockaddr_in6}
 local socklen_t <cimport,nodecl> = @cuint
 local SSL_STREAM_RESET_ARGS <cimport,nodecl> = @record{quic_error_code: uint64}
+local SSL_CONN_CLOSE_INFO <cimport,nodecl> = @record{
+  error_code: uint64, frame_type: uint64, reason: cstring, reason_len: csize, flags: uint32
+}
 local SSL_SHUTDOWN_EX_ARGS <cimport,nodecl> = @record{quic_error_code: uint64, quic_reason: cstring}
 
 local AF_INET: cint <cimport,nodecl>
@@ -81,6 +113,13 @@ local SSL_VERIFY_PEER: cint <cimport,nodecl>
 local SSL_VERIFY_FAIL_IF_NO_PEER_CERT: cint <cimport,nodecl>
 local TLSEXT_cert_type_rpk: cuchar <cimport,nodecl>
 local SSL_DEFAULT_STREAM_MODE_NONE: uint32 <cimport,nodecl>
+local SSL_ERROR_WANT_READ: cint <cimport,nodecl>
+local SSL_ERROR_WANT_WRITE: cint <cimport,nodecl>
+local SSL_STREAM_FLAG_NO_BLOCK: uint64 <cimport,nodecl>
+local SSL_STREAM_FLAG_UNI: uint64 <cimport,nodecl>
+local SSL_ACCEPT_STREAM_NO_BLOCK: uint64 <cimport,nodecl>
+local SSL_SHUTDOWN_FLAG_NO_BLOCK: uint64 <cimport,nodecl>
+local SSL_STREAM_TYPE_WRITE: cint <cimport,nodecl>
 local SSL_ERROR_ZERO_RETURN: cint <cimport,nodecl>
 local OPENSSL_NPN_NEGOTIATED: cint <cimport,nodecl>
 local SSL_TLSEXT_ERR_ALERT_FATAL: cint <cimport,nodecl>
@@ -139,6 +178,12 @@ local function SSL_shutdown_ex(ssl: *SSL, flags: uint64, args: *SSL_SHUTDOWN_EX_
 local function SSL_stream_reset(ssl: *SSL, args: *SSL_STREAM_RESET_ARGS, n: csize): cint <cimport,nodecl> end
 local function SSL_set1_initial_peer_addr(ssl: *SSL, peer: *BIO_ADDR): cint <cimport,nodecl> end
 local function SSL_set_alpn_protos(ssl: *SSL, protos: *cuchar, size: cuint): cint <cimport,nodecl> end
+local function SSL_accept(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_set_blocking_mode(ssl: *SSL, blocking: cint): cint <cimport,nodecl> end
+local function SSL_get_stream_type(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_handle_events(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_get_conn_close_info(ssl: *SSL, info: *SSL_CONN_CLOSE_INFO, len: csize): cint <cimport,nodecl> end
+local function ERR_clear_error() <cimport,nodecl> end
 local function SSL_connect(ssl: *SSL): cint <cimport,nodecl> end
 local function BIO_ADDR_new(): *BIO_ADDR <cimport,nodecl> end
 local function BIO_ADDR_free(addr: *BIO_ADDR) <cimport,nodecl> end
@@ -149,7 +194,7 @@ local MAX_MESSAGE <comptime> = 1024 * 1024
 local Direct = @record{
   next: pointer, id: uint32, fd: cint, ctx: *SSL_CTX, listener: *SSL,
   conn: *SSL, stream: *SSL, expected: *EVP_PKEY, alpn: [256]cuchar,
-  alpn_len: cuint
+  alpn_len: cuint, refs: uint32, active: boolean, closing: boolean
 }
 
 -- Only the Bend event loop accesses the registry. Worker jobs exclusively own
@@ -165,12 +210,23 @@ local function keep(state: *Direct): uint32
   return state.id
 end
 
+-- Bend can keep the single U32 in the constructor term or materialize it
+-- in a heap field, depending on the caller's specialization.
+local function handle_id(e: Env, handle: Term, kind: uint32): uint32
+  if term_aux(handle) ~= kind then return 0 end
+  if term_tag(handle) == TAG_PAK then return (@uint32)(term_loc(handle)) end
+  if term_tag(handle) == TAG_CTR then return (@uint32)(e.mem[term_peek(e.mem,handle)]) end
+  return 0
+end
+
 local function take(e: Env, handle: Term, stream: boolean): *Direct
-  local id = (@uint32)(e.mem[term_peek(e.mem, handle)])
+  local tag = iroh_tag_BoundUdp
+  if stream then tag = iroh_tag_AcceptedStream end
+  local id = handle_id(e,handle,tag)
   local slot = &handles
   while $slot ~= nilptr do
     local state = (@*Direct)($slot)
-    if state.id == id and (state.stream ~= nilptr) == stream then
+    if state.id == id and not state.active and (state.stream ~= nilptr) == stream then
       $slot = state.next
       return state
     end
@@ -181,6 +237,8 @@ end
 
 local function release(state: *Direct)
   if state == nilptr then return end
+  state.refs = state.refs - 1
+  if state.refs ~= 0 then return end
   SSL_free(state.stream)
   SSL_free(state.conn)
   SSL_free(state.listener)
@@ -230,6 +288,7 @@ local function configure(secret: *cuchar, peer: *cuchar, alpn: *cuchar, alpn_len
   local state = (@*Direct)(C.calloc(1, #Direct))
   if state == nilptr then return nilptr end
   state.fd = -1
+  state.refs = 1
   local identity = EVP_PKEY_new_raw_private_key_ex(nilptr, 'ED25519', nilptr, secret, 32)
   defer EVP_PKEY_free(identity) end
   state.expected = EVP_PKEY_new_raw_public_key_ex(nilptr, 'ED25519', nilptr, peer, 32)
@@ -377,7 +436,7 @@ local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
     release(state)
     return io_fail(e, EOVERFLOW, 'QUIC handle space exhausted')
   end
-  return io_done(e, io_tup(e, io_box(e, iroh_tag_BoundUdp, id), ntohs(port_of(&addr))))
+  return io_done(e, io_tup(e, term_pak(iroh_tag_BoundUdp, id), ntohs(port_of(&addr))))
 end
 
 local function accept_call(work: *IoWork)
@@ -400,7 +459,7 @@ local function accept_pack(e: Env, work: *IoWork): Term
   local id = keep(job.state)
   if id == 0 then return io_fail(e, EOVERFLOW, 'QUIC handle space exhausted') end
   job.state = nilptr
-  return io_done(e, io_tup(e, io_box(e, iroh_tag_AcceptedStream, id),
+  return io_done(e, io_tup(e, term_pak(iroh_tag_AcceptedStream, id),
     io_list(e, (@cstring)(job.recv), job.recv_len)))
 end
 local function accept_run(e: Env, f: *[0]Term, work: *IoWork): Term
@@ -462,8 +521,7 @@ local function abort_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_work(work, abort_call, finish_pack)
 end
 
-local function exchange_call(work: *IoWork)
-  local job = (@*Job)(work.data)
+local function dial_connection(job: *Job): boolean
   local state = job.state
   local peer = BIO_ADDR_new()
   defer BIO_ADDR_free(peer) end
@@ -476,8 +534,14 @@ local function exchange_call(work: *IoWork)
       SSL_set_default_stream_mode(state.conn, SSL_DEFAULT_STREAM_MODE_NONE) ~= 1 or
       SSL_connect(state.conn) ~= 1 or SSL_get0_peer_rpk(state.conn) == nilptr then
     job.err = 'QUIC dial or peer authentication failed'
-    return
+    return false
   end
+  return true
+end
+local function exchange_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  if not dial_connection(job) then return end
+  local state = job.state
   state.stream = SSL_new_stream(state.conn, 0)
   if state.stream == nilptr or not write(state.stream, (@*[0]cuchar)(job.send), job.send_len) then
     job.err = 'QUIC request write failed'
@@ -510,6 +574,277 @@ local function exchange_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_work(work, exchange_call, exchange_pack)
 end
 
+-- Connections and their independent streams are owned by the event loop
+-- after the worker finishes authenticating. No SSL object is shared with
+-- a worker after the connection handle has been published.
+local Stream = @record{
+  next: pointer, id: uint32, state: *Direct, ssl: *SSL,
+  pending: *cuchar, length: csize, offset: csize, finished: boolean
+}
+local streams: pointer
+
+local function active_slot(e: Env, handle: Term): *pointer
+  local id = handle_id(e,handle,iroh_tag_LiveConnection)
+  local slot = &handles
+  while $slot ~= nilptr do
+    local state = (@*Direct)($slot)
+    if state.id == id and state.active then return slot end
+    slot = &state.next
+  end
+  return nilptr
+end
+
+local function stream_slot(e: Env, handle: Term): *pointer
+  local id = handle_id(e,handle,iroh_tag_LiveStream)
+  local slot = &streams
+  while $slot ~= nilptr do
+    local stream = (@*Stream)($slot)
+    if stream.id == id then return slot end
+    slot = &stream.next
+  end
+  return nilptr
+end
+
+local function connection(e: Env, handle: Term): *Direct
+  local slot = active_slot(e,handle)
+  if slot == nilptr then return nilptr end
+  return (@*Direct)($slot)
+end
+
+local function io_stream(e: Env, handle: Term): *Stream
+  local slot = stream_slot(e,handle)
+  if slot == nilptr then return nilptr end
+  return (@*Stream)($slot)
+end
+
+local function unit(): Term
+  return term_pak(iroh_tag_Unit,0)
+end
+local function ready(e: Env, owner: Term, value: Term): Term
+  return io_tup(e,owner,io_box(e,iroh_tag_Ready,value))
+end
+local function wait(e: Env, owner: Term): Term
+  return io_tup(e,owner,io_box(e,iroh_tag_Wait,unit()))
+end
+local function ready_error(e: Env, owner: Term, message: cstring): Term
+  return ready(e,owner,io_fail(e,EIO,message))
+end
+local function retryable(ssl: *SSL, result: cint): boolean
+  local code = SSL_get_error(ssl,result)
+  return code == SSL_ERROR_WANT_READ or code == SSL_ERROR_WANT_WRITE
+end
+
+local function activate(job: *Job)
+  if SSL_set_blocking_mode(job.state.conn,0) ~= 1 then
+    job.err = 'cannot set QUIC nonblocking mode'
+    return
+  end
+  job.state.active = true
+end
+local function connect_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  if dial_connection(job) then activate(job) end
+end
+local function accept_connection_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local state = job.state
+  state.conn = SSL_accept_connection(state.listener,0)
+  if state.conn == nilptr or SSL_set_default_stream_mode(state.conn,SSL_DEFAULT_STREAM_MODE_NONE) ~= 1 or
+      SSL_accept(state.conn) ~= 1 or SSL_get0_peer_rpk(state.conn) == nilptr then
+    job.err = 'QUIC accept or peer authentication failed'
+    return
+  end
+  activate(job)
+end
+local function connection_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
+  local id = keep(job.state)
+  if id == 0 then return io_fail(e,EOVERFLOW,'QUIC handle space exhausted') end
+  job.state = nilptr
+  return io_done(e,term_pak(iroh_tag_LiveConnection,id))
+end
+local function connect_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local addr: Address = {}
+  if f[1] == 0 or not address(e,f[0],(@uint32)(f[1]),&addr) then
+    return io_fail(e,EINVAL,'invalid QUIC remote address')
+  end
+  local state = new(e,f,false)
+  if state == nilptr then return io_fail(e,EINVAL,'invalid QUIC client identity or ALPN') end
+  local job = make_job(state,0)
+  job.addr = addr
+  work.data = (@cstring)(job)
+  return io_work(work,connect_call,connection_pack)
+end
+local function accept_connection_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = take(e,f[0],false)
+  if state == nilptr then return io_fail(e,EINVAL,'invalid QUIC listener') end
+  work.data = (@cstring)(make_job(state,0))
+  return io_work(work,accept_connection_call,connection_pack)
+end
+
+local function keep_stream(e: Env, conn: Term, state: *Direct, ssl: *SSL): Term
+  if ssl == nilptr then
+    local info: SSL_CONN_CLOSE_INFO
+    if SSL_get_conn_close_info(state.conn,&info,#SSL_CONN_CLOSE_INFO) > 0 then
+      return ready_error(e,conn,'QUIC connection closed')
+    end
+    return wait(e,conn)
+  end
+  if next_id == 0 then
+    SSL_free(ssl)
+    return ready_error(e,conn,'QUIC handle space exhausted')
+  end
+  local stream = (@*Stream)(io_mem(C.calloc(1,#Stream)))
+  stream.id = next_id
+  next_id = next_id + 1
+  stream.state = state
+  stream.ssl = ssl
+  stream.next = streams
+  streams = stream
+  state.refs = state.refs + 1
+  return ready(e,conn,io_done(e,term_pak(iroh_tag_LiveStream,stream.id)))
+end
+
+local function open_stream_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = connection(e,f[0])
+  if state == nilptr or state.closing or f[1] > 1 then
+    return ready_error(e,f[0],'invalid QUIC connection or stream direction')
+  end
+  local flags = SSL_STREAM_FLAG_NO_BLOCK
+  if f[1] == 1 then flags = flags | SSL_STREAM_FLAG_UNI end
+  ERR_clear_error()
+  if SSL_handle_events(state.conn) ~= 1 then return ready_error(e,f[0],'QUIC connection event processing failed') end
+  return keep_stream(e,f[0],state,SSL_new_stream(state.conn,flags))
+end
+local function accept_stream_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = connection(e,f[0])
+  if state == nilptr or state.closing then return ready_error(e,f[0],'invalid QUIC connection') end
+  ERR_clear_error()
+  if SSL_handle_events(state.conn) ~= 1 then return ready_error(e,f[0],'QUIC connection event processing failed') end
+  return keep_stream(e,f[0],state,SSL_accept_stream(state.conn,SSL_ACCEPT_STREAM_NO_BLOCK))
+end
+
+local function read_stream_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local stream = io_stream(e,f[0])
+  if stream == nilptr or stream.state.closing or f[1] < 1 or f[1] > MAX_MESSAGE then
+    return ready_error(e,f[0],'invalid QUIC stream or receive limit')
+  end
+  local buffer = (@cstring)(io_mem(C.malloc((@csize)(f[1]))))
+  defer C.free(buffer) end
+  local got: csize
+  ERR_clear_error()
+  local result = SSL_read_ex(stream.ssl,buffer,(@csize)(f[1]),&got)
+  if result == 1 then
+    return ready(e,f[0],io_done(e,io_box(e,iroh_tag_Some,io_list(e,buffer,got))))
+  end
+  local code = SSL_get_error(stream.ssl,result)
+  if code == SSL_ERROR_ZERO_RETURN then
+    return ready(e,f[0],io_done(e,term_pak(iroh_tag_None,0)))
+  end
+  if code == SSL_ERROR_WANT_READ or code == SSL_ERROR_WANT_WRITE then return wait(e,f[0]) end
+  return ready_error(e,f[0],'QUIC stream read failed')
+end
+local function writable(stream: *Stream): boolean
+  return stream ~= nilptr and not stream.state.closing and not stream.finished and
+    (SSL_get_stream_type(stream.ssl) & SSL_STREAM_TYPE_WRITE) ~= 0
+end
+
+local function queue_write_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local stream = io_stream(e,f[0])
+  if not writable(stream) or stream.pending ~= nilptr then
+    return io_tup(e,f[0],io_fail(e,EINVAL,'QUIC stream cannot queue a write'))
+  end
+  if not bytes(e,f[1],MAX_MESSAGE,&stream.pending,&stream.length) then
+    return io_tup(e,f[0],io_fail(e,EINVAL,'invalid or oversized QUIC stream write'))
+  end
+  return io_tup(e,f[0],io_done(e,unit()))
+end
+local function clear_write(stream: *Stream)
+  C.free(stream.pending)
+  stream.pending = nilptr
+  stream.length = 0
+  stream.offset = 0
+end
+local function flush_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local stream = io_stream(e,f[0])
+  if not writable(stream) then return ready_error(e,f[0],'QUIC stream cannot write') end
+  if stream.offset == stream.length then
+    clear_write(stream)
+    return ready(e,f[0],io_done(e,unit()))
+  end
+  local count = stream.length - stream.offset
+  if count > 16384 then count = 16384 end
+  local buf = (@*[0]cuchar)(stream.pending)
+  local wrote: csize
+  ERR_clear_error()
+  local result = SSL_write_ex(stream.ssl,&buf[stream.offset],count,&wrote)
+  if result ~= 1 then
+    if retryable(stream.ssl,result) then return wait(e,f[0]) end
+    clear_write(stream)
+    return ready_error(e,f[0],'QUIC stream write failed')
+  end
+  if wrote == 0 or wrote > count then
+    clear_write(stream)
+    return ready_error(e,f[0],'QUIC write made invalid progress')
+  end
+  stream.offset = stream.offset + wrote
+  if stream.offset ~= stream.length then return wait(e,f[0]) end
+  clear_write(stream)
+  return ready(e,f[0],io_done(e,unit()))
+end
+local function finish_stream_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local stream = io_stream(e,f[0])
+  if not writable(stream) or stream.pending ~= nilptr or SSL_stream_conclude(stream.ssl,0) ~= 1 then
+    return io_tup(e,f[0],io_fail(e,EINVAL,'QUIC stream cannot send FIN'))
+  end
+  stream.finished = true
+  return io_tup(e,f[0],io_done(e,unit()))
+end
+local function drop_stream_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local slot = stream_slot(e,f[0])
+  if slot ~= nilptr then
+    local stream = (@*Stream)($slot)
+    $slot = stream.next
+    clear_write(stream)
+    SSL_free(stream.ssl)
+    release(stream.state)
+    C.free(stream)
+  end
+  return unit()
+end
+
+local function tick_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = connection(e,f[0])
+  if state == nilptr or SSL_handle_events(state.conn) ~= 1 then
+    return io_tup(e,f[0],io_fail(e,EIO,'QUIC connection event processing failed'))
+  end
+  return io_tup(e,f[0],io_done(e,unit()))
+end
+local function shutdown_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = connection(e,f[0])
+  if state == nilptr then return ready_error(e,f[0],'invalid QUIC connection') end
+  state.closing = true
+  local result = SSL_shutdown_ex(state.conn,SSL_SHUTDOWN_FLAG_NO_BLOCK,nilptr,0)
+  if result < 0 then return ready_error(e,f[0],'QUIC shutdown failed') end
+  if result == 0 then return wait(e,f[0]) end
+  return ready(e,f[0],io_done(e,unit()))
+end
+local function drop_connection_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local slot = active_slot(e,f[0])
+  if slot ~= nilptr then
+    local state = (@*Direct)($slot)
+    $slot = state.next
+    if not state.closing then
+      state.closing = true
+      SSL_shutdown_ex(state.conn,SSL_SHUTDOWN_FLAG_NO_BLOCK,nilptr,0)
+    end
+    release(state)
+  end
+  return unit()
+end
+
 local function register() <cexport,codename 'iroh_register_direct',cattribute 'constructor'>
   if iroh_tag_bind ~= 0xffffffff then io_eff(iroh_tag_bind, bind_run) end
   if iroh_tag_accept ~= 0xffffffff then io_eff(iroh_tag_accept, accept_run) end
@@ -517,4 +852,16 @@ local function register() <cexport,codename 'iroh_register_direct',cattribute 'c
   if iroh_tag_close ~= 0xffffffff then io_eff(iroh_tag_close, close_run) end
   if iroh_tag_abort ~= 0xffffffff then io_eff(iroh_tag_abort, abort_run) end
   if iroh_tag_exchange ~= 0xffffffff then io_eff(iroh_tag_exchange, exchange_run) end
+  if iroh_tag_quic_connect ~= 0xffffffff then io_eff(iroh_tag_quic_connect,connect_run) end
+  if iroh_tag_quic_accept_connection ~= 0xffffffff then io_eff(iroh_tag_quic_accept_connection,accept_connection_run) end
+  if iroh_tag_quic_open_stream ~= 0xffffffff then io_eff(iroh_tag_quic_open_stream,open_stream_run) end
+  if iroh_tag_quic_accept_stream ~= 0xffffffff then io_eff(iroh_tag_quic_accept_stream,accept_stream_run) end
+  if iroh_tag_quic_read ~= 0xffffffff then io_eff(iroh_tag_quic_read,read_stream_run) end
+  if iroh_tag_quic_queue_write ~= 0xffffffff then io_eff(iroh_tag_quic_queue_write,queue_write_run) end
+  if iroh_tag_quic_flush ~= 0xffffffff then io_eff(iroh_tag_quic_flush,flush_run) end
+  if iroh_tag_quic_finish ~= 0xffffffff then io_eff(iroh_tag_quic_finish,finish_stream_run) end
+  if iroh_tag_quic_drop_stream ~= 0xffffffff then io_eff(iroh_tag_quic_drop_stream,drop_stream_run) end
+  if iroh_tag_quic_tick ~= 0xffffffff then io_eff(iroh_tag_quic_tick,tick_run) end
+  if iroh_tag_quic_shutdown ~= 0xffffffff then io_eff(iroh_tag_quic_shutdown,shutdown_run) end
+  if iroh_tag_quic_drop_connection ~= 0xffffffff then io_eff(iroh_tag_quic_drop_connection,drop_connection_run) end
 end
