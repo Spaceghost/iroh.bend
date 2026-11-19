@@ -4,6 +4,8 @@ set -eu
 native=$1
 url=$2
 upstream=${3:-}
+pkarr_url=${4:-}
+dns_port=${5:-}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/iroh-bend-relay-quic.XXXXXXXX")
 listener=
 finish() {
@@ -29,7 +31,7 @@ check() {
         cat "$scratch/$3.listener" >&2
         return 1
     fi
-    timeout 12 "$2" "${4:-dial}" "$url"
+    timeout 12 "$2" "${4:-dial}" "${5:-$url}"
     if ! wait "$listener"; then
         cat "$scratch/$3.listener" >&2
         return 1
@@ -38,8 +40,10 @@ check() {
     printf 'PASS %s QUIC stream over the relay\n' "$3"
 }
 
+"$native" endpoint-plan
 check "$native" "$native" bend-to-bend
 check "$native" "$native" fallback dial-fallback
+check "$native" "$native" pkarr dial-pkarr
 timeout 20 "$native" listen-direct > "$scratch/direct.port" 2> "$scratch/direct.listener" &
 listener=$!
 for _ in $(seq 1 100); do
@@ -58,4 +62,8 @@ timeout 6 "$native" dial-unreachable "$url"
 if [ -n "$upstream" ]; then
     check "$upstream" "$native" bend-to-iroh
     check "$native" "$upstream" iroh-to-bend
+fi
+if [ -n "$pkarr_url" ] && [ -n "$dns_port" ]; then
+    timeout 10 "$native" publish-route "$pkarr_url" "$url"
+    check "$native" "$native" dns dial-dns "$dns_port"
 fi

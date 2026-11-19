@@ -101,11 +101,12 @@ $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
 
 .PHONY: check-relay-quic
 UPSTREAM_RELAY_QUIC ?=
-RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend
-RELAY_QUIC_EFFECTS = ed25519 relay_socket direct relay_quic
+DISCOVERY_DNS_PORT ?=
+RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/endpoint.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
+RELAY_QUIC_EFFECTS = ed25519 relay_socket direct relay_quic pkarr_http pkarr_publisher
 
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic
-	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)"
+	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)" "$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)"
 
 $(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend tests/quic_streams.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/relay-quic-stage/src" "$(BUILD)/relay-quic-stage/tests"

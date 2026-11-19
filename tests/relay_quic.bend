@@ -1,5 +1,10 @@
 import Base
 import ../src/direct.bend as Direct
+import ../src/discovery.bend as Dns
+import ../src/endpoint.bend as Endpoint
+import ../src/pkarr.bend as Pkarr
+import ../src/pkarr_http.bend as Http
+import ../src/pkarr_publisher.bend as Publisher
 import ../src/relay_quic.bend as Path
 import ./direct.bend as Fixture
 import ./quic_streams.bend as Stream
@@ -61,7 +66,7 @@ def verified_route(connected: Direct.QuicConnection & Maybe<&1,Path.Bridge>, rel
       do IO<Unit>:
         verify_stream(conn)
         IO.try(Unit,Path.stop(bridge))
-        IO.print("PASS QUIC fallback selected the relay after the direct deadline")
+        IO.print("PASS QUIC used the selected relay path")
     case (conn,None{}) False{}:
       do IO<Unit>:
         verify_stream(conn)
@@ -99,6 +104,7 @@ def silent_path(bound: Socket & Result<&1,&1,U32 & String,U32>, url: String) -> 
         Socket.close(socket)
         check_deadline(Nat.is_ge(Nat.sub(after,before),200n))
         result_route(result,True{})
+        IO.print("PASS QUIC fallback followed the direct deadline")
     case (socket,Fail{(code,message)}):
       do IO<Unit>:
         Socket.close(socket)
@@ -146,6 +152,68 @@ def expect_unreachable(url: String) -> IO(Unit):
     port : Socket & Result<&1,&1,U32 & String,U32> <- Path.relay_loopback_port(socket)
     silent_relay(port,url)
 
+def peer_identity() -> Endpoint.Identity:
+  Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.listener_public(),Fixture.alpn()}
+
+def endpoint_timeouts() -> Endpoint.Timeouts:
+  Endpoint.HandshakeTimeouts{160,6000}
+
+def route_fixture_result(correct: Bool) -> IO(Unit):
+  match correct:
+    case True{}:
+      IO.print("PASS endpoint address parsing and upstream relative relay URLs")
+    case False{}:
+      IO.die(Unit,1,"endpoint routes differ from the address and relay fixtures")
+
+def route_plan(plan: Endpoint.Routes) -> IO(Unit):
+  match plan:
+    case Endpoint.DialRoutes{[Endpoint.IpAddress{ip4,9000},Endpoint.IpAddress{ip6,7777}],[base,prefix,replaced]}:
+      route_fixture_result(String.eq(ip4,"192.0.2.8") && String.eq(ip6,"2001:db8::42") &&
+        String.eq(base,"wss://example.com/relay") && String.eq(prefix,"wss://example.com/prefix/relay") &&
+        String.eq(replaced,"ws://[::1]:8000/a/relay"))
+    case _:
+      route_fixture_result(False{})
+
+def plan_routes() -> IO(Unit):
+  route_plan(Endpoint.routes([
+    Dns.Address{Dns.keyword("192.0.2.8:9000")},
+    Dns.Address{Dns.keyword("[2001:db8::42]:7777")},
+    Dns.Address{Dns.keyword("127.0.0.1:65536")},
+    Dns.Address{Dns.keyword("2001:db8::1:7755")},
+    Dns.RelayUrl{Dns.keyword("https://example.com")},
+    Dns.RelayUrl{Dns.keyword("https://example.com/prefix/")},
+    Dns.RelayUrl{Dns.keyword("http://[::1]:8000/a/previous?discard=1#fragment")},
+    Dns.RelayUrl{Dns.keyword("ftp://example.com/")},
+    Dns.UserData{Dns.keyword("app metadata")}
+  ]))
+
+def signed_routes(url: String) -> IO(List<&2,U32>):
+  do IO<List<&2,U32>>:
+    stamp : List<&2,U32> <- IO.try(List<&2,U32>,Publisher.pkarr_timestamp())
+    IO.try(List<&2,U32>,Pkarr.sign(List.replicate(U32,32n,42),Fixture.listener_public(),stamp,
+      [Dns.Address{Dns.keyword("127.0.0.1:0")},Dns.RelayUrl{Dns.keyword(url)}],30))
+
+def publish_route(pkarr_url: String, relay_url: String) -> IO(Unit):
+  do IO<Unit>:
+    signed : List<&2,U32> <- signed_routes(relay_url)
+    IO.try(Unit,Http.publish(pkarr_url,Fixture.listener_public(),signed,1500))
+
+def dial_pkarr(url: String) -> IO(Unit):
+  do IO<Unit>:
+    signed : List<&2,U32> <- signed_routes(url)
+    outcome : Endpoint.Outcome() <- Endpoint.verify_and_dial(peer_identity(),signed,endpoint_timeouts())
+    result_route(outcome,True{})
+
+def dial_dns(port: Maybe<&2,U32>) -> IO(Unit):
+  match port:
+    case Some{n}:
+      do IO<Unit>:
+        outcome : Endpoint.Outcome() <- Endpoint.lookup_and_dial(peer_identity(),
+          Endpoint.DnsResolver{"irohdns.example","127.0.0.1",n,1200},endpoint_timeouts())
+        result_route(outcome,True{})
+    case None{}:
+      IO.die(Unit,2,"expected the DNS server port")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{"listen",Con{url,Nil{}}}}:
@@ -160,6 +228,14 @@ def run(args: List<String>) -> IO(Unit):
       expect_direct(U32.read(port))
     case Con{_,Con{"dial-unreachable",Con{url,Nil{}}}}:
       expect_unreachable(url)
+    case Con{_,Con{"endpoint-plan",Nil{}}}:
+      plan_routes()
+    case Con{_,Con{"dial-pkarr",Con{url,Nil{}}}}:
+      dial_pkarr(url)
+    case Con{_,Con{"dial-dns",Con{port,Nil{}}}}:
+      dial_dns(U32.read(port))
+    case Con{_,Con{"publish-route",Con{pkarr_url,Con{relay_url,Nil{}}}}}:
+      publish_route(pkarr_url,relay_url)
     case _:
       IO.die(Unit,2,"usage: relay-quic-check listen|dial relay-url")
 
