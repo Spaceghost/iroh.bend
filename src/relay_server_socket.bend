@@ -7,6 +7,7 @@ type SocketEvent is Data:
   RelayIdle{}
   RelayJoined{id: U32, version: U32}
   RelayBytes{id: U32, bytes: List<&2,U32>}
+  RelayBufferedBytes{id: U32, bytes: List<&2,U32>}
   RelayLeft{id: U32}
 
 type RequestFields is Data:
@@ -38,6 +39,9 @@ def relay_authorized_with_meter(server: ServerSocket, id: U32, metered: Bool) ->
   import "./relay_server_socket.c"
 
 def relay_resume_rx(server: ServerSocket, id: U32) -> IO(ServerSocket):
+  import "./relay_server_socket.c"
+
+def relay_reconfigure_rx(server: ServerSocket, metered: Bool) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 
 # flush=1 closes after queued frames have been written.

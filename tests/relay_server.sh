@@ -6,6 +6,7 @@ client=$2
 upstream=$3
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/iroh-bend-relay-server.XXXXXXXX")
 pid=
+rate_pid=
 stop() {
     if [ -n "$pid" ]; then
         kill "$pid" 2>/dev/null || :
@@ -14,6 +15,10 @@ stop() {
     fi
 }
 finish() {
+    if [ -n "$rate_pid" ]; then
+        kill "$rate_pid" 2>/dev/null || :
+        wait "$rate_pid" 2>/dev/null || :
+    fi
     stop
     printf 'Relay server logs in %s\n' "$scratch"
 }
@@ -80,6 +85,48 @@ exercise_access() {
     printf 'PASS %s access policy, token precedence, denial reasons, and per-session close callbacks\n' "$1"
 }
 
+await_marker() {
+    for _ in $(seq 1 100); do
+        grep -Fxq "$1" "$2" && return 0
+        kill -0 "$3" 2>/dev/null || break
+        sleep 0.05
+    done
+    cat "$2" >&2
+    return 1
+}
+
+write_rate_command() {
+    printf '%s' "$1" > "$scratch/rate-command.next"
+    mv "$scratch/rate-command.next" "$scratch/rate-command"
+}
+
+exercise_live_rate() {
+    transport=$1
+    update=$2
+    shift 2
+    write_rate_command hold
+    start "$transport-live-rate" live-rate "$scratch/rate-command" "$@"
+    timeout 10 "$client" "$transport://127.0.0.1:$port/relay" live-rate > "$scratch/live-rate-client.log" 2>&1 &
+    rate_pid=$!
+    await_marker 'rate paused' "$scratch/live-rate-client.log" "$rate_pid"
+    write_rate_command invalid
+    await_marker 'rate rejected invalid' "$scratch/port" "$pid"
+    sleep 0.3
+    if grep -Fxq 'rate resumed' "$scratch/live-rate-client.log"; then
+        printf 'Invalid rate update released a throttled connection\n' >&2
+        return 1
+    fi
+    write_rate_command "$update"
+    await_marker "rate applied $update" "$scratch/port" "$pid"
+    if ! wait "$rate_pid"; then
+        cat "$scratch/live-rate-client.log" >&2
+        return 1
+    fi
+    rate_pid=
+    grep -Fx 'PASS live receive limit changed on existing connections' "$scratch/live-rate-client.log"
+    stop
+}
+
 start ws
 python3 tests/relay_server_auth.py "$port"
 exercise ws
@@ -139,3 +186,7 @@ stop
 start rate-wss rate "$scratch/cert.pem" "$scratch/key.pem"
 timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate
 timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate-paced
+stop
+
+exercise_live_rate ws unlimited
+exercise_live_rate wss replace "$scratch/cert.pem" "$scratch/key.pem"

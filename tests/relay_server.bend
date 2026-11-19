@@ -32,6 +32,74 @@ def serve_limited(cert: String, key: String) -> IO(Unit):
       Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{200,Some{20}}))
     run_server(bound)
 
+def read_command_result(result: File & Result<&1,&1,U32 & String,String>) -> IO(String):
+  (file,value) = result
+  do IO<String>:
+    File.close(file)
+    return Result.default(&1,&1,U32 & String,String,value,"")
+
+def read_command(opened: Result<&1,&1,U32 & String,File>) -> IO(String):
+  match opened:
+    case Done{file}:
+      do IO<String>:
+        value : File & Result<&1,&1,U32 & String,String> <- File.read(file,16)
+        read_command_result(value)
+    case Fail{_}:
+      IO.pure(String,"")
+
+def report_update(result: Relay.Server & Result<&1,&1,U32 & String,Unit>, command: String) -> IO(Relay.Server):
+  match result:
+    case (server,Done{_}):
+      do IO<Relay.Server>:
+        IO.print("rate applied " ++ command)
+        return server
+    case (server,Fail{_}):
+      do IO<Relay.Server>:
+        IO.print("rate rejected " ++ command)
+        return server
+
+def change_rate(server: Relay.Server, +command: String, limits: Rate.Limits) -> IO(Relay.Server):
+  do IO<Relay.Server>:
+    result : Relay.Server & Result<&1,&1,U32 & String,Unit> <- Relay.set_client_rate_limit(server,limits)
+    report_update(result,command)
+
+def update_rate(server: Relay.Server, command: String, unchanged: Bool) -> IO(Relay.Server):
+  match command unchanged:
+    case "unlimited" False{}:
+      change_rate(server,"unlimited",Rate.Unlimited{})
+    case "invalid" False{}:
+      change_rate(server,"invalid",Rate.ReceiveLimit{9,None{}})
+    case "replace" False{}:
+      change_rate(server,"replace",Rate.ReceiveLimit{1000000,None{}})
+    case _ _:
+      IO.pure(Relay.Server,server)
+
+def drive_live(fuel: Nat, +path: String, previous: String, server: Relay.Server) -> IO(Unit):
+  match fuel:
+    case 1n+left:
+      do IO<Unit>:
+        opened : Result<&1,&1,U32 & String,File> <- File.open(path,"r")
+        IO.bind(String,Unit,read_command(opened),+command =>
+          do IO<Unit>:
+            updated : Relay.Server <- update_rate(server,command,String.eq(command,previous))
+            next : Relay.Server <- Relay.step(updated)
+            IO.sleep(5)
+            drive_live(left,path,command,next))
+    case 0n:
+      Relay.stop(server)
+
+def run_live(bound: Relay.Server & U32, path: String) -> IO(Unit):
+  (server,port) = bound
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    drive_live(10000n,path,"",server)
+
+def serve_live(cert: String, key: String, path: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
+      Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{10,Some{1}}))
+    run_live(bound,path)
+
 def relay_path(path: List<&2,U32>) -> Bool:
   match path:
     case [47,114,101,108,97,121]:
@@ -106,6 +174,10 @@ def run(args: List<String>) -> IO(Unit):
       serve_limited("","")
     case Con{_,Con{"rate",Con{cert,Con{key,Nil{}}}}}:
       serve_limited(cert,key)
+    case Con{_,Con{"live-rate",Con{path,Nil{}}}}:
+      serve_live("","",path)
+    case Con{_,Con{"live-rate",Con{path,Con{cert,Con{key,Nil{}}}}}}:
+      serve_live(cert,key,path)
     case Con{_,Con{"policy-test",Nil{}}}:
       policy_test()
     case Con{_,Con{"access",Con{cert,Con{key,Nil{}}}}}:

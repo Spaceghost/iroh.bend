@@ -6,7 +6,7 @@ type Limits is Data:
   ReceiveLimit{bytes_per_second: U32, burst_bytes: Maybe<&2,U32>}
 
 type Bucket is Data:
-  Unmetered{}
+  Unmetered{notified: Bool}
   Reading{fill: U32, capacity: U32, refill: U32, last: U32, notified: Bool}
   Paused{fill: U32, capacity: U32, refill: U32, resume_at: U32}
 
@@ -28,16 +28,31 @@ def valid(limits: Limits) -> Bool:
     case ReceiveLimit{+rate,burst}:
       U32.is_ge(rate,10) && U32.is_gt(capacity(burst,U32.div(rate,10)),0)
 
-def initial_bucket(+max: U32, refill: U32, now: U32) -> Bucket:
-  Reading{max,max,refill,now,False{}}
+def initial_bucket(+max: U32, refill: U32, now: U32, notified: Bool) -> Bucket:
+  Reading{max,max,refill,now,notified}
 
-def initial(limits: Limits, now: U32) -> Bucket:
+def reset(limits: Limits, now: U32, notified: Bool) -> Bucket:
   match limits:
     case Unlimited{}:
-      Unmetered{}
+      Unmetered{notified}
     case ReceiveLimit{rate,burst}:
       +refill = U32.div(rate,10)
-      initial_bucket(capacity(burst,refill),refill,now)
+      initial_bucket(capacity(burst,refill),refill,now,notified)
+
+def initial(limits: Limits, now: U32) -> Bucket:
+  reset(limits,now,False{})
+
+def was_notified(bucket: Bucket) -> Bool:
+  match bucket:
+    case Unmetered{notified}:
+      notified
+    case Reading{_,_,_,_,notified}:
+      notified
+    case Paused{_,_,_,_}:
+      True{}
+
+def reconfigure(limits: Limits, now: U32, previous: Bucket) -> Bucket:
+  reset(limits,now,was_notified(previous))
 
 def metered(limits: Limits) -> Bool:
   match limits:
@@ -77,8 +92,8 @@ def refill_and_charge(fill: U32, +max: U32, +refill: U32, +last: U32, now: U32, 
 
 def consume(bucket: Bucket, now: U32, bytes: U32) -> Charge:
   match bucket:
-    case Unmetered{}:
-      KeepReading{Unmetered{}}
+    case Unmetered{notified}:
+      KeepReading{Unmetered{notified}}
     case Reading{fill,max,refill,last,notified}:
       refill_and_charge(fill,max,refill,last,now,bytes,notified)
     case Paused{fill,max,refill,next}:

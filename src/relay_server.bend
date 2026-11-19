@@ -559,21 +559,23 @@ def charge_message(socket: Net.ServerSocket, clients: Clients, id: U32, +version
     sender: List<&2,U32>, timer: Health.Heartbeat, +now: U32, +bytes: List<&2,U32>, bucket: Rate.Bucket)
     -> IO(State):
   match bucket:
-    case Rate.Unmetered{}:
+    case Rate.Unmetered{notified}:
       authenticated_frame(socket,clients,id,version,sender,timer,now,
-        Wire.decode(Wire.ToRelay{},version,bytes),Rate.Unmetered{})
+        Wire.decode(Wire.ToRelay{},version,bytes),Rate.Unmetered{notified})
     case _:
       metered_frame(socket,clients,id,version,sender,timer,now,bytes,
         Rate.consume(bucket,now,U32.from_nat(List.length(&2,U32,bytes))))
 
 def handle_bytes(socket: Net.ServerSocket, clients: Clients, match_client: Maybe<&2,Client>,
-    bytes: List<&2,U32>, now: U32) -> IO(State):
-  match match_client:
-    case Some{Challenged{id,version,nonce}}:
+    bytes: List<&2,U32>, now: U32, charge: Bool) -> IO(State):
+  match match_client charge:
+    case Some{Challenged{id,version,nonce}} _:
       verify(socket,clients,id,version,Handshake.decode(bytes),nonce)
-    case Some{Authorized{id,version,key,timer,bucket}}:
+    case Some{Authorized{id,+version,key,timer,bucket}} False{}:
+      authenticated_frame(socket,clients,id,version,key,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
+    case Some{Authorized{id,version,key,timer,bucket}} True{}:
       charge_message(socket,clients,id,version,key,timer,now,bytes,bucket)
-    case None{}:
+    case None{} _:
       IO.pure(State,Serving{socket,clients})
 
 def event(socket: Net.ServerSocket, +clients: Clients, update: Net.SocketEvent, now: U32) -> IO(State):
@@ -585,7 +587,9 @@ def event(socket: Net.ServerSocket, +clients: Clients, update: Net.SocketEvent, 
         header : Net.ServerSocket & Maybe<&1,List<&2,U32>> <- Net.relay_client_auth_header(socket,id)
         client_header(header,clients,id,version(number))
     case Net.RelayBytes{+id,bytes}:
-      handle_bytes(socket,clients,find_id(clients,id),bytes,now)
+      handle_bytes(socket,clients,find_id(clients,id),bytes,now,True{})
+    case Net.RelayBufferedBytes{+id,bytes}:
+      handle_bytes(socket,clients,find_id(clients,id),bytes,now,False{})
     case Net.RelayLeft{+id}:
       unregister(socket,clients,id,find_id(clients,id))
 
@@ -771,3 +775,47 @@ def step_state(state: State, access: Access.Control) -> IO(Server):
 def step(server: Server) -> IO(Server):
   Relay{state,access} = server
   step_state(state,access)
+
+def reset_buckets(sessions: List<&2,Client>, +limits: Rate.Limits, +now: U32) -> List<&2,Client>:
+  match sessions:
+    case Nil{}:
+      []
+    case Con{Authorized{id,version,key,timer,bucket},rest}:
+      Con{Authorized{id,version,key,timer,Rate.reconfigure(limits,now,bucket)},reset_buckets(rest,limits,now)}
+    case Con{pending,rest}:
+      Con{pending,reset_buckets(rest,limits,now)}
+
+def reconfigure_clients(clients: Clients, +limits: Rate.Limits, now: U32) -> Clients:
+  Registry{sessions,deliveries,_} = clients
+  Registry{reset_buckets(sessions,limits,now),deliveries,limits}
+
+def reconfigure_state(state: State, +limits: Rate.Limits, +now: U32) -> IO(State):
+  match state:
+    case Serving{socket,clients}:
+      do IO<State>:
+        next : Net.ServerSocket <- Net.relay_reconfigure_rx(socket,Rate.metered(limits))
+        return Serving{next,reconfigure_clients(clients,limits,now)}
+    case AwaitingAccess{socket,clients,id,protocol,key}:
+      do IO<State>:
+        next : Net.ServerSocket <- Net.relay_reconfigure_rx(socket,Rate.metered(limits))
+        return AwaitingAccess{next,reconfigure_clients(clients,limits,now),id,protocol,key}
+    case Ended{previous,id,key}:
+      do IO<State>:
+        next : State <- reconfigure_state(previous,limits,now)
+        return Ended{next,id,key}
+
+def apply_rate_limit(server: Server, limits: Rate.Limits, valid: Bool)
+    -> IO(Server & Result<&1,&1,U32 & String,Unit>):
+  match server valid:
+    case Relay{state,access} True{}:
+      do IO<Server & Result<&1,&1,U32 & String,Unit>>:
+        now : U32 <- Net.relay_millis()
+        updated : State <- reconfigure_state(state,limits,now)
+        return (Relay{updated,access},Done{Unit{}})
+    case previous False{}:
+      IO.pure(Server & Result<&1,&1,U32 & String,Unit>,(previous,Fail{(22,"invalid relay receive limit")}))
+
+# The returned handle remains usable even when a configuration is rejected.
+def set_client_rate_limit(server: Server, +limits: Rate.Limits)
+    -> IO(Server & Result<&1,&1,U32 & String,Unit>):
+  apply_rate_limit(server,limits,Rate.valid(limits))

@@ -250,6 +250,30 @@ def test_rate(+url: String, +version: U32) -> IO(Unit):
       Client.connect_with_version(url,List.replicate(U32,32n,73),version))
     rate_exchange(sender,receiver,version)
 
+def live_rate_exchange(sender: Client.Connection, receiver: Client.Connection) -> IO(Unit):
+  +frame = List.append(&2,U32,source(),Con{0,rate_payload()})
+  do IO<Unit>:
+    first : Client.Connection <- send_rate_frame(sender)
+    notified : Client.Connection <- rate_notice(first,2)
+    arrived : Client.Connection <- expect(receiver,6,frame)
+    queued : Client.Connection <- send_rate_frame(notified)
+    IO.print("rate paused")
+    resumed : Client.Connection <- expect(arrived,6,frame)
+    IO.print("rate resumed")
+    after : Client.Connection <- send_rate_frame(queued)
+    received : Client.Connection <- expect(resumed,6,frame)
+    returning : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(received,source(),0,0,payload()))
+    confirmed : Client.Connection <- expect(after,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    Client.close(returning)
+    Client.close(confirmed)
+    IO.print("PASS live receive limit changed on existing connections")
+
+def test_live_rate(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    live_rate_exchange(sender,receiver)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{url,Nil{}}}:
@@ -266,6 +290,8 @@ def run(args: List<String>) -> IO(Unit):
       test_rate(url,1)
     case Con{_,Con{url,Con{"rate-paced",Nil{}}}}:
       test_paced_rate(url)
+    case Con{_,Con{url,Con{"live-rate",Nil{}}}}:
+      test_live_rate(url)
     case Con{_,Con{url,Con{"bearer",Nil{}}}}:
       test_token(url,2,2,Some{"allow"})
     case Con{_,Con{url,Con{"bearer-denied",Nil{}}}}:

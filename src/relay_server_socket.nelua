@@ -13,8 +13,9 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter','relay_resume_rx','relay_kick','relay_stop',
-                      'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
+for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
+                      'relay_resume_rx','relay_reconfigure_rx','relay_kick','relay_stop',
+                      'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayBufferedBytes','RelayLeft',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material',
                       'relay_request_raw','relay_enable_request_details','Nil'} do
@@ -28,6 +29,7 @@ local iroh_srv_relay_poll: uint32 <cimport,nodecl>
 local iroh_srv_relay_queue: uint32 <cimport,nodecl>
 local iroh_srv_relay_authorized_with_meter: uint32 <cimport,nodecl>
 local iroh_srv_relay_resume_rx: uint32 <cimport,nodecl>
+local iroh_srv_relay_reconfigure_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_kick: uint32 <cimport,nodecl>
 local iroh_srv_relay_stop: uint32 <cimport,nodecl>
 local iroh_srv_relay_nonce: uint32 <cimport,nodecl>
@@ -35,6 +37,7 @@ local iroh_srv_RelayListener: uint32 <cimport,nodecl>
 local iroh_srv_RelayIdle: uint32 <cimport,nodecl>
 local iroh_srv_RelayJoined: uint32 <cimport,nodecl>
 local iroh_srv_RelayBytes: uint32 <cimport,nodecl>
+local iroh_srv_RelayBufferedBytes: uint32 <cimport,nodecl>
 local iroh_srv_RelayLeft: uint32 <cimport,nodecl>
 local iroh_srv_Con: uint32 <cimport,nodecl>
 local iroh_srv_True: uint32 <cimport,nodecl>
@@ -141,7 +144,7 @@ local Frame = @record{next: pointer, data: *cuchar, size: csize}
 local Field = @record{next: pointer, value: cstring, size: csize}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
-  metered: boolean,
+  metered: boolean, rx_held: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
@@ -257,7 +260,10 @@ local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize)
   peer.body = nilptr
   peer.length = 0
   peer.capacity = 0
-  if peer.metered then return lws_rx_flow_control(peer.ws,0) end
+  if peer.metered then
+    peer.rx_held = true
+    return lws_rx_flow_control(peer.ws,0)
+  end
   return 0
 end
 local function send(peer: *Peer): cint
@@ -445,7 +451,7 @@ local function poll_run(e: Env, f: *[0]Term, work: *IoWork): Term
     server.event_count = server.event_count - 1
     if ev.tag == iroh_srv_RelayJoined then
       result = io_node(e,ev.tag,ev.id,ev.version)
-    elseif ev.tag == iroh_srv_RelayBytes then
+    elseif ev.tag == iroh_srv_RelayBytes or ev.tag == iroh_srv_RelayBufferedBytes then
       result = io_node(e,ev.tag,ev.id,io_list(e,ev.body,ev.size))
     else
       result = term_pak(ev.tag,ev.id)
@@ -563,10 +569,37 @@ local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
   end
   return f[0]
 end
+local function resume_rx(peer: *Peer)
+  if peer.rx_held and not peer.closing then
+    peer.rx_held = false
+    if lws_rx_flow_control(peer.ws,1 | LWS_RXFLOW_REASON_FLAG_PROCESS_NOW) < 0 then kick(peer) end
+  end
+end
 local function resume_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
-  if peer ~= nilptr and peer.metered and not peer.closing then
-    if lws_rx_flow_control(peer.ws,1 | LWS_RXFLOW_REASON_FLAG_PROCESS_NOW) < 0 then kick(peer) end
+  if peer ~= nilptr then resume_rx(peer) end
+  return f[0]
+end
+local function reconfigure_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local server = find_server(e,f[0])
+  if server == nilptr then return f[0] end
+  -- Queued frames were read before this update. Keep them out of the new
+  -- buckets and drain them before servicing sockets again.
+  local at = server.events
+  while at ~= nilptr do
+    local event = (@*Event)(at)
+    if event.tag == iroh_srv_RelayBytes then event.tag = iroh_srv_RelayBufferedBytes end
+    at = event.next
+  end
+  local metered = term_aux(f[1]) == iroh_srv_True
+  at = server.peers
+  while at ~= nilptr do
+    local peer = (@*Peer)(at)
+    if peer.authorized and not peer.closing then
+      peer.metered = metered
+      resume_rx(peer)
+    end
+    at = peer.next
   end
   return f[0]
 end
@@ -620,6 +653,7 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end
   if iroh_srv_relay_authorized_with_meter ~= 0xffffffff then io_eff(iroh_srv_relay_authorized_with_meter,authorized_run) end
   if iroh_srv_relay_resume_rx ~= 0xffffffff then io_eff(iroh_srv_relay_resume_rx,resume_rx_run) end
+  if iroh_srv_relay_reconfigure_rx ~= 0xffffffff then io_eff(iroh_srv_relay_reconfigure_rx,reconfigure_rx_run) end
   if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end
   if iroh_srv_relay_stop ~= 0xffffffff then io_eff(iroh_srv_relay_stop,stop_run) end
   if iroh_srv_relay_nonce ~= 0xffffffff then io_eff(iroh_srv_relay_nonce,nonce_run) end
