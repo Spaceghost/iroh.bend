@@ -1,0 +1,42 @@
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<errno.h>'
+## cinclude '<time.h>'
+## cdefine 'iroh_pkarr_timespec struct timespec'
+
+##[[
+cinclude('#ifdef CID(pkarr_timestamp)\n#define iroh_pkarr_timestamp CID(pkarr_timestamp)\n#else\n#define iroh_pkarr_timestamp UINT32_MAX\n#endif')
+]]
+local iroh_pkarr_timestamp: uint32 <cimport,nodecl>
+local Env <cimport,nodecl> = @record{}
+local IoWork <cimport,nodecl> = @record{}
+local Timespec <cimport,nodecl,codename 'iroh_pkarr_timespec'> = @record{tv_sec: clong, tv_nsec: clong}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_list(e: Env, bytes: cstring, size: uint64): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local CLOCK_REALTIME: cint <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local function clock_gettime(clock: cint, value: *Timespec): cint <cimport,nodecl> end
+
+local function timestamp_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local time: Timespec
+  if clock_gettime(CLOCK_REALTIME,&time) ~= 0 or time.tv_sec < 0 or time.tv_sec > 9223372036853 then
+    return io_fail(e,EIO,'cannot read the Pkarr timestamp clock')
+  end
+  local micros = (@uint64)(time.tv_sec) * 1000000 + (@uint64)(time.tv_nsec) // 1000
+  if micros > 0x7fffffffffffffff then return io_fail(e,EIO,'Pkarr timestamp exceeds the signed sequence range') end
+  local bytes: [8]cuchar
+  local output = (@*[0]cuchar)(&bytes[0])
+  for i: cint = 7,>=0,-1 do
+    output[i] = (@cuchar)(micros & 255)
+    micros = micros >> 8
+  end
+  return io_done(e,io_list(e,(@cstring)(&bytes[0]),8))
+end
+
+local function register_publisher() <cexport,codename 'iroh_register_publisher',cattribute 'constructor'>
+  if iroh_pkarr_timestamp ~= 0xffffffff then io_eff(iroh_pkarr_timestamp,timestamp_run) end
+end

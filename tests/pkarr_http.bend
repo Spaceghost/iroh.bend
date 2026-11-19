@@ -1,6 +1,8 @@
 import Base
+import ../src/discovery.bend as Dns
 import ../src/pkarr.bend as Pkarr
 import ../src/pkarr_http.bend as Http
+import ../src/pkarr_publisher.bend as Publish
 import ./pkarr.bend as Fixture
 
 def publish(url: String) -> IO(Unit):
@@ -46,6 +48,44 @@ def missing(url: String) -> IO(Unit):
     reply : Result<&1,&1,U32 & String,Pkarr.Verification> <- Http.resolve(url,Fixture.key(),2500)
     not_found(reply)
 
+def snapshot(result: Result<&1,&1,U32 & String,Pkarr.Verification>, expected: U32) -> Bool:
+  match result:
+    case Done{Pkarr.Verified{_,[Dns.UserData{[actual]}]}}:
+      U32.is_eq(actual,expected)
+    case _:
+      False{}
+
+def snapshot_result(ready: Bool, retry: Unit -> IO(Unit)) -> IO(Unit):
+  match ready:
+    case True{}:
+      IO.pure(Unit,Unit{})
+    case False{}:
+      do IO<Unit>:
+        IO.sleep(15)
+        retry(Unit{})
+
+def await_snapshot(fuel: Nat, +url: String, +expected: U32) -> IO(Unit):
+  match fuel:
+    case 0n:
+      IO.die(Unit,1,"Pkarr publisher did not deliver the expected snapshot")
+    case 1n+left:
+      do IO<Unit>:
+        result : Result<&1,&1,U32 & String,Pkarr.Verification> <- Http.resolve(url,Fixture.key(),300)
+        snapshot_result(snapshot(result,expected),_ => await_snapshot(left,url,expected))
+
+def republish(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    +publisher : Publish.Publisher <- IO.try(Publish.Publisher,
+      Publish.start(List.replicate(U32,32n,42),Publish.ToRelay{url,500},Publish.Schedule{30,120}))
+    Publish.update(publisher,[Dns.UserData{[49]}])
+    await_snapshot(200n,url,49)
+    IO.sleep(300)
+    Publish.update(publisher,[Dns.UserData{[50]}])
+    await_snapshot(200n,url,50)
+    Publish.stop(publisher)
+    IO.print("publisher stopped")
+    IO.sleep(250)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{"publish",Con{url,Nil{}}}}:
@@ -56,8 +96,10 @@ def run(args: List<String>) -> IO(Unit):
       missing(url)
     case Con{_,Con{"tampered",Con{url,Nil{}}}}:
       tampered(url)
+    case Con{_,Con{"republish",Con{url,Nil{}}}}:
+      republish(url)
     case _:
-      IO.die(Unit,2,"usage: pkarr-http-check publish|resolve|missing|tampered relay-url")
+      IO.die(Unit,2,"usage: pkarr-http-check publish|resolve|missing|tampered|republish relay-url")
 
 def main() -> IO(Unit):
   do IO<Unit>:
