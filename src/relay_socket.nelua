@@ -20,7 +20,7 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'open','prepare_token','upgrade','recv','send','close','Connected','Pending',
+for _, name in ipairs{'open','prepare_token','upgrade','recv','try_recv','send','close','Connected','Pending',
                       'Some','None','True','False','Con','Unit'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_ws_%s CID(%s)\n#else\n#define iroh_ws_%s UINT32_MAX\n#endif',
@@ -31,6 +31,7 @@ local iroh_ws_open: uint32 <cimport,nodecl>
 local iroh_ws_prepare_token: uint32 <cimport,nodecl>
 local iroh_ws_upgrade: uint32 <cimport,nodecl>
 local iroh_ws_recv: uint32 <cimport,nodecl>
+local iroh_ws_try_recv: uint32 <cimport,nodecl>
 local iroh_ws_send: uint32 <cimport,nodecl>
 local iroh_ws_close: uint32 <cimport,nodecl>
 local iroh_ws_Connected: uint32 <cimport,nodecl>
@@ -156,12 +157,14 @@ local AUTH_SIZE <comptime> = 151
 local AUTH_PREFIX <comptime> = 'x-iroh-relay-client-auth-v1: '
 local WRITE_TIMEOUT_NS <comptime> = 10000000000
 local READ_TIMEOUT_NS <comptime> = 40000000000
-local Socket = @record{next: pointer, id: uint32, curl: *CURL, headers: *curl_slist, bearer: cstring}
+local Socket = @record{next: pointer, id: uint32, curl: *CURL, headers: *curl_slist, bearer: cstring,
+  inbound: cstring, inbound_size: csize}
 local Exporter = @record{id: uint32, worker: *pthread_t, ready: *sem_t, proof_ready: *sem_t,
   key: [32]cchar, material: [32]cchar, proof: [152]cchar, header: cstring,
   requested: boolean, offered: boolean, joined: boolean, prepare_error: cstring}
 local Job = @record{ws: *Socket, url: cstring, data: cstring, size: csize, err: cstring, version: uint32,
-  exporter: *Exporter, next_pending: pointer, bearer: cstring}
+  exporter: *Exporter, next_pending: pointer, bearer: cstring,
+  read_timeout: uint64, timed_read: boolean, received_message: boolean}
 local sockets: pointer
 local pending: pointer
 local next_id: uint32 = 1
@@ -173,6 +176,7 @@ local function free_socket(ws: *Socket)
   if ws.curl ~= nilptr then curl_easy_cleanup(ws.curl) end
   if ws.bearer ~= nilptr then cleanse(ws.bearer,C.strlen(ws.bearer)) end
   curl_slist_free_all(ws.headers)
+  C.free(ws.inbound)
   C.free(ws)
 end
 local function free_job(job: *Job)
@@ -548,45 +552,66 @@ end
 
 local function receive(work: *IoWork)
   local job = (@*Job)(work.data)
-  job.data = (@cstring)(C.malloc(MAX_MESSAGE + 1))
-  if job.data == nilptr then job.err = 'cannot allocate relay read buffer' return end
-  local data = (@*[0]cuchar)(job.data)
-  local end_time = io_tick() + READ_TIMEOUT_NS
-  while io_tick() < end_time do
+  local ws = job.ws
+  if ws.inbound == nilptr then ws.inbound = (@cstring)(C.malloc(MAX_MESSAGE + 1)) end
+  if ws.inbound == nilptr then job.err = 'cannot allocate relay read buffer' return end
+  local data = (@*[0]cuchar)(ws.inbound)
+  local end_time = io_tick() + job.read_timeout
+  repeat
     local got: csize
     local meta: *curl_ws_frame
-    local rc = native_recv(job.ws.curl,&data[job.size],MAX_MESSAGE + 1 - job.size,&got,&meta)
+    local rc = native_recv(ws.curl,&data[ws.inbound_size],MAX_MESSAGE + 1 - ws.inbound_size,&got,&meta)
     if rc == CURLE_AGAIN then
-      if not ready(job.ws,POLLIN,end_time) then break end
+      if not ready(ws,POLLIN,end_time) then break end
     elseif rc ~= CURLE_OK or meta == nilptr or ((@cuint)(meta.flags) & CURLWS_CLOSE) ~= 0 then
       job.err = 'relay closed or WebSocket read failed'
       return
     elseif ((@cuint)(meta.flags) & CURLWS_BINARY) ~= 0 then
-      job.size = job.size + got
-      if job.size > MAX_MESSAGE or meta.bytesleft > (@int64)(MAX_MESSAGE - job.size) then
+      ws.inbound_size = ws.inbound_size + got
+      if ws.inbound_size > MAX_MESSAGE or meta.bytesleft > (@int64)(MAX_MESSAGE - ws.inbound_size) then
         job.err = 'relay frame exceeds one MiB'
         return
       end
-      if meta.bytesleft == 0 and ((@cuint)(meta.flags) & CURLWS_CONT) == 0 then return end
+      if meta.bytesleft == 0 and ((@cuint)(meta.flags) & CURLWS_CONT) == 0 then
+        job.received_message = true
+        return
+      end
     elseif ((@cuint)(meta.flags) & CURLWS_PONG) == 0 then
       job.err = 'expected a binary relay WebSocket message'
       return
     end
-  end
-  job.err = 'relay WebSocket read timed out'
+  until io_tick() >= end_time
+  if not job.timed_read then job.err = 'relay WebSocket read timed out' end
 end
 local function recv_pack(e: Env, work: *IoWork): Term
   local job = (@*Job)(work.data)
   defer free_job(job) end
   if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
   if next_id == 0 then return io_fail(e,EOVERFLOW,'relay handle space exhausted') end
-  return io_done(e,io_tup(e,store(e,job),io_list(e,job.data,job.size)))
+  local result: Term
+  if job.received_message then
+    result = io_list(e,job.ws.inbound,job.ws.inbound_size)
+    job.ws.inbound_size = 0
+    if job.timed_read then result = io_box(e,iroh_ws_Some,result) end
+  else
+    result = term_pak(iroh_ws_None,0)
+  end
+  return io_done(e,io_tup(e,store(e,job),result))
+end
+local function start_read(e: Env, handle: Term, work: *IoWork, timeout: uint64, timed: boolean): Term
+  local ws = take(e,handle)
+  if ws == nilptr then return io_fail(e,EINVAL,'invalid relay socket') end
+  local job = job_for(ws)
+  job.read_timeout = timeout
+  job.timed_read = timed
+  work.data = (@cstring)(job)
+  return io_work(work,receive,recv_pack)
 end
 local function recv_run(e: Env, fields: *[0]Term, work: *IoWork): Term
-  local ws = take(e,fields[0])
-  if ws == nilptr then return io_fail(e,EINVAL,'invalid relay socket') end
-  work.data = (@cstring)(job_for(ws))
-  return io_work(work,receive,recv_pack)
+  return start_read(e,fields[0],work,READ_TIMEOUT_NS,false)
+end
+local function try_recv_run(e: Env, fields: *[0]Term, work: *IoWork): Term
+  return start_read(e,fields[0],work,(@uint64)((@uint32)(fields[1])) * 1000000,true)
 end
 
 local function transmit(work: *IoWork)
@@ -688,6 +713,7 @@ local function register() <cexport,codename 'iroh_register_relay_socket',cattrib
   if iroh_ws_prepare_token ~= 0xffffffff then io_eff(iroh_ws_prepare_token,prepare_run) end
   if iroh_ws_upgrade ~= 0xffffffff then io_eff(iroh_ws_upgrade,upgrade_run) end
   if iroh_ws_recv ~= 0xffffffff then io_eff(iroh_ws_recv,recv_run) end
+  if iroh_ws_try_recv ~= 0xffffffff then io_eff(iroh_ws_try_recv,try_recv_run) end
   if iroh_ws_send ~= 0xffffffff then io_eff(iroh_ws_send,send_run) end
   if iroh_ws_close ~= 0xffffffff then io_eff(iroh_ws_close,close_run) end
 end

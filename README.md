@@ -62,8 +62,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   connection and negotiates v1/v2. It uses TLS-exporter authentication on
   WSS when libcurl uses the linked OpenSSL major version. It answers a fresh
   Ed25519 challenge on WS or when asked by the relay. It sends datagrams and
-  reads relay frames. A caller receiving a relay ping sends the given payload
-  back through `pong`. Use `connect_with_token` to supply an optional Bearer
+  reads relay frames. `try_receive` waits up to the caller's deadline and
+  returns the connection along with any complete frame. A caller receiving
+  a relay ping sends the given payload back through `pong`. Use
+  `connect_with_token` to supply an optional Bearer
   token. The returned handshake error includes the relay's denial reason.
 - [Relay server](src/relay_server.bend) accepts v1/v2 WebSocket upgrades,
   authenticates clients with TLS-exporter proofs or fresh Ed25519 challenges,

@@ -28,6 +28,11 @@ def upgrade(pending: PendingUpgrade, header: Maybe<&1,List<&2,U32>>) ->
 def recv(socket: RelaySocket) -> IO(Result<&1,&1,U32 & String, RelaySocket & List<&2,U32>>):
   import "./relay_socket.c"
 
+# None means the read deadline passed before a complete message was available.
+def try_recv(socket: RelaySocket, ms: U32)
+    -> IO(Result<&1,&1,U32 & String,RelaySocket & Maybe<&1,List<&2,U32>>>):
+  import "./relay_socket.c"
+
 def send(socket: RelaySocket, bytes: List<&2,U32>) ->
     IO(Result<&1,&1,U32 & String, RelaySocket>):
   import "./relay_socket.c"

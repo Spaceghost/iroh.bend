@@ -162,6 +162,23 @@ def receive(conn: Connection) -> IO(Result<&1,&1,U32 & String, Connection & Wire
         reply : Result<&1,&1,U32 & String, WS.RelaySocket & List<&2,U32>> <- WS.recv(socket)
         return received(reply, protocol)
 
+def received_if_ready(reply: Result<&1,&1,U32 & String,WS.RelaySocket & Maybe<&1,List<&2,U32>>>,
+    +protocol: Wire.Version) -> Result<&1,&1,U32 & String,Connection & Maybe<&1,Wire.Frame>>:
+  match reply:
+    case Done{(socket,Some{bytes})}:
+      Done{(Online{socket,protocol},Some{Wire.decode(Wire.ToClient{},protocol,bytes)})}
+    case Done{(socket,None{})}:
+      Done{(Online{socket,protocol},None{})}
+    case Fail{error}:
+      Fail{error}
+
+def try_receive(conn: Connection, ms: U32) -> IO(Result<&1,&1,U32 & String,Connection & Maybe<&1,Wire.Frame>>):
+  match conn:
+    case Online{socket,protocol}:
+      do IO<Result<&1,&1,U32 & String,Connection & Maybe<&1,Wire.Frame>>>:
+        reply : Result<&1,&1,U32 & String,WS.RelaySocket & Maybe<&1,List<&2,U32>>> <- WS.try_recv(socket,ms)
+        return received_if_ready(reply,protocol)
+
 def sent(reply: Result<&1,&1,U32 & String, WS.RelaySocket>, protocol: Wire.Version) ->
     Result<&1,&1,U32 & String, Connection>:
   match reply:

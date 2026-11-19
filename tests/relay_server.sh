@@ -129,7 +129,9 @@ exercise_live_rate() {
 
 start ws
 python3 tests/relay_server_auth.py "$port"
+python3 tests/relay_client_poll.py "$client"
 exercise ws
+timeout 8 "$client" "ws://127.0.0.1:$port/relay" poll
 timeout 30 "$client" "ws://127.0.0.1:$port/relay" heartbeat
 if [ -n "$upstream" ]; then
     timeout 12 "$upstream" "http://127.0.0.1:$port"
@@ -156,6 +158,7 @@ fi
 CURL_CA_BUNDLE="$scratch/ca.pem"
 export CURL_CA_BUNDLE
 exercise wss
+timeout 8 "$client" "wss://127.0.0.1:$port/relay" poll
 if [ -n "$upstream" ]; then
     openssl x509 -in "$scratch/ca.pem" -outform DER -out "$scratch/ca.der"
     timeout 12 "$upstream" "https://127.0.0.1:$port" "$scratch/ca.der"

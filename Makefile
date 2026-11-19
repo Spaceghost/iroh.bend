@@ -83,6 +83,7 @@ RELAY_SOURCES = $(AUTH_SOURCES) src/relay_client.bend src/relay_exporter.bend sr
 check-relay-live: $(BUILD)/iroh-bend-relay-live
 	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)"
 	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)" v1
+	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)" poll
 
 $(BUILD)/relay-live.c: tests/relay_live.bend $(RELAY_SOURCES) src/ed25519.nelua src/relay_socket.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/relay-stage/src" "$(BUILD)/relay-stage/tests"

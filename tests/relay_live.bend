@@ -274,6 +274,54 @@ def test_live_rate(+url: String) -> IO(Unit):
     sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
     live_rate_exchange(sender,receiver)
 
+def empty_poll(reply: Client.Connection & Maybe<&1,Wire.Frame>) -> IO(Client.Connection):
+  match reply:
+    case (conn,None{}):
+      IO.pure(Client.Connection,conn)
+    case (conn,Some{_}):
+      do IO<Client.Connection>:
+        Client.close(conn)
+        IO.die(Client.Connection,1,"relay returned an unexpected message")
+
+def poll_empty(conn: Client.Connection, timeout: U32) -> IO(Client.Connection):
+  do IO<Client.Connection>:
+    result : Client.Connection & Maybe<&1,Wire.Frame> <- IO.try(Client.Connection & Maybe<&1,Wire.Frame>,
+      Client.try_receive(conn,timeout))
+    empty_poll(result)
+
+def check_poll(reply: Client.Connection & Maybe<&1,Wire.Frame>) -> IO(Unit):
+  match reply:
+    case (conn,Some{frame}):
+      do IO<Unit>:
+        Client.close(conn)
+        result(matches(Wire.packet(frame)))
+    case (conn,None{}):
+      do IO<Unit>:
+        Client.close(conn)
+        IO.die(Unit,1,"relay message did not arrive")
+
+def finish_poll(conn: Client.Connection) -> IO(Unit):
+  do IO<Unit>:
+    reply : Client.Connection & Maybe<&1,Wire.Frame> <- IO.try(Client.Connection & Maybe<&1,Wire.Frame>,
+      Client.try_receive(conn,1000))
+    check_poll(reply)
+
+def test_poll(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    paused : Client.Connection <- poll_empty(receiver,10)
+    sent : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(sender,peer(),3,0,payload()))
+    finish_poll(paused)
+    Client.close(sent)
+
+def test_poll_partial(url: String) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    paused : Client.Connection <- poll_empty(receiver,40)
+    IO.print("relay message pending")
+    finish_poll(paused)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{url,Nil{}}}:
@@ -292,6 +340,10 @@ def run(args: List<String>) -> IO(Unit):
       test_paced_rate(url)
     case Con{_,Con{url,Con{"live-rate",Nil{}}}}:
       test_live_rate(url)
+    case Con{_,Con{url,Con{"poll",Nil{}}}}:
+      test_poll(url)
+    case Con{_,Con{url,Con{"poll-partial",Nil{}}}}:
+      test_poll_partial(url)
     case Con{_,Con{url,Con{"bearer",Nil{}}}}:
       test_token(url,2,2,Some{"allow"})
     case Con{_,Con{url,Con{"bearer-denied",Nil{}}}}:
