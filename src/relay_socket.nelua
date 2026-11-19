@@ -68,7 +68,11 @@ local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
 local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
 local function term_pak(tag: uint64, word: uint64): Term <cimport,nodecl> end
 local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_tag(t: Term): uint64 <cimport,nodecl> end
+local function term_loc(t: Term): uint64 <cimport,nodecl> end
 local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+local TAG_PAK: uint64 <cimport,nodecl>
+local TAG_CTR: uint64 <cimport,nodecl>
 
 local CURL <cimport,nodecl> = @record{}
 local curl_slist <cimport,nodecl,codename 'iroh_curl_list'> = @record{data: cstring, next: pointer}
@@ -219,10 +223,16 @@ local function store(e: Env, job: *Job): Term
   next_id = next_id + 1
   ws.next = sockets
   sockets = ws
-  return io_box(e, iroh_ws_Connected, ws.id)
+  return term_pak(iroh_ws_Connected,ws.id)
+end
+local function handle_id(e: Env, handle: Term, kind: uint32): uint32
+  if term_aux(handle) ~= kind then return 0 end
+  if term_tag(handle) == TAG_PAK then return (@uint32)(term_loc(handle)) end
+  if term_tag(handle) == TAG_CTR then return (@uint32)(e.mem[term_peek(e.mem,handle)]) end
+  return 0
 end
 local function take(e: Env, handle: Term): *Socket
-  local id = (@uint32)(e.mem[term_peek(e.mem,handle)])
+  local id = handle_id(e,handle,iroh_ws_Connected)
   local slot = &sockets
   while $slot ~= nilptr do
     local ws = (@*Socket)($slot)
@@ -425,7 +435,7 @@ local function prepare_pack(e: Env, work: *IoWork): Term
   if auth.requested then
     material = io_box(e,iroh_ws_Some,io_list(e,&auth.material[0],32))
   end
-  return io_done(e,io_tup(e,io_box(e,iroh_ws_Pending,auth.id),material))
+  return io_done(e,io_tup(e,term_pak(iroh_ws_Pending,auth.id),material))
 end
 
 local function read_bearer(e: Env, value: Term, job: *Job): boolean
@@ -489,7 +499,7 @@ local function prepare_run(e: Env, fields: *[0]Term, work: *IoWork): Term
 end
 
 local function take_pending(e: Env, handle: Term): *Job
-  local id = (@uint32)(e.mem[term_peek(e.mem,handle)])
+  local id = handle_id(e,handle,iroh_ws_Pending)
   local slot = &pending
   while $slot ~= nilptr do
     local job = (@*Job)($slot)

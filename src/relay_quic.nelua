@@ -1,0 +1,46 @@
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<arpa/inet.h>'
+## cinclude '<errno.h>'
+## cinclude '<sys/socket.h>'
+## cdefine 'iroh_relay_path_addr struct sockaddr_in'
+
+##[[
+cinclude('#ifdef CID(relay_loopback_port)\n#define iroh_relay_loopback_port CID(relay_loopback_port)\n#else\n#define iroh_relay_loopback_port UINT32_MAX\n#endif')
+]]
+local iroh_relay_loopback_port: uint32 <cimport,nodecl>
+local Env <cimport,nodecl> = @record{}
+local IoWork <cimport,nodecl> = @record{}
+local Address <cimport,nodecl,codename 'iroh_relay_path_addr'> = @record{
+  sin_family: cushort, sin_port: uint16, sin_addr: uint32, sin_zero: [8]cuchar
+}
+local socklen_t <cimport,nodecl> = @cuint
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_hand_v(handle: Term): uint64 <cimport,nodecl> end
+local function io_tup(e: Env, left: Term, right: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function getsockname(fd: cint, address: pointer, size: *socklen_t): cint <cimport,nodecl> end
+local function ntohs(value: uint16): uint16 <cimport,nodecl> end
+local AF_INET: cint <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local errno: cint <cimport,nodecl>
+
+local function bound_port(e: Env, args: *[0]Term, work: *IoWork): Term
+  local fd = (@cint)(io_hand_v(args[0]))
+  local address: Address
+  local size: socklen_t = #Address
+  if getsockname(fd,&address,&size) ~= 0 then
+    return io_tup(e,args[0],io_fail(e,(@uint32)(errno),nilptr))
+  end
+  if size ~= #Address or address.sin_family ~= AF_INET then
+    return io_tup(e,args[0],io_fail(e,EINVAL,'expected an IPv4 bridge socket'))
+  end
+  return io_tup(e,args[0],io_done(e,ntohs(address.sin_port)))
+end
+
+local function register_relay_path() <cexport,codename 'iroh_register_relay_path',cattribute 'constructor'>
+  if iroh_relay_loopback_port ~= 0xffffffff then io_eff(iroh_relay_loopback_port,bound_port) end
+end

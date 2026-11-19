@@ -99,6 +99,28 @@ $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
+.PHONY: check-relay-quic
+UPSTREAM_RELAY_QUIC ?=
+RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend
+RELAY_QUIC_EFFECTS = ed25519 relay_socket direct relay_quic
+
+check-relay-quic: $(BUILD)/iroh-bend-relay-quic
+	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)"
+
+$(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/relay-quic-stage/src" "$(BUILD)/relay-quic-stage/tests"
+	cp $(RELAY_QUIC_SOURCES) "$(BUILD)/relay-quic-stage/src/"
+	cp tests/relay_quic.bend tests/direct.bend "$(BUILD)/relay-quic-stage/tests/"
+	for native in $(RELAY_QUIC_EFFECTS); do \
+		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
+			"$(abspath $(BUILD)/relay-quic-stage/src)/$$native.c" || exit; \
+	done
+	cd "$(BUILD)/relay-quic-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_quic.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-quic: $(BUILD)/relay-quic.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
+
 .PHONY: check-pkarr
 
 check-pkarr: $(BUILD)/iroh-bend-pkarr

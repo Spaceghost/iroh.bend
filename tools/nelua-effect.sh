@@ -9,8 +9,9 @@ trap 'rm -f "$raw"' EXIT
 "$compiler" --code --cache-dir "$cache" -o "$raw" "$source"
 
 # Bend splices multiple compiler outputs into one C translation unit.
-# Their common Nelua nil type must be defined only once.
-sed '/^typedef struct nlniltype {} nlniltype;$/ {
+# Share the nil type and give each effect file its own generated helpers.
+namespace=$(basename "$source" .nelua | tr -c '[:alnum:]_' '_' | sed 's/_$//')
+sed -E -e "s/(^|[^[:alnum:]_])(nelua_[[:alnum:]_]+)/\1iroh_${namespace}_\2/g" -e '/^typedef struct nlniltype \{\} nlniltype;$/ {
     i\
 #ifndef IROH_NELUA_NILTYPE\
 #define IROH_NELUA_NILTYPE
