@@ -1,0 +1,584 @@
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<ngtcp2/ngtcp2_crypto_ossl.h>'
+## cinclude '<openssl/ssl.h>'
+local SSL <cimport,nodecl> = @record{}
+local SSL_CTX <cimport,nodecl> = @record{}
+local SSL_METHOD <cimport,nodecl> = @record{}
+local EVP_PKEY <cimport,nodecl> = @record{}
+local ngtcp2_crypto_ossl_ctx <cimport,nodecl> = @record{}
+local TLSEXT_cert_type_rpk: cuchar <cimport,nodecl>
+local function TLS_method(): *SSL_METHOD <cimport,nodecl> end
+local function SSL_CTX_new(method: *SSL_METHOD): *SSL_CTX <cimport,nodecl> end
+local function SSL_CTX_free(ctx: *SSL_CTX) <cimport,nodecl> end
+local function SSL_CTX_use_PrivateKey(ctx: *SSL_CTX, pkey: *EVP_PKEY): cint <cimport,nodecl> end
+local function SSL_CTX_set1_server_cert_type(ctx: *SSL_CTX, values: *cuchar, n: csize): cint <cimport,nodecl> end
+local function SSL_CTX_set1_client_cert_type(ctx: *SSL_CTX, values: *cuchar, n: csize): cint <cimport,nodecl> end
+local function SSL_new(ctx: *SSL_CTX): *SSL <cimport,nodecl> end
+local function SSL_free(ssl: *SSL) <cimport,nodecl> end
+local function EVP_PKEY_new_raw_private_key_ex(ctx: pointer, name: cstring, properties: cstring,
+    bytes: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_new_raw_public_key_ex(ctx: pointer, name: cstring, properties: cstring,
+    bytes: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_free(key: *EVP_PKEY) <cimport,nodecl> end
+local function ngtcp2_crypto_ossl_ctx_new(out: **ngtcp2_crypto_ossl_ctx, ssl: *SSL): cint <cimport,nodecl> end
+local function ngtcp2_crypto_ossl_ctx_del(ctx: *ngtcp2_crypto_ossl_ctx) <cimport,nodecl> end
+local function ngtcp2_crypto_ossl_configure_client_session(ssl: *SSL): cint <cimport,nodecl> end
+
+## cinclude '<ngtcp2/ngtcp2.h>'
+## cinclude '<ngtcp2/ngtcp2_crypto.h>'
+## cinclude '<arpa/inet.h>'
+## cinclude '<unistd.h>'
+## cinclude '<errno.h>'
+## cinclude '<openssl/rand.h>'
+## cdefine 'iroh_datagram_ipv4 struct sockaddr_in'
+## cdefine 'iroh_datagram_ipv6 struct sockaddr_in6'
+## cdefine 'iroh_datagram_address struct sockaddr_storage'
+require 'C.stdlib'
+require 'C.string'
+
+local iroh_datagram_ipv4 <cimport,nodecl> = @record{
+  sin_family: cushort, sin_port: cushort, sin_addr: cuint, sin_zero: [8]cuchar
+}
+local iroh_datagram_ipv6 <cimport,nodecl> = @record{sin6_family: cushort, sin6_port: cushort, sin6_flowinfo: uint32,
+  sin6_addr: [16]cuchar, sin6_scope_id: uint32}
+local iroh_datagram_address <cimport,nodecl> = @record{ss_family: cushort, padding: [118]cuchar, alignment: uint64}
+local ngtcp2_conn <cimport,nodecl> = @record{}
+local ngtcp2_cid <cimport,nodecl> = @record{datalen: csize, data: [20]cuchar}
+local ngtcp2_stateless_reset_token <cimport,nodecl> = @record{data: [16]cuchar}
+local ngtcp2_addr <cimport,nodecl> = @record{addr: pointer, addrlen: cuint}
+## cdefine 'iroh_datagram_local_path local'
+local ngtcp2_path <cimport,nodecl> = @record{iroh_datagram_local_path: ngtcp2_addr, remote: ngtcp2_addr}
+local ngtcp2_settings <cimport,nodecl> = @record{initial_ts: uint64}
+local ngtcp2_transport_params <cimport,nodecl> = @record{
+  max_datagram_frame_size: uint64
+}
+local ngtcp2_pkt_info <cimport,nodecl> = @record{ecn: uint32}
+local ngtcp2_ccerr <cimport,nodecl> = @record{}
+local ngtcp2_vec <cimport,nodecl> = @record{base: *cuchar, len: csize}
+local ngtcp2_callbacks <cimport,nodecl> = @record{
+  client_initial: pointer, recv_crypto_data: pointer, encrypt: pointer, decrypt: pointer, hp_mask: pointer,
+  recv_retry: pointer, rand: pointer, update_key: pointer, delete_crypto_aead_ctx: pointer,
+  delete_crypto_cipher_ctx: pointer, version_negotiation: pointer, get_new_connection_id2: pointer,
+  get_path_challenge_data2: pointer, recv_datagram: pointer, ack_datagram: pointer
+}
+local ngtcp2_crypto_conn_ref <cimport,nodecl> = @record{get_conn: pointer, user_data: pointer}
+local X509_STORE_CTX <cimport,nodecl> = @record{}
+local AF_INET: cint <cimport,nodecl>
+local AF_INET6: cint <cimport,nodecl>
+local SOCK_DGRAM: cint <cimport,nodecl>
+local SOCK_NONBLOCK: cint <cimport,nodecl>
+local EAGAIN: cint <cimport,nodecl>
+local errno: cint <cimport,nodecl>
+local SSL_VERIFY_PEER: cint <cimport,nodecl>
+local X509_V_OK: cint <cimport,nodecl>
+local X509_V_ERR_APPLICATION_VERIFICATION: cint <cimport,nodecl>
+local NGTCP2_ERR_CALLBACK_FAILURE: cint <cimport,nodecl>
+local NGTCP2_PROTO_VER_V1: uint32 <cimport,nodecl>
+local function inet_pton(family: cint, text: cstring, ip: pointer): cint <cimport,nodecl> end
+local function htons(port: cushort): cushort <cimport,nodecl> end
+local function socket(family: cint, kind: cint, proto: cint): cint <cimport,nodecl> end
+local function connect(fd: cint, address: pointer, n: cuint): cint <cimport,nodecl> end
+local function getsockname(fd: cint, address: pointer, n: *cuint): cint <cimport,nodecl> end
+local function close(fd: cint): cint <cimport,nodecl> end
+local function send(fd: cint, data: pointer, n: csize, flags: cint): isize <cimport,nodecl> end
+local function recv(fd: cint, data: pointer, n: csize, flags: cint): isize <cimport,nodecl> end
+local function RAND_bytes(data: *cuchar, n: cint): cint <cimport,nodecl> end
+local function SSL_set_connect_state(ssl: *SSL) <cimport,nodecl> end
+local function SSL_set_app_data(ssl: *SSL, data: pointer): cint <cimport,nodecl> end
+local function SSL_set_alpn_protos(ssl: *SSL, value: *cuchar, n: cuint): cint <cimport,nodecl> end
+local function SSL_CTX_set_verify(ctx: *SSL_CTX, flags: cint, callback: pointer) <cimport,nodecl> end
+local function SSL_CTX_set_cert_verify_callback(ctx: *SSL_CTX, callback: pointer, data: pointer) <cimport,nodecl> end
+local function X509_STORE_CTX_get0_rpk(store: *X509_STORE_CTX): *EVP_PKEY <cimport,nodecl> end
+local function X509_STORE_CTX_set_error(store: *X509_STORE_CTX, err: cint) <cimport,nodecl> end
+local function EVP_PKEY_eq(left: *EVP_PKEY, right: *EVP_PKEY): cint <cimport,nodecl> end
+local function ngtcp2_conn_client_new(out: **ngtcp2_conn, dcid: *ngtcp2_cid, scid: *ngtcp2_cid,
+  path: *ngtcp2_path, version: uint32, callbacks: *ngtcp2_callbacks, settings: *ngtcp2_settings,
+  params: *ngtcp2_transport_params, allocator: pointer, user: pointer): cint <cimport,nodecl> end
+local function ngtcp2_conn_del(conn: *ngtcp2_conn) <cimport,nodecl> end
+local function ngtcp2_conn_set_tls_native_handle(conn: *ngtcp2_conn, tls: pointer) <cimport,nodecl> end
+local function ngtcp2_settings_default(settings: *ngtcp2_settings) <cimport,nodecl> end
+local function ngtcp2_transport_params_default(params: *ngtcp2_transport_params) <cimport,nodecl> end
+local function ngtcp2_conn_write_pkt(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
+  data: *cuchar, n: csize, time: uint64): isize <cimport,nodecl> end
+local function ngtcp2_conn_read_pkt(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
+  data: *cuchar, n: csize, time: uint64): cint <cimport,nodecl> end
+local function ngtcp2_conn_handle_expiry(conn: *ngtcp2_conn, time: uint64): cint <cimport,nodecl> end
+local function ngtcp2_conn_get_expiry2(conn: *ngtcp2_conn): uint64 <cimport,nodecl> end
+local function ngtcp2_conn_update_pkt_tx_time(conn: *ngtcp2_conn, time: uint64) <cimport,nodecl> end
+local function ngtcp2_conn_get_handshake_completed2(conn: *ngtcp2_conn): cint <cimport,nodecl> end
+local function ngtcp2_conn_get_remote_transport_params2(conn: *ngtcp2_conn): *ngtcp2_transport_params <cimport,nodecl> end
+local function ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn: *ngtcp2_conn): csize <cimport,nodecl> end
+local function ngtcp2_conn_get_dcid2(conn: *ngtcp2_conn): *ngtcp2_cid <cimport,nodecl> end
+local function ngtcp2_conn_writev_datagram(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
+  data: *cuchar, n: csize, accepted: *cint, flags: uint32, id: uint64,
+  vec: *ngtcp2_vec, count: csize, time: uint64): isize <cimport,nodecl> end
+local function ngtcp2_ccerr_default(err: *ngtcp2_ccerr) <cimport,nodecl> end
+local function ngtcp2_conn_write_connection_close(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
+  data: *cuchar, n: csize, err: *ngtcp2_ccerr, time: uint64): isize <cimport,nodecl> end
+local function ngtcp2_strerror(err: cint): cstring <cimport,nodecl> end
+local ngtcp2_crypto_client_initial_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_recv_crypto_data_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_encrypt_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_decrypt_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_hp_mask_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_recv_retry_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_update_key_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_delete_crypto_aead_ctx_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_delete_crypto_cipher_ctx_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_version_negotiation_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
+
+##[[
+for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram',
+    'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
+    'Con','Nil','Unit','Some','None'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_dgram_start_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_step_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_write_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_read_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_quic_datagram_acks: uint32 <cimport,nodecl>
+local iroh_dgram_drop_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_DatagramConnection: uint32 <cimport,nodecl>
+local iroh_dgram_Con: uint32 <cimport,nodecl>
+local iroh_dgram_Nil: uint32 <cimport,nodecl>
+local iroh_dgram_Unit: uint32 <cimport,nodecl>
+local iroh_dgram_Some: uint32 <cimport,nodecl>
+local iroh_dgram_None: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_tick(): uint64 <cimport,nodecl> end
+local function io_cstr(e: Env, term: Term, size: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, size: uint64): boolean <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
+local function io_list(e: Env, bytes: cstring, size: uint64): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, value: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_loc(t: Term): uint64 <cimport,nodecl> end
+local function term_tag(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]Term, t: Term): uint64 <cimport,nodecl> end
+local function ctr_take(e: Env, t: Term, size: uint32, fields: *Term): uint64 <cimport,nodecl> end
+local function cls_fit(size: uint32): uint32 <cimport,nodecl> end
+local function spare_free(e: Env, class: uint32, loc: uint64) <cimport,nodecl> end
+local TAG_PAK: uint64 <cimport,nodecl>
+local TAG_CTR: uint64 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EBADF: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EACCES: uint32 <cimport,nodecl>
+local EMSGSIZE: uint32 <cimport,nodecl>
+local ENOTSUP: uint32 <cimport,nodecl>
+local ENOMEM: uint32 <cimport,nodecl>
+local EINTR: cint <cimport,nodecl>
+local SOCK_CLOEXEC: cint <cimport,nodecl>
+local NGTCP2_ERR_DISCARD_PKT: cint <cimport,nodecl>
+local NGTCP2_ERR_INVALID_ARGUMENT: cint <cimport,nodecl>
+
+local PACKET_CAPACITY <comptime> = 1500
+local DATAGRAM_FRAME_LIMIT <comptime> = 1200
+local INBOX_CAPACITY <comptime> = 16
+local Datagram = @record{size: csize, bytes: [DATAGRAM_FRAME_LIMIT]cuchar}
+local Connection = @record{
+  next: pointer,
+  id: uint32,
+  fd: cint,
+  engine: *ngtcp2_conn,
+  ssl: *SSL,
+  tls: *ngtcp2_crypto_ossl_ctx,
+  expected_key: *EVP_PKEY,
+  ref: ngtcp2_crypto_conn_ref,
+  remote_addr: iroh_datagram_address,
+  local_addr: iroh_datagram_address,
+  remote_size: cuint,
+  local_size: cuint,
+  output: [PACKET_CAPACITY]cuchar,
+  output_size: csize,
+  inbox: [INBOX_CAPACITY]Datagram,
+  first: uint32,
+  received: uint32,
+  acknowledgments: uint32,
+  datagram_id: uint64,
+  pin_status: cint,
+  failed: boolean
+}
+local connections: *Connection
+local next_id: uint32 = 1
+
+local function quic_from_ref(ref: *ngtcp2_crypto_conn_ref): *ngtcp2_conn
+  return ((@*Connection)(ref.user_data)).engine
+end
+
+local function verify_peer(store: *X509_STORE_CTX, data: pointer): cint
+  local conn = (@*Connection)(data)
+  local key = X509_STORE_CTX_get0_rpk(store)
+  if key ~= nilptr and EVP_PKEY_eq(key,conn.expected_key) == 1 then
+    conn.pin_status = 1
+    X509_STORE_CTX_set_error(store,X509_V_OK)
+    return 1
+  end
+  conn.pin_status = -1
+  X509_STORE_CTX_set_error(store,X509_V_ERR_APPLICATION_VERIFICATION)
+  return 0
+end
+
+local function quic_random(out: *cuchar, size: csize, context: pointer)
+  -- ngtcp2 uses this callback for non-cryptographic random values.
+  if RAND_bytes(out,(@cint)(size)) ~= 1 then C.memset(out,0,size) end
+end
+
+local function new_connection_id(engine: *ngtcp2_conn, cid: *ngtcp2_cid,
+    token: *ngtcp2_stateless_reset_token, size: csize, user: pointer): cint
+  if RAND_bytes(&cid.data[0],(@cint)(size)) ~= 1 or RAND_bytes(&token.data[0],16) ~= 1 then
+    return NGTCP2_ERR_CALLBACK_FAILURE
+  end
+  cid.datalen = size
+  return 0
+end
+
+local function receive_datagram(engine: *ngtcp2_conn, flags: uint32, bytes: *cuchar,
+    size: csize, user: pointer): cint
+  local conn = (@*Connection)(user)
+  if size <= DATAGRAM_FRAME_LIMIT and conn.received < INBOX_CAPACITY then
+    local item = &conn.inbox[(conn.first + conn.received) % INBOX_CAPACITY]
+    item.size = size
+    if size ~= 0 then C.memcpy(&item.bytes[0],bytes,size) end
+    conn.received = conn.received + 1
+  end
+  return 0
+end
+
+local function ack_datagram(engine: *ngtcp2_conn, id: uint64, user: pointer): cint
+  local conn = (@*Connection)(user)
+  conn.acknowledgments = conn.acknowledgments + 1
+  return 0
+end
+
+local function connection_path(conn: *Connection): ngtcp2_path
+  return {
+    iroh_datagram_local_path = {addr = &conn.local_addr, addrlen = conn.local_size},
+    remote = {addr = &conn.remote_addr, addrlen = conn.remote_size}
+  }
+end
+
+local function open_udp(conn: *Connection, host: cstring, port: cushort): boolean
+  local family = AF_INET
+  local ipv4 = (@*iroh_datagram_ipv4)(&conn.remote_addr)
+  if inet_pton(AF_INET,host,&ipv4.sin_addr) == 1 then
+    ipv4.sin_family = (@cushort)(AF_INET)
+    ipv4.sin_port = htons(port)
+    conn.remote_size = #iroh_datagram_ipv4
+  else
+    local ipv6 = (@*iroh_datagram_ipv6)(&conn.remote_addr)
+    if inet_pton(AF_INET6,host,&ipv6.sin6_addr) ~= 1 then
+      errno = (@cint)(EINVAL)
+      return false
+    end
+    family = AF_INET6
+    ipv6.sin6_family = (@cushort)(AF_INET6)
+    ipv6.sin6_port = htons(port)
+    conn.remote_size = #iroh_datagram_ipv6
+  end
+  conn.fd = socket(family,SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  conn.local_size = #iroh_datagram_address
+  return conn.fd >= 0 and connect(conn.fd,&conn.remote_addr,conn.remote_size) == 0 and
+    getsockname(conn.fd,&conn.local_addr,&conn.local_size) == 0
+end
+
+local function open_tls(conn: *Connection, seed: *cuchar, peer: *cuchar, alpn: *cuchar, size: cuint): boolean
+  local ctx = SSL_CTX_new(TLS_method())
+  if ctx == nilptr then return false end
+  defer SSL_CTX_free(ctx) end
+  local key = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,seed,32)
+  if key == nilptr then return false end
+  defer EVP_PKEY_free(key) end
+  conn.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+  local raw_key = TLSEXT_cert_type_rpk
+  if conn.expected_key == nilptr or SSL_CTX_use_PrivateKey(ctx,key) ~= 1 or
+      SSL_CTX_set1_server_cert_type(ctx,&raw_key,1) ~= 1 or SSL_CTX_set1_client_cert_type(ctx,&raw_key,1) ~= 1 then
+    return false
+  end
+  SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nilptr)
+  SSL_CTX_set_cert_verify_callback(ctx,(@pointer)(verify_peer),conn)
+  conn.ssl = SSL_new(ctx)
+  if conn.ssl == nilptr then return false end
+  conn.ref = {get_conn = (@pointer)(quic_from_ref), user_data = conn}
+  SSL_set_connect_state(conn.ssl)
+  return SSL_set_app_data(conn.ssl,&conn.ref) == 1 and SSL_set_alpn_protos(conn.ssl,alpn,size) == 0 and
+    ngtcp2_crypto_ossl_ctx_new(&conn.tls,conn.ssl) == 0 and
+    ngtcp2_crypto_ossl_configure_client_session(conn.ssl) == 0
+end
+
+local function open_engine(conn: *Connection): cint
+  local callbacks: ngtcp2_callbacks = {
+    client_initial = ngtcp2_crypto_client_initial_cb, recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb,
+    encrypt = ngtcp2_crypto_encrypt_cb, decrypt = ngtcp2_crypto_decrypt_cb, hp_mask = ngtcp2_crypto_hp_mask_cb,
+    recv_retry = ngtcp2_crypto_recv_retry_cb, rand = (@pointer)(quic_random), update_key = ngtcp2_crypto_update_key_cb,
+    delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
+    delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
+    version_negotiation = ngtcp2_crypto_version_negotiation_cb, get_new_connection_id2 = (@pointer)(new_connection_id),
+    get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb,
+    recv_datagram = (@pointer)(receive_datagram), ack_datagram = (@pointer)(ack_datagram)
+  }
+  local dcid: ngtcp2_cid = {datalen = 8}
+  local scid: ngtcp2_cid = {datalen = 8}
+  if RAND_bytes(&dcid.data[0],8) ~= 1 or RAND_bytes(&scid.data[0],8) ~= 1 then
+    return NGTCP2_ERR_CALLBACK_FAILURE
+  end
+  local settings: ngtcp2_settings
+  ngtcp2_settings_default(&settings)
+  settings.initial_ts = io_tick()
+  local params: ngtcp2_transport_params
+  ngtcp2_transport_params_default(&params)
+  params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
+  local path = connection_path(conn)
+  local status = ngtcp2_conn_client_new(&conn.engine,&dcid,&scid,&path,NGTCP2_PROTO_VER_V1,
+    &callbacks,&settings,&params,nilptr,conn)
+  if status == 0 then ngtcp2_conn_set_tls_native_handle(conn.engine,conn.tls) end
+  return status
+end
+
+local function destroy(conn: *Connection)
+  if conn.engine ~= nilptr then ngtcp2_conn_del(conn.engine) end
+  if conn.ssl ~= nilptr then SSL_set_app_data(conn.ssl,nilptr) end
+  if conn.tls ~= nilptr then ngtcp2_crypto_ossl_ctx_del(conn.tls) end
+  SSL_free(conn.ssl)
+  EVP_PKEY_free(conn.expected_key)
+  if conn.fd >= 0 then close(conn.fd) end
+  C.free(conn)
+end
+
+local function find(e: Env, handle: Term): *Connection
+  local id: uint64
+  if term_aux(handle) ~= iroh_dgram_DatagramConnection then return nilptr end
+  if term_tag(handle) == TAG_PAK then
+    id = term_loc(handle)
+  elseif term_tag(handle) == TAG_CTR then
+    id = e.mem[term_peek(e.mem,handle)]
+  else
+    return nilptr
+  end
+  local conn = connections
+  while conn ~= nilptr and conn.id ~= id do conn = (@*Connection)(conn.next) end
+  return conn
+end
+
+local function unpack(e: Env, item: Term, out: *cuchar, limit: csize): isize
+  local size: csize = 0
+  local dst = (@*[0]cuchar)(out)
+  local valid = true
+  while term_aux(item) == iroh_dgram_Con do
+    local fields: [2]Term
+    spare_free(e,cls_fit(2),ctr_take(e,item,2,&fields[0]))
+    local byte = fields[0]
+    if size < limit and byte <= 255 then
+      dst[size] = (@cuchar)(byte)
+      size = size + 1
+    else
+      valid = false
+    end
+    item = fields[1]
+  end
+  if not valid or term_aux(item) ~= iroh_dgram_Nil then return -1 end
+  return (@isize)(size)
+end
+
+local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local host_size: uint64
+  local host = io_cstr(e,args[0],&host_size)
+  defer C.free(host) end
+  local seed: [32]cuchar
+  local peer: [32]cuchar
+  local alpn: [256]cuchar
+  local seed_size = unpack(e,args[2],&seed[0],32)
+  local peer_size = unpack(e,args[3],&peer[0],32)
+  local alpn_size = unpack(e,args[4],&alpn[1],255)
+  if args[1] == 0 or args[1] > 65535 or io_nul(host,host_size) or
+      seed_size ~= 32 or peer_size ~= 32 or alpn_size <= 0 then
+    return io_fail(e,EINVAL,'invalid QUIC address, Ed25519 key, or ALPN')
+  end
+  if next_id == 0 then return io_fail(e,ENOMEM,'QUIC connection handles exhausted') end
+  alpn[0] = (@cuchar)(alpn_size)
+  local conn = (@*Connection)(C.calloc(1,#Connection))
+  if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  conn.fd = -1
+  if not open_udp(conn,host,(@cushort)(args[1])) then
+    local code = (@uint32)(errno)
+    destroy(conn)
+    return io_fail(e,code,nilptr)
+  end
+  if not open_tls(conn,&seed[0],&peer[0],&alpn[0],(@cuint)(alpn_size + 1)) then
+    destroy(conn)
+    return io_fail(e,EIO,'could not configure QUIC raw public key TLS')
+  end
+  local status = open_engine(conn)
+  if status ~= 0 then
+    destroy(conn)
+    return io_fail(e,EIO,ngtcp2_strerror(status))
+  end
+  conn.next = connections
+  conn.id = next_id
+  next_id = next_id + 1
+  connections = conn
+  return io_done(e,term_pak(iroh_dgram_DatagramConnection,conn.id))
+end
+
+local function send_pending(conn: *Connection, now: uint64): cint
+  if conn.output_size == 0 then return 0 end
+  local size = send(conn.fd,&conn.output[0],conn.output_size,0)
+  if size == (@isize)(conn.output_size) then
+    conn.output_size = 0
+    ngtcp2_conn_update_pkt_tx_time(conn.engine,now)
+    return 0
+  end
+  if size >= 0 then return (@cint)(EIO) end
+  if errno == EAGAIN or errno == EINTR then return 0 end
+  return errno
+end
+
+local function engine_error(e: Env, conn: *Connection, status: cint): Term
+  conn.failed = true
+  if conn.pin_status < 0 then return io_fail(e,EACCES,'QUIC peer endpoint key mismatch') end
+  return io_fail(e,EIO,ngtcp2_strerror(status))
+end
+
+local function socket_error(e: Env, conn: *Connection, status: cint): Term
+  conn.failed = true
+  return io_fail(e,(@uint32)(status),nilptr)
+end
+
+local function closed(e: Env): Term
+  return io_fail(e,EBADF,'QUIC connection closed')
+end
+
+local function step(e: Env, conn: *Connection): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  local incoming: [65536]cuchar
+  local size = recv(conn.fd,&incoming[0],#incoming,0)
+  local now = io_tick()
+  if size > 0 then
+    local path = connection_path(conn)
+    local info: ngtcp2_pkt_info = {}
+    local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,&incoming[0],(@csize)(size),now)
+    if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then return engine_error(e,conn,status) end
+  elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
+    return socket_error(e,conn,errno)
+  end
+  local error = send_pending(conn,now)
+  if error ~= 0 then return socket_error(e,conn,error) end
+  if conn.output_size == 0 then
+    if ngtcp2_conn_get_expiry2(conn.engine) <= now then
+      local status = ngtcp2_conn_handle_expiry(conn.engine,now)
+      if status < 0 then return engine_error(e,conn,status) end
+    end
+    local size = ngtcp2_conn_write_pkt(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,now)
+    if size < 0 then return engine_error(e,conn,(@cint)(size)) end
+    conn.output_size = (@csize)(size)
+    error = send_pending(conn,now)
+    if error ~= 0 then return socket_error(e,conn,error) end
+  end
+  local ready = conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0
+  return io_done(e,ready and 1 or 0)
+end
+
+local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],step(e,find(e,args[0])))
+end
+
+local function write(e: Env, conn: *Connection, payload: Term): Term
+  local bytes: [DATAGRAM_FRAME_LIMIT]cuchar
+  local size = unpack(e,payload,&bytes[0],DATAGRAM_FRAME_LIMIT)
+  if size < 0 then return io_fail(e,EINVAL,'invalid or oversized QUIC datagram') end
+  if conn == nilptr or conn.failed then return closed(e) end
+  local transport = ngtcp2_conn_get_remote_transport_params2(conn.engine)
+  if transport == nilptr or conn.pin_status ~= 1 or ngtcp2_conn_get_handshake_completed2(conn.engine) == 0 then
+    return io_done(e,0)
+  end
+  if transport.max_datagram_frame_size == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC datagrams') end
+  -- Reserve space for a short header, packet number, AEAD tag, and frame length.
+  local limit = ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn.engine)
+  if limit > PACKET_CAPACITY then limit = PACKET_CAPACITY end
+  local dcid = ngtcp2_conn_get_dcid2(conn.engine)
+  local overhead: csize = dcid.datalen + 24
+  if (@csize)(size) + overhead > limit then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds path size') end
+  local now = io_tick()
+  local error = send_pending(conn,now)
+  if error ~= 0 then return socket_error(e,conn,error) end
+  if conn.output_size ~= 0 then return io_done(e,0) end
+  local vec: ngtcp2_vec = {base = &bytes[0], len = (@csize)(size)}
+  local accepted: cint = 0
+  local written = ngtcp2_conn_writev_datagram(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,
+    &accepted,0,conn.datagram_id,&vec,1,now)
+  if written == NGTCP2_ERR_INVALID_ARGUMENT then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds negotiated size') end
+  if written < 0 then return engine_error(e,conn,(@cint)(written)) end
+  if accepted ~= 0 then conn.datagram_id = conn.datagram_id + 1 end
+  conn.output_size = (@csize)(written)
+  error = send_pending(conn,now)
+  if error ~= 0 then return socket_error(e,conn,error) end
+  return io_done(e,(@Term)(accepted))
+end
+
+local function write_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],write(e,find(e,args[0]),args[1]))
+end
+
+local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  local value = term_pak(iroh_dgram_None,0)
+  if conn.received > 0 and conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 then
+    local item = &conn.inbox[conn.first]
+    value = io_box(e,iroh_dgram_Some,io_list(e,(@cstring)(&item.bytes[0]),item.size))
+    conn.first = (conn.first + 1) % INBOX_CAPACITY
+    conn.received = conn.received - 1
+  end
+  return io_tup(e,args[0],io_done(e,value))
+end
+
+local function acks_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  local result = conn ~= nilptr and io_done(e,conn.acknowledgments) or closed(e)
+  return io_tup(e,args[0],result)
+end
+
+local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn ~= nilptr then
+    if connections == conn then
+      connections = (@*Connection)(conn.next)
+    else
+      local prior = connections
+      while prior.next ~= conn do prior = (@*Connection)(prior.next) end
+      prior.next = conn.next
+    end
+    if not conn.failed then
+      local err: ngtcp2_ccerr
+      ngtcp2_ccerr_default(&err)
+      local size = ngtcp2_conn_write_connection_close(conn.engine,nilptr,nilptr,&conn.output[0],
+        PACKET_CAPACITY,&err,io_tick())
+      if size > 0 then send(conn.fd,&conn.output[0],(@csize)(size),0) end
+    end
+    destroy(conn)
+  end
+  return term_pak(iroh_dgram_Unit,0)
+end
+
+local function register_quic_datagram() <cexport,codename 'iroh_register_quic_datagram',cattribute 'constructor'>
+  if iroh_dgram_start_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram,start_run) end
+  if iroh_dgram_step_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_step_quic_datagram,step_run) end
+  if iroh_dgram_write_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_quic_datagram,write_run) end
+  if iroh_dgram_read_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_read_quic_datagram,read_run) end
+  if iroh_dgram_quic_datagram_acks ~= 0xffffffff then io_eff(iroh_dgram_quic_datagram_acks,acks_run) end
+  if iroh_dgram_drop_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_datagram,drop_run) end
+end

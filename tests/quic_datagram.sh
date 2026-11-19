@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+client=$1
+ipv4=$2
+ipv6=$3
+if [ ! -x "$ipv4" ] || [ ! -x "$ipv6" ]; then
+    printf '%s\n' 'Set UPSTREAM_DATAGRAM_V4 and UPSTREAM_DATAGRAM_V6 to the Iroh 1.5.0 listen fixtures.' >&2
+    exit 2
+fi
+work=$(mktemp -d)
+pid=
+stop_peer() {
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || :
+        wait "$pid" 2>/dev/null || :
+        pid=
+    fi
+}
+cleanup() {
+    stop_peer
+    rm -f "$work/address" "$work/error"
+    rmdir "$work"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+check_peer() {
+    peer=$1
+    host=$2
+    mode=$3
+    : >"$work/address"
+    "$peer" listen >"$work/address" 2>"$work/error" &
+    pid=$!
+    tries=0
+    while ! IFS= read -r address <"$work/address"; do
+        if ! kill -0 "$pid" 2>/dev/null || [ "$tries" -ge 100 ]; then
+            cat "$work/error" >&2
+            exit 1
+        fi
+        tries=$((tries + 1))
+        sleep .05
+    done
+    "$client" "$host" "${address##*:}" "$mode"
+    stop_peer
+}
+
+for mode in valid wrong-key; do
+    check_peer "$ipv4" 127.0.0.1 "$mode"
+    check_peer "$ipv6" ::1 "$mode"
+done

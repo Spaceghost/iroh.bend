@@ -3,7 +3,8 @@
 A Rust-free implementation targeting the Iroh 1.5.0 wire protocol. Bend
 implements relay framing, authentication transcripts, client state, and DNS
 and Pkarr discovery packets.
-Nelua binds OpenSSL for direct QUIC and Ed25519, and libcurl for WebSocket
+Nelua binds OpenSSL for direct QUIC and Ed25519, ngtcp2 for client QUIC
+datagrams, and libcurl for WebSocket
 transport and Pkarr HTTP. The relay server binds libwebsockets for HTTP upgrades,
 WebSocket framing, and TLS. The build generates native C from Bend and Nelua. Upstream Iroh
 runs separately as a compatibility reference.
@@ -37,6 +38,11 @@ client requires a libcurl build with WebSocket support.
    Set `UPSTREAM_STREAMS` to an Iroh peer that implements the exchange in
    [tests/quic_streams.bend](tests/quic_streams.bend) and accepts `listen`,
    `listen6`, and `dial ADDRESS` for mixed-peer checks.
+   Run `make check-quic-datagram UPSTREAM_DATAGRAM_V4=/path/to/ipv4-peer
+   UPSTREAM_DATAGRAM_V6=/path/to/ipv6-peer` with ngtcp2 1.25 or later and
+   its OpenSSL crypto backend. Use the Iroh direct-test listener fixtures.
+   The test checks packet acknowledgments, oversized payload rejection,
+   and incorrect endpoint pins on both address families.
 4. Run `make check-relay-live RELAY_URL=ws://127.0.0.1:3340/relay` against
    an upstream `iroh-relay` in development mode on the loopback interface.
    Both relay protocol versions are exercised. For a local TLS relay, use a
@@ -64,6 +70,14 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
+- [Direct QUIC datagram client](src/quic_datagram.bend) connects to a
+  numeric IPv4 or IPv6 address with a pinned Ed25519 peer key and one ALPN.
+  Call `step_quic_datagram` regularly to process incoming packets and
+  timers. Retry a write that returns zero after stepping. Use
+  `read_quic_datagram` to drain the receive queue and
+  `drop_quic_datagram` to release the connection. The peer's QUIC
+  acknowledgments report packet receipt. Application delivery requires
+  an application-level response.
 - [Relay client](src/relay_client.bend) upgrades a `ws://` or `wss://`
   connection and negotiates v1/v2. It uses TLS-exporter authentication on
   WSS when libcurl uses the linked OpenSSL major version. It answers a fresh
@@ -166,6 +180,6 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits throttle each connection at the relay message layer, support live updates, and send v2 notices. Full values for repeated custom headers and transport-byte accounting are pending. |
-| Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. Native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
+| Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. Iroh acknowledges packets carrying RFC 9221 datagrams from the separate Bend client on both address families. Application-level datagram reception, server support, shared stream and datagram handles, 0-RTT, multipath, and stream affinity are pending conformance checks or implementation. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
 | Connectivity | Bend endpoints exchanged pinned QUIC streams through the upstream Iroh relay over WS and WSS. Bend and Iroh QUIC engines also exchanged streams in both directions using the Bend relay bridge. Initial connection setup tries direct addresses from DNS or verified Pkarr records and falls back to a published relay. A local upstream Iroh DNS server supplied the published address data for a live relayed exchange. NAT traversal, adaptive path selection, and path migration are pending. |

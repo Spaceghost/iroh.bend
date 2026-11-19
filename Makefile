@@ -231,3 +231,23 @@ $(BUILD)/relay-server.c: tests/relay_server.bend $(RELAY_SERVER_SOURCES) src/ed2
 $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
+
+.PHONY: check-quic-datagram
+UPSTREAM_DATAGRAM_V4 ?=
+UPSTREAM_DATAGRAM_V6 ?=
+DATAGRAM_LIBS = libngtcp2_crypto_ossl libngtcp2 openssl
+
+check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram
+	sh tests/quic_datagram.sh "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_DATAGRAM_V4)" "$(UPSTREAM_DATAGRAM_V6)"
+
+$(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"
+	cp src/quic_datagram.bend "$(BUILD)/quic-datagram-stage/src/"
+	cp tests/quic_datagram.bend "$(BUILD)/quic-datagram-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_datagram.nelua \
+		"$(abspath $(BUILD)/quic-datagram-stage/src/quic_datagram.c)"
+	cd "$(BUILD)/quic-datagram-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_datagram.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-datagram: $(BUILD)/quic-datagram.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS)) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS))
