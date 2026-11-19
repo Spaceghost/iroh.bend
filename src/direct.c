@@ -264,6 +264,15 @@ static Term direct_accept_run(Env e, Term *f, IoWork *w) {
 }
 #endif
 
+#if defined(CID(respond)) || defined(CID(abort))
+static Term direct_finish_pack(Env e, IoWork *w) {
+  DirectJob *job = (DirectJob *)w->data;
+  Term result = job->error ? io_fail(e, EIO, job->error) : io_done(e, term_pak(CID(Unit), 0));
+  direct_job_free(job);
+  return result;
+}
+#endif
+
 #ifdef CID(respond)
 static void direct_respond_call(IoWork *w) {
   DirectJob *job = (DirectJob *)w->data;
@@ -271,12 +280,6 @@ static void direct_respond_call(IoWork *w) {
     job->error = "QUIC response write failed";
   else
     direct_shutdown(job->state->conn);
-}
-static Term direct_respond_pack(Env e, IoWork *w) {
-  DirectJob *job = (DirectJob *)w->data;
-  Term result = job->error ? io_fail(e, EIO, job->error) : io_done(e, term_pak(CID(Unit), 0));
-  direct_job_free(job);
-  return result;
 }
 static Term direct_respond_run(Env e, Term *f, IoWork *w) {
   Direct *state = direct_take(e, f[0], true);
@@ -287,35 +290,34 @@ static Term direct_respond_run(Env e, Term *f, IoWork *w) {
     return io_fail(e, EINVAL, "invalid or oversized QUIC response");
   }
   w->data = (void *)job;
-  return io_work(w, direct_respond_call, direct_respond_pack);
-}
-#endif
-
-#if defined(CID(close)) || defined(CID(abort))
-static Term direct_release(Env e, Term arg, bool stream) {
-  Direct *state = direct_take(e, arg, stream);
-  if (!state) return io_fail(e, EINVAL, "invalid QUIC handle");
-  if (stream) {
-    const SSL_SHUTDOWN_EX_ARGS args = {1, "stream aborted"};
-    SSL_shutdown_ex(state->conn, SSL_SHUTDOWN_FLAG_RAPID | SSL_SHUTDOWN_FLAG_NO_STREAM_FLUSH,
-      &args, sizeof(args));
-  }
-  direct_free(state);
-  return io_done(e, term_pak(CID(Unit), 0));
+  return io_work(w, direct_respond_call, direct_finish_pack);
 }
 #endif
 
 #ifdef CID(close)
 static Term direct_close_run(Env e, Term *f, IoWork *w) {
   (void)w;
-  return direct_release(e, f[0], false);
+  Direct *state = direct_take(e, f[0], false);
+  if (!state) return io_fail(e, EINVAL, "invalid QUIC listener");
+  direct_free(state);
+  return io_done(e, term_pak(CID(Unit), 0));
 }
 #endif
 
 #ifdef CID(abort)
+static void direct_abort_call(IoWork *w) {
+  DirectJob *job = (DirectJob *)w->data;
+  const SSL_STREAM_RESET_ARGS reset = {1};
+  const SSL_SHUTDOWN_EX_ARGS close_args = {1, "stream aborted"};
+  if (!SSL_stream_reset(job->state->stream, &reset, sizeof(reset)) ||
+      SSL_shutdown_ex(job->state->conn, 0, &close_args, sizeof(close_args)) < 0)
+    job->error = "could not abort QUIC connection";
+}
 static Term direct_abort_run(Env e, Term *f, IoWork *w) {
-  (void)w;
-  return direct_release(e, f[0], true);
+  Direct *state = direct_take(e, f[0], true);
+  if (!state) return io_fail(e, EINVAL, "invalid QUIC stream");
+  w->data = (void *)direct_job(state, 0);
+  return io_work(w, direct_abort_call, direct_finish_pack);
 }
 #endif
 

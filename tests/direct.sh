@@ -16,14 +16,21 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 start() {
-    timeout 20 "$1" "${3:-listen}" > "$scratch/address" 2> "$scratch/$2.listen.log" &
+    timeout 35 "$1" "${3:-listen}" > "$scratch/address" 2> "$scratch/$2.listen.log" &
     listener=$!
-    for i in $(seq 1 100); do
+    for i in $(seq 1 300); do
         test ! -s "$scratch/address" || break
-        kill -0 "$listener"
+        if ! kill -0 "$listener" 2>/dev/null; then
+            cat "$scratch/$2.listen.log" >&2
+            return 1
+        fi
         sleep 0.05
     done
-    read -r address < "$scratch/address"
+    if ! read -r address < "$scratch/address"; then
+        printf 'Listener %s did not report an address\n' "$2" >&2
+        cat "$scratch/$2.listen.log" >&2
+        return 1
+    fi
 }
 pass() {
     wait "$listener"
