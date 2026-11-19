@@ -1,7 +1,7 @@
 BEND ?= bend
 BUILD ?= build
 
-.PHONY: check check-gpu
+.PHONY: check check-gpu check-dns-tcp
 
 check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery
 	$(BUILD)/iroh-bend-check
@@ -19,6 +19,9 @@ $(BUILD)/iroh-bend-handshake: tests/handshake.bend src/handshake.bend src/relay_
 $(BUILD)/iroh-bend-discovery: tests/discovery.bend src/discovery.bend src/relay.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/discovery.bend -o $@
+
+check-dns-tcp: $(BUILD)/iroh-bend-discovery
+	python3 tests/discovery_tcp.py $(BUILD)/iroh-bend-discovery
 
 check-gpu: $(BUILD)/iroh-bend-gpu
 	BENDRTS= $(BUILD)/iroh-bend-gpu +RTS --gpu 1GB

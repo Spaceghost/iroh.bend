@@ -124,7 +124,7 @@ def live(port: Maybe<&2,U32>, endpoint: List<&2,U32>) -> IO(Unit):
     case Some{p}:
       do IO<Unit>:
         result : Dns.Reply <- IO.try(Dns.Reply,Dns.lookup(endpoint,origin(),"127.0.0.1",p,2500))
-        report("Iroh endpoint TXT lookup over UDP",attrs(result))
+        report("Iroh endpoint TXT lookup",attrs(result))
     case None{}:
       IO.die(Unit,2,"invalid resolver port")
 
