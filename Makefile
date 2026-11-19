@@ -110,3 +110,29 @@ $(BUILD)/pkarr.c: tests/pkarr.bend $(PKARR_SOURCES) src/ed25519.nelua tools/nelu
 $(BUILD)/iroh-bend-pkarr: $(BUILD)/pkarr.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-pkarr-http check-pkarr-http-live
+PKARR_URL ?=
+PKARR_HTTP_SOURCES = $(PKARR_SOURCES) src/pkarr_http.bend
+
+check-pkarr-http: $(BUILD)/iroh-bend-pkarr-http
+	python3 tests/pkarr_http.py "$(BUILD)/iroh-bend-pkarr-http"
+
+check-pkarr-http-live: $(BUILD)/iroh-bend-pkarr-http
+	test -n "$(PKARR_URL)"
+	"$(BUILD)/iroh-bend-pkarr-http" publish "$(PKARR_URL)"
+	"$(BUILD)/iroh-bend-pkarr-http" resolve "$(PKARR_URL)"
+
+$(BUILD)/pkarr-http.c: tests/pkarr_http.bend tests/pkarr.bend $(PKARR_HTTP_SOURCES) src/pkarr_http.nelua src/ed25519.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/pkarr-http-stage/src" "$(BUILD)/pkarr-http-stage/tests"
+	cp $(PKARR_HTTP_SOURCES) "$(BUILD)/pkarr-http-stage/src/"
+	cp tests/pkarr_http.bend tests/pkarr.bend "$(BUILD)/pkarr-http-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(BUILD)/pkarr-http-stage/src/ed25519.c)"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/pkarr_http.nelua \
+		"$(abspath $(BUILD)/pkarr-http-stage/src/pkarr_http.c)"
+	cd "$(BUILD)/pkarr-http-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/pkarr_http.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-pkarr-http: $(BUILD)/pkarr-http.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)

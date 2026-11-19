@@ -1,0 +1,217 @@
+-- One bounded libcurl transfer on a Bend I/O worker.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<curl/curl.h>'
+## cinclude '<errno.h>'
+require 'C.stdlib'
+require 'C.string'
+
+##[[
+for _, name in ipairs{'pkarr_http_request', 'Con'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_http_%s CID(%s)\n#else\n#define iroh_http_%s UINT32_MAX\n#endif',
+    name, name, name, name))
+end
+]]
+local iroh_http_pkarr_http_request: uint32 <cimport,nodecl>
+local iroh_http_Con: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EOVERFLOW: uint32 <cimport,nodecl>
+local ETIMEDOUT: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{data: cstring}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local Call = @function(*IoWork): void
+local Pack = @function(Env,*IoWork): Term
+local function io_eff(tag: uint32, effect: Effect) <cimport,nodecl> end
+local function io_work(work: *IoWork, call: Call, pack: Pack): Term <cimport,nodecl> end
+local function io_mem(p: pointer): pointer <cimport,nodecl> end
+local function io_cstr(e: Env, t: Term, n: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, n: uint64): boolean <cimport,nodecl> end
+local function io_list(e: Env, p: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, t: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, message: cstring): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+
+local CURL <cimport,nodecl> = @record{}
+local CURLU <cimport,nodecl> = @record{}
+local curl_slist <cimport,nodecl,codename 'iroh_http_slist'> = @record{}
+## cdefine 'iroh_http_slist struct curl_slist'
+local CURLE_OK: cint <cimport,nodecl>
+local CURLE_OPERATION_TIMEDOUT: cint <cimport,nodecl>
+local CURLUE_OK: cint <cimport,nodecl>
+local CURLUPART_URL: cint <cimport,nodecl>
+local CURLUPART_PATH: cint <cimport,nodecl>
+local CURL_GLOBAL_DEFAULT: clong <cimport,nodecl>
+local CURLOPT_CURLU: cint <cimport,nodecl>
+local CURLOPT_PROTOCOLS_STR: cint <cimport,nodecl>
+local CURLOPT_TIMEOUT_MS: cint <cimport,nodecl>
+local CURLOPT_NOSIGNAL: cint <cimport,nodecl>
+local CURLOPT_CAINFO: cint <cimport,nodecl>
+local CURLOPT_WRITEDATA: cint <cimport,nodecl>
+local CURLOPT_WRITEFUNCTION: cint <cimport,nodecl>
+local CURLOPT_CUSTOMREQUEST: cint <cimport,nodecl>
+local CURLOPT_POSTFIELDS: cint <cimport,nodecl>
+local CURLOPT_POSTFIELDSIZE: cint <cimport,nodecl>
+local CURLOPT_HTTPHEADER: cint <cimport,nodecl>
+local CURLINFO_RESPONSE_CODE: cint <cimport,nodecl>
+local function curl_global_init(flags: clong): cint <cimport,nodecl> end
+local function curl_easy_init(): *CURL <cimport,nodecl> end
+local function curl_easy_cleanup(curl: *CURL) <cimport,nodecl> end
+local function curl_easy_perform(curl: *CURL): cint <cimport,nodecl> end
+local function curl_easy_strerror(code: cint): cstring <cimport,nodecl> end
+local function curl_easy_getinfo(curl: *CURL, key: cint, out: *clong): cint <cimport,nodecl> end
+local function curl_url(): *CURLU <cimport,nodecl> end
+local function curl_url_cleanup(url: *CURLU) <cimport,nodecl> end
+local function curl_url_get(url: *CURLU, part: cint, value: *cstring, flags: cuint): cint <cimport,nodecl> end
+local function curl_url_set(url: *CURLU, part: cint, value: cstring, flags: cuint): cint <cimport,nodecl> end
+local function curl_free(p: pointer) <cimport,nodecl> end
+local function curl_slist_append(list: *curl_slist, item: cstring): *curl_slist <cimport,nodecl> end
+local function curl_slist_free_all(list: *curl_slist) <cimport,nodecl> end
+local Write = @function(cstring,csize,csize,pointer): csize
+local function set_num(curl: *CURL, option: cint, value: clong): cint <cimport 'curl_easy_setopt',nodecl> end
+local function set_ref(curl: *CURL, option: cint, value: pointer): cint <cimport 'curl_easy_setopt',nodecl> end
+local function set_text(curl: *CURL, option: cint, value: cstring): cint <cimport 'curl_easy_setopt',nodecl> end
+local function set_write(curl: *CURL, option: cint, fn: Write): cint <cimport 'curl_easy_setopt',nodecl> end
+
+local BODY_LIMIT <comptime> = 1072
+local Job = @record{
+  base: cstring, label: cstring, upload: boolean, timeout: clong,
+  body: [BODY_LIMIT]cuchar, size: csize, too_large: boolean,
+  status: clong, code: uint32, message: cstring
+}
+local http_ready: boolean
+
+local function append_path(url: *CURLU, base: cstring, label: cstring): boolean
+  if curl_url_set(url,CURLUPART_URL,base,0) ~= CURLUE_OK then return false end
+  local path: cstring
+  if curl_url_get(url,CURLUPART_PATH,&path,0) ~= CURLUE_OK then return false end
+  defer curl_free(path) end
+  local n = C.strlen(path)
+  local m = C.strlen(label)
+  local joined = (@*[0]cchar)(C.malloc(n + m + 2))
+  if joined == nilptr then return false end
+  defer C.free(joined) end
+  C.memcpy(joined,path,n)
+  if n == 0 or joined[n - 1] ~= 47 then
+    joined[n] = 47
+    n = n + 1
+  end
+  C.memcpy(&joined[n],label,m + 1)
+  return curl_url_set(url,CURLUPART_PATH,(@cstring)(joined),0) == CURLUE_OK
+end
+
+local function receive(data: cstring, width: csize, count: csize, context: pointer): csize
+  local job = (@*Job)(context)
+  local n = width * count
+  if job.upload then return n end
+  if n > BODY_LIMIT - job.size then
+    job.too_large = true
+    return 0
+  end
+  C.memcpy(&job.body[job.size],data,n)
+  job.size = job.size + n
+  return n
+end
+
+local function transfer(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local url = curl_url()
+  defer curl_url_cleanup(url) end
+  if url == nilptr or not append_path(url,job.base,job.label) then
+    job.code = EINVAL
+    job.message = 'invalid Pkarr relay URL'
+    return
+  end
+  local curl = curl_easy_init()
+  local headers: *curl_slist
+  defer
+    if curl ~= nilptr then curl_easy_cleanup(curl) end
+    curl_slist_free_all(headers)
+  end
+  local ca = C.getenv('CURL_CA_BUNDLE')
+  local no_signal: clong = 1
+  job.code = EIO
+  job.message = 'cannot configure Pkarr HTTP transfer'
+  if curl == nilptr or set_ref(curl,CURLOPT_CURLU,url) ~= CURLE_OK or
+      set_text(curl,CURLOPT_PROTOCOLS_STR,'http,https') ~= CURLE_OK or
+      set_num(curl,CURLOPT_NOSIGNAL,no_signal) ~= CURLE_OK or
+      set_num(curl,CURLOPT_TIMEOUT_MS,job.timeout) ~= CURLE_OK or
+      set_ref(curl,CURLOPT_WRITEDATA,job) ~= CURLE_OK or
+      set_write(curl,CURLOPT_WRITEFUNCTION,receive) ~= CURLE_OK or
+      (ca ~= nilptr and set_text(curl,CURLOPT_CAINFO,ca) ~= CURLE_OK) then return end
+  if job.upload then
+    headers = curl_slist_append(nilptr,'Content-Type: application/x-pkarr-signed-packet')
+    if headers == nilptr or set_ref(curl,CURLOPT_HTTPHEADER,headers) ~= CURLE_OK or
+        set_text(curl,CURLOPT_CUSTOMREQUEST,'PUT') ~= CURLE_OK or
+        set_num(curl,CURLOPT_POSTFIELDSIZE,(@clong)(job.size)) ~= CURLE_OK or
+        set_ref(curl,CURLOPT_POSTFIELDS,&job.body[0]) ~= CURLE_OK then return end
+    job.size = 0
+  end
+
+  local code = curl_easy_perform(curl)
+  if curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&job.status) ~= CURLE_OK then return end
+  if code == CURLE_OK or (job.too_large and job.status >= 300) then
+    job.code = 0
+    if job.status < 200 or job.status >= 300 then job.size = 0 end
+  elseif job.too_large then
+    job.code = EOVERFLOW
+    job.message = 'Pkarr HTTP response exceeds 1072 bytes'
+  else
+    if code == CURLE_OPERATION_TIMEDOUT then job.code = ETIMEDOUT end
+    job.message = curl_easy_strerror(code)
+  end
+end
+
+local function free_job(job: *Job)
+  C.free(job.base)
+  C.free(job.label)
+  C.free(job)
+end
+
+local function response(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.code ~= 0 then return io_fail(e,job.code,job.message) end
+  return io_done(e,io_tup(e,(@uint32)(job.status),io_list(e,(@cstring)(&job.body[0]),job.size)))
+end
+
+local function request(e: Env, fields: *[0]Term, work: *IoWork): Term
+  if not http_ready then return io_fail(e,EIO,'libcurl initialization failed') end
+  if fields[2] > 1 or fields[4] == 0 then return io_fail(e,EINVAL,'invalid Pkarr HTTP method or timeout') end
+  local job = (@*Job)(io_mem(C.calloc(1,#Job)))
+  local base_size: uint64, label_size: uint64
+  job.base = io_cstr(e,fields[0],&base_size)
+  job.label = io_cstr(e,fields[1],&label_size)
+  if io_nul(job.base,base_size) or label_size ~= 52 or io_nul(job.label,label_size) then
+    free_job(job)
+    return io_fail(e,EINVAL,'invalid Pkarr relay URL or key label')
+  end
+  job.upload = fields[2] == 1
+  job.timeout = (@clong)(fields[4])
+  local item = fields[3]
+  while term_aux(item) == iroh_http_Con do
+    local at = term_peek(e.mem,item)
+    if job.size >= BODY_LIMIT or e.mem[at] > 255 or not job.upload then
+      free_job(job)
+      return io_fail(e,EINVAL,'invalid Pkarr HTTP request body')
+    end
+    job.body[job.size] = (@cuchar)(e.mem[at])
+    job.size = job.size + 1
+    item = e.mem[at + 1]
+  end
+  work.data = (@cstring)(job)
+  return io_work(work,transfer,response)
+end
+
+local function register() <cexport,codename 'iroh_register_pkarr_http',cattribute 'constructor'>
+  if iroh_http_pkarr_http_request ~= 0xffffffff then
+    http_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK
+    io_eff(iroh_http_pkarr_http_request,request)
+  end
+end
