@@ -124,6 +124,60 @@ def decode_checked(bytes: List<&2,U32>, size: Wire.Size) -> Auth:
 def decode(+bytes: List<&2,U32>) -> Auth:
   decode_checked(bytes, Wire.measure_limited(bytes, 1048576))
 
+type ReasonChar is Data:
+  EmitChar{value: U32}
+  ContinueChar{left: U32, value: U32}
+
+def wide_char(byte: U32, four: Bool) -> ReasonChar:
+  match four:
+    case True{}:
+      ContinueChar{3,U32.and(byte,7)}
+    case False{}:
+      ContinueChar{2,U32.and(byte,15)}
+
+def leading_char(+byte: U32, prefix: U32) -> ReasonChar:
+  match prefix:
+    case 6:
+      ContinueChar{1,U32.and(byte,31)}
+    case 7:
+      wide_char(byte,U32.is_ge(byte,240))
+    case _:
+      EmitChar{byte}
+
+def next_char(+value: U32, left: U32) -> ReasonChar:
+  match left:
+    case 1:
+      EmitChar{value}
+    case _:
+      ContinueChar{U32.sub(left,1),value}
+
+def reason_byte(byte: U32, state: ReasonChar) -> ReasonChar:
+  match state:
+    case EmitChar{_}:
+      +lead = byte
+      leading_char(lead,U32.shrn(lead,5n))
+    case ContinueChar{left,value}:
+      next_char(U32.or(U32.shln(value,6n),U32.and(byte,63)),left)
+
+def collect_char(state: ReasonChar, rest: List<&2,Char>) -> List<&2,Char>:
+  match state:
+    case EmitChar{point}:
+      Con{Char.from_u32(point),rest}
+    case _:
+      rest
+
+def reason_chars(bytes: List<&2,U32>, state: ReasonChar) -> List<&2,Char>:
+  match bytes:
+    case Nil{}:
+      []
+    case Con{byte,tail}:
+      +next = reason_byte(byte,state)
+      collect_char(next,reason_chars(tail,next))
+
+# Denied frames have already passed UTF-8 validation in decode.
+def reason_text(bytes: List<&2,U32>) -> String:
+  String.from_list(reason_chars(bytes,EmitChar{0}))
+
 type Encoding is Data:
   Encoded{bytes: List<&2,U32>}
   InvalidEncoding{}

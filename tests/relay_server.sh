@@ -49,6 +49,37 @@ exercise() {
     timeout 8 "$client" "$relay" duplicate-v1
 }
 
+expect_denied() {
+    expected=$1
+    shift
+    result=0
+    timeout 8 "$client" "$@" > "$scratch/denial.log" 2>&1 || result=$?
+    if [ "$result" -eq 0 ] || [ "$result" -ge 124 ] ||
+        ! grep -Fq "$expected" "$scratch/denial.log"; then
+        cat "$scratch/denial.log" >&2
+        return 1
+    fi
+}
+
+exercise_access() {
+    relay="$1://127.0.0.1:$port/relay"
+    expect_denied 'not authorized' "$relay"
+    expect_denied 'fixture denied ☃ 🚫' "$relay?token=allow" bearer-denied
+    expect_denied 'invalid relay bearer token' "$relay" bearer-invalid
+    timeout 8 "$client" "$relay?token=al%6Cow&token=deny" mixed
+    timeout 8 "$client" "$relay?token=deny" bearer
+    for _ in $(seq 1 100); do
+        test "$(awk '/^closed / { n++ } END { print n+0 }' "$scratch/port")" -lt 4 || break
+        sleep 0.05
+    done
+    test "$(awk '/^denied / { n++ } END { print n+0 }' "$scratch/port")" -eq 2
+    awk '/^admitted / { print $2 }' "$scratch/port" | sort > "$scratch/admitted"
+    awk '/^closed / { print $2 }' "$scratch/port" | sort > "$scratch/closed"
+    test "$(wc -l < "$scratch/admitted")" -eq 4
+    cmp "$scratch/admitted" "$scratch/closed"
+    printf 'PASS %s access policy, token precedence, denial reasons, and per-session close callbacks\n' "$1"
+}
+
 start ws
 python3 tests/relay_server_auth.py "$port"
 exercise ws
@@ -82,3 +113,19 @@ if [ -n "$upstream" ]; then
     openssl x509 -in "$scratch/ca.pem" -outform DER -out "$scratch/ca.der"
     timeout 12 "$upstream" "https://127.0.0.1:$port" "$scratch/ca.der"
 fi
+stop
+
+"$server" policy-test
+start shared-token shared-token
+relay="ws://127.0.0.1:$port/relay"
+expect_denied 'not authorized' "$relay?token=allow" bearer-denied
+timeout 8 "$client" "$relay?token=deny" bearer
+stop
+
+start ws-access access
+python3 tests/relay_server_auth.py "$port"
+exercise_access ws
+stop
+
+start wss-access access "$scratch/cert.pem" "$scratch/key.pem"
+exercise_access wss

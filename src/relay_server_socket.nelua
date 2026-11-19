@@ -16,7 +16,8 @@ require 'C.string'
 for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
                       'Con','True','False','Unit','Some','None',
-                      'relay_client_auth_header','relay_export_keying_material'} do
+                      'relay_client_auth_header','relay_export_keying_material',
+                      'relay_request_raw','relay_enable_request_details','Nil'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_srv_%s CID(%s)\n#else\n#define iroh_srv_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -44,6 +45,9 @@ local iroh_srv_None: uint32 <cimport,nodecl>
 local iroh_srv_relay_client_auth_header: uint32 <cimport,nodecl>
 local iroh_srv_relay_export_keying_material: uint32 <cimport,nodecl>
 local iroh_srv_relay_millis: uint32 <cimport,nodecl>
+local iroh_srv_relay_request_raw: uint32 <cimport,nodecl>
+local iroh_srv_relay_enable_request_details: uint32 <cimport,nodecl>
+local iroh_srv_Nil: uint32 <cimport,nodecl>
 local Env <cimport,nodecl> = @record{mem: *[0]uint64}
 local IoWork <cimport,nodecl> = @record{}
 local Term = @uint64
@@ -69,6 +73,7 @@ local TAG_CTR: uint64 <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
 local EIO: uint32 <cimport,nodecl>
 local function RAND_bytes(buf: *cuchar, n: cint): cint <cimport,nodecl> end
+local function cleanse(buf: pointer, n: csize) <cimport 'OPENSSL_cleanse',nodecl> end
 
 ## cdefine 'bend_lws struct lws'
 local lws <cimport,nodecl,codename 'bend_lws'> = @record{}
@@ -97,6 +102,8 @@ local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
 local function lws_hdr_custom_length(ws: *lws, name: cstring, len: cint): cint <cimport,nodecl> end
 local function lws_hdr_custom_copy(ws: *lws, dst: cstring, cap: cint, name: cstring, len: cint): cint <cimport,nodecl> end
 local WSI_TOKEN_GET_URI: cint <cimport,nodecl>
+local WSI_TOKEN_HTTP_AUTHORIZATION: cint <cimport,nodecl>
+local WSI_TOKEN_HTTP_URI_ARGS: cint <cimport,nodecl>
 local LWS_WRITE_BINARY: cint <cimport,nodecl>
 local LWS_PRE: csize <cimport,nodecl>
 local LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT: uint64 <cimport,nodecl>
@@ -110,6 +117,7 @@ local function lws_get_protocol(wsi: *lws): *Protocol <cimport,nodecl> end
 local function lws_get_vhost_by_name(ctx: *lws_context, name: cstring): *lws_vhost <cimport,nodecl> end
 local function lws_get_vhost_listen_port(host: *lws_vhost): cint <cimport,nodecl> end
 local function lws_hdr_copy(wsi: *lws, text: cstring, max: cint, token: cint): cint <cimport,nodecl> end
+local function lws_hdr_copy_fragment(wsi: *lws, text: cstring, max: cint, token: cint, index: cint): cint <cimport,nodecl> end
 local function lws_frame_is_binary(wsi: *lws): cint <cimport,nodecl> end
 local function lws_is_final_fragment(wsi: *lws): cint <cimport,nodecl> end
 local function lws_remaining_packet_payload(wsi: *lws): csize <cimport,nodecl> end
@@ -124,18 +132,21 @@ local MAX_FRAME <comptime> = 65544
 local MAX_PEERS <comptime> = 128
 local MAX_EVENTS <comptime> = 512
 local MAX_SEND <comptime> = 32
+local MAX_METADATA <comptime> = 8192
 
 local Frame = @record{next: pointer, data: *cuchar, size: csize}
+local Field = @record{next: pointer, value: cstring, size: csize}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
   auth_header: [152]cchar, auth_len: cint,
+  path: [24]cchar, path_len: cint, authorization: pointer, query: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
 }
 local Event = @record{next: pointer, tag: uint32, id: uint32, version: uint32, body: cstring, size: csize}
 local Server = @record{
   next: pointer, id: uint32, ctx: *lws_context, iface: cstring, cert: cstring, key: cstring,
   protocols: *[0]Protocol, peers: pointer, peer_count: cuint,
-  events: pointer, event_tail: pointer, event_count: cuint
+  events: pointer, event_tail: pointer, event_count: cuint, request_details: boolean
 }
 local servers: pointer
 local next_id: uint32 = 1
@@ -185,6 +196,22 @@ local function free_frame(frame: *Frame)
   C.free(frame.data)
   C.free(frame)
 end
+local function free_fields(fields: pointer)
+  while fields ~= nilptr do
+    local field = (@*Field)(fields)
+    fields = field.next
+    cleanse(field.value,field.size)
+    C.free(field.value)
+    C.free(field)
+  end
+end
+local function clear_request(peer: *Peer)
+  free_fields(peer.authorization)
+  free_fields(peer.query)
+  peer.authorization = nilptr
+  peer.query = nilptr
+  peer.path_len = -1
+end
 local function remove_peer(server: *Server, peer: *Peer)
   local slot = &server.peers
   while $slot ~= nilptr and $slot ~= peer do
@@ -193,6 +220,7 @@ local function remove_peer(server: *Server, peer: *Peer)
   if $slot ~= peer then return end
   $slot = peer.next
   server.peer_count = server.peer_count - 1
+  clear_request(peer)
   C.free(peer.body)
   while peer.outgoing ~= nilptr do
     local frame = (@*Frame)(peer.outgoing)
@@ -258,6 +286,32 @@ local function capture_auth_header(peer: *Peer, ws: *lws)
   end
 end
 
+local function capture_fields(ws: *lws, token: cint, fields: *pointer): boolean
+  local text: [MAX_METADATA]cchar
+  defer cleanse(&text[0],MAX_METADATA) end
+  local used: csize = 0
+  local index: cint = 0
+  while used < MAX_METADATA do
+    local len = lws_hdr_copy_fragment(ws,(@cstring)(&text[0]),MAX_METADATA,token,index)
+    if len == -1 then return true end
+    if len < 0 or (@csize)(len) + 1 > MAX_METADATA - used then return false end
+    local entry = (@*Field)(io_mem(C.calloc(1,#Field)))
+    entry.size = (@csize)(len)
+    entry.value = (@cstring)(io_mem(C.malloc(entry.size + 1)))
+    C.memcpy(entry.value,&text[0],entry.size + 1)
+    entry.next = $fields
+    $fields = entry
+    used = used + entry.size + 1
+    index = index + 1
+  end
+  return false
+end
+local function capture_request(peer: *Peer, ws: *lws)
+  peer.path_len = lws_hdr_copy(ws,(@cstring)(&peer.path[0]),24,WSI_TOKEN_GET_URI)
+  if peer.path_len < 0 or not capture_fields(ws,WSI_TOKEN_HTTP_AUTHORIZATION,&peer.authorization) or
+      not capture_fields(ws,WSI_TOKEN_HTTP_URI_ARGS,&peer.query) then clear_request(peer) end
+end
+
 local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
   if reason == LWS_CALLBACK_HTTP then
     lws_return_http_status(ws,404,nilptr)
@@ -286,6 +340,7 @@ local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, l
     next_id = next_id + 1
     peer.ws = ws
     capture_auth_header(peer,ws)
+    if server.request_details then capture_request(peer,ws) end
     peer.next = server.peers
     server.peers = peer
     server.peer_count = server.peer_count + 1
@@ -440,6 +495,37 @@ local function auth_header_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_tup(e,f[0],io_box(e,iroh_srv_Some,bytes))
 end
 
+local function list_fields(e: Env, fields: pointer): Term
+  local list = term_pak(iroh_srv_Nil,0)
+  while fields ~= nilptr do
+    local field = (@*Field)(fields)
+    list = io_node(e,iroh_srv_Con,io_list(e,field.value,field.size),list)
+    fields = field.next
+  end
+  return list
+end
+local function request_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local server = find_server(e,f[0])
+  local peer = find_peer(server,(@uint32)(f[1]))
+  local empty = term_pak(iroh_srv_Nil,0)
+  if peer == nilptr or not server.request_details or peer.path_len < 0 or peer.closing then
+    return io_tup(e,f[0],empty)
+  end
+  local path = io_list(e,(@cstring)(&peer.path[0]),(@uint64)(peer.path_len))
+  -- The native bridge uses the runtime's generic list representation.
+  -- Bend constructs and flattens the public RequestDetails record.
+  local query = io_node(e,iroh_srv_Con,list_fields(e,peer.query),empty)
+  local fields = io_node(e,iroh_srv_Con,list_fields(e,peer.authorization),query)
+  local raw = io_node(e,iroh_srv_Con,io_node(e,iroh_srv_Con,path,empty),fields)
+  clear_request(peer)
+  return io_tup(e,f[0],raw)
+end
+local function enable_request_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local server = find_server(e,f[0])
+  if server ~= nilptr then server.request_details = true end
+  return f[0]
+end
+
 local function export_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
   local none = term_pak(iroh_srv_None,0)
@@ -465,7 +551,10 @@ end
 
 local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
-  if peer ~= nilptr then peer.authorized = true end
+  if peer ~= nilptr then
+    peer.authorized = true
+    clear_request(peer)
+  end
   return f[0]
 end
 local function kick_run(e: Env, f: *[0]Term, work: *IoWork): Term
@@ -505,6 +594,12 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   end
   if iroh_srv_relay_export_keying_material ~= 0xffffffff then
     io_eff(iroh_srv_relay_export_keying_material,export_run)
+  end
+  if iroh_srv_relay_request_raw ~= 0xffffffff then
+    io_eff(iroh_srv_relay_request_raw,request_run)
+  end
+  if iroh_srv_relay_enable_request_details ~= 0xffffffff then
+    io_eff(iroh_srv_relay_enable_request_details,enable_request_run)
   end
   if iroh_srv_relay_bind ~= 0xffffffff then io_eff(iroh_srv_relay_bind,bind_run) end
   if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end

@@ -43,13 +43,18 @@ def complete(reply: Client.Connection & Wire.Frame, sender: Client.Connection) -
     Client.close(receiver)
     result(matches(Wire.packet(frame)))
 
-def test(+url: String, receiver_version: U32, sender_version: U32) -> IO(Unit):
+def test_token(+url: String, receiver_version: U32, sender_version: U32, +token: Maybe<&2,String>) -> IO(Unit):
   do IO<Unit>:
-    receiver : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,42), receiver_version))
-    sender : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,73), sender_version))
+    receiver : Client.Connection <- IO.try(Client.Connection,
+      Client.connect_with_token(url,List.replicate(U32,32n,42),receiver_version,token))
+    sender : Client.Connection <- IO.try(Client.Connection,
+      Client.connect_with_token(url,List.replicate(U32,32n,73),sender_version,token))
     sent : Client.Connection <- IO.try(Client.Connection, Client.send_datagram(sender, peer(), 3, 0, payload()))
     got : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame, Client.receive(receiver))
     complete(got, sent)
+
+def test(url: String, receiver_version: U32, sender_version: U32) -> IO(Unit):
+  test_token(url,receiver_version,sender_version,None{})
 
 def checked(conn: Client.Connection, ok: Bool) -> IO(Client.Connection):
   match ok:
@@ -184,6 +189,12 @@ def run(args: List<String>) -> IO(Unit):
       duplicate_v1(url)
     case Con{_,Con{url,Con{"heartbeat",Nil{}}}}:
       heartbeat(url)
+    case Con{_,Con{url,Con{"bearer",Nil{}}}}:
+      test_token(url,2,2,Some{"allow"})
+    case Con{_,Con{url,Con{"bearer-denied",Nil{}}}}:
+      test_token(url,1,1,Some{"deny"})
+    case Con{_,Con{url,Con{"bearer-invalid",Nil{}}}}:
+      test_token(url,2,2,Some{"bad\nvalue"})
     case Con{_,Con{url,Con{"mixed",Nil{}}}}:
       test(url, 1, 2)
     case Con{_,Con{url,Con{_,Nil{}}}}:

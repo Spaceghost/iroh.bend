@@ -15,6 +15,10 @@ def open(url: String, max_version: U32) -> IO(Result<&1,&1,U32 & String, RelaySo
 # available. Complete every successful preparation by calling upgrade.
 def prepare(url: String, max_version: U32, key: List<&2,U32>) ->
     IO(Result<&1,&1,U32 & String,PendingUpgrade & Maybe<&1,List<&2,U32>>>):
+  prepare_token(url,max_version,key,None{})
+
+def prepare_token(url: String, max_version: U32, key: List<&2,U32>, token: Maybe<&2,String>) ->
+    IO(Result<&1,&1,U32 & String,PendingUpgrade & Maybe<&1,List<&2,U32>>>):
   import "./relay_socket.c"
 
 def upgrade(pending: PendingUpgrade, header: Maybe<&1,List<&2,U32>>) ->

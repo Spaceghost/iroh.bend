@@ -20,7 +20,7 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'open','prepare','upgrade','recv','send','close','Connected','Pending',
+for _, name in ipairs{'open','prepare_token','upgrade','recv','send','close','Connected','Pending',
                       'Some','None','True','False','Con','Unit'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_ws_%s CID(%s)\n#else\n#define iroh_ws_%s UINT32_MAX\n#endif',
@@ -28,7 +28,7 @@ for _, name in ipairs{'open','prepare','upgrade','recv','send','close','Connecte
 end
 ]]
 local iroh_ws_open: uint32 <cimport,nodecl>
-local iroh_ws_prepare: uint32 <cimport,nodecl>
+local iroh_ws_prepare_token: uint32 <cimport,nodecl>
 local iroh_ws_upgrade: uint32 <cimport,nodecl>
 local iroh_ws_recv: uint32 <cimport,nodecl>
 local iroh_ws_send: uint32 <cimport,nodecl>
@@ -132,6 +132,7 @@ local function native_recv(curl: *CURL, buf: pointer, limit: csize, got: *csize,
 
 local SSL <cimport,nodecl> = @record{}
 local function OPENSSL_version_major(): cuint <cimport,nodecl> end
+local function cleanse(buf: pointer, n: csize) <cimport 'OPENSSL_cleanse',nodecl> end
 local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
     label: cstring, label_len: csize, context: *cuchar, context_len: csize, use_context: cint): cint <cimport,nodecl> end
 local sem_t <cimport,nodecl> = @record{}
@@ -155,12 +156,12 @@ local AUTH_SIZE <comptime> = 151
 local AUTH_PREFIX <comptime> = 'x-iroh-relay-client-auth-v1: '
 local WRITE_TIMEOUT_NS <comptime> = 10000000000
 local READ_TIMEOUT_NS <comptime> = 40000000000
-local Socket = @record{next: pointer, id: uint32, curl: *CURL, headers: *curl_slist}
+local Socket = @record{next: pointer, id: uint32, curl: *CURL, headers: *curl_slist, bearer: cstring}
 local Exporter = @record{id: uint32, worker: *pthread_t, ready: *sem_t, proof_ready: *sem_t,
   key: [32]cchar, material: [32]cchar, proof: [152]cchar, header: cstring,
   requested: boolean, offered: boolean, joined: boolean, prepare_error: cstring}
 local Job = @record{ws: *Socket, url: cstring, data: cstring, size: csize, err: cstring, version: uint32,
-  exporter: *Exporter, next_pending: pointer}
+  exporter: *Exporter, next_pending: pointer, bearer: cstring}
 local sockets: pointer
 local pending: pointer
 local next_id: uint32 = 1
@@ -170,6 +171,7 @@ local curl_openssl: boolean
 local function free_socket(ws: *Socket)
   if ws == nilptr then return end
   if ws.curl ~= nilptr then curl_easy_cleanup(ws.curl) end
+  if ws.bearer ~= nilptr then cleanse(ws.bearer,C.strlen(ws.bearer)) end
   curl_slist_free_all(ws.headers)
   C.free(ws)
 end
@@ -184,8 +186,21 @@ local function free_job(job: *Job)
     C.free(job.exporter)
   end
   C.free(job.url)
+  if job.bearer ~= nilptr then
+    cleanse(job.bearer,C.strlen(job.bearer))
+    C.free(job.bearer)
+  end
   C.free(job.data)
   C.free(job)
+end
+
+local function add_bearer(job: *Job): boolean
+  if job.bearer == nilptr then return true end
+  if curl_slist_append(job.ws.headers,job.bearer) == nilptr then return false end
+  local last = job.ws.headers
+  while last.next ~= nilptr do last = (@*curl_slist)(last.next) end
+  job.ws.bearer = last.data
+  return true
 end
 local function job_for(ws: *Socket): *Job
   local job = (@*Job)(io_mem(C.calloc(1,#Job)))
@@ -289,6 +304,7 @@ local function connect_job(job: *Job)
       set_number(ws.curl, CURLOPT_TIMEOUT_MS, timeout_ms) ~= CURLE_OK or
       set_number(ws.curl, CURLOPT_HEADEROPT, CURLHEADER_SEPARATE) ~= CURLE_OK or
       not enable_exporter(job) or
+      not add_bearer(job) or
       set_ptr(ws.curl, CURLOPT_HTTPHEADER, ws.headers) ~= CURLE_OK or
       (ca_file ~= nilptr and set_str(ws.curl, CURLOPT_CAINFO, ca_file) ~= CURLE_OK) or
       curl_easy_perform(ws.curl) ~= CURLE_OK then
@@ -408,11 +424,38 @@ local function prepare_pack(e: Env, work: *IoWork): Term
   return io_done(e,io_tup(e,io_box(e,iroh_ws_Pending,auth.id),material))
 end
 
+local function read_bearer(e: Env, value: Term, job: *Job): boolean
+  if term_aux(value) ~= iroh_ws_Some then return true end
+  local n: uint64
+  local token = io_cstr(e,e.mem[term_peek(e.mem,value)],&n)
+  if token == nilptr then return false end
+  defer
+    cleanse(token,n)
+    C.free(token)
+  end
+  if n > 8000 then return false end
+  local bytes = (@*[0]cuchar)(token)
+  for i: csize = 0,<(@csize)(n) do
+    if bytes[i] < 32 or bytes[i] > 126 then return false end
+  end
+  local prefix: cstring = 'Authorization: Bearer '
+  local len = C.strlen(prefix)
+  job.bearer = (@cstring)(io_mem(C.calloc(1,len + (@csize)(n) + 1)))
+  local header = (@*[0]cchar)(job.bearer)
+  C.memcpy(&header[0],prefix,len)
+  C.memcpy(&header[len],token,(@csize)(n))
+  return true
+end
+
 local function prepare_run(e: Env, fields: *[0]Term, work: *IoWork): Term
   if not curl_ready then return io_fail(e,EIO,'libcurl initialization failed') end
   if fields[1] ~= 1 and fields[1] ~= 2 then return io_fail(e,EINVAL,'invalid maximum relay version') end
   local job = open_job(e,fields)
   if job == nilptr then return io_fail(e,EINVAL,'relay URL contains NUL') end
+  if not read_bearer(e,fields[3],job) then
+    free_job(job)
+    return io_fail(e,EINVAL,'invalid relay bearer token')
+  end
   local auth = (@*Exporter)(io_mem(C.calloc(1,#Exporter)))
   if not copy_bytes(e,fields[2],(@*[0]cchar)(&auth.key[0]),32) then
     C.free(auth)
@@ -642,7 +685,7 @@ local function register() <cexport,codename 'iroh_register_relay_socket',cattrib
   curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK
   curl_openssl = curl_ready and matching_ssl()
   if iroh_ws_open ~= 0xffffffff then io_eff(iroh_ws_open,open_run) end
-  if iroh_ws_prepare ~= 0xffffffff then io_eff(iroh_ws_prepare,prepare_run) end
+  if iroh_ws_prepare_token ~= 0xffffffff then io_eff(iroh_ws_prepare_token,prepare_run) end
   if iroh_ws_upgrade ~= 0xffffffff then io_eff(iroh_ws_upgrade,upgrade_run) end
   if iroh_ws_recv ~= 0xffffffff then io_eff(iroh_ws_recv,recv_run) end
   if iroh_ws_send ~= 0xffffffff then io_eff(iroh_ws_send,send_run) end

@@ -25,8 +25,8 @@ def confirmed(socket: WS.RelaySocket, protocol: Wire.Version, frame: Handshake.A
   match frame:
     case Handshake.Confirmed{}:
       IO.pure(Result<&1,&1,U32 & String, Connection>, Done{Online{socket, protocol}})
-    case Handshake.Denied{_}:
-      fail_open(socket, "relay denied endpoint authentication")
+    case Handshake.Denied{reason}:
+      fail_open(socket, Handshake.reason_text(reason))
     case _:
       fail_open(socket, "expected relay authentication confirmation")
 
@@ -76,8 +76,8 @@ def answer_challenge(socket: WS.RelaySocket, protocol: Wire.Version,
         proof_ready(socket, protocol, proof)
     case Handshake.Confirmed{} True{}:
       IO.pure(Result<&1,&1,U32 & String,Connection>,Done{Online{socket,protocol}})
-    case Handshake.Denied{_} _:
-      fail_open(socket, "relay denied endpoint authentication")
+    case Handshake.Denied{reason} _:
+      fail_open(socket, Handshake.reason_text(reason))
     case _ _:
       fail_open(socket, "expected relay authentication challenge")
 
@@ -125,20 +125,24 @@ def prepared(reply: Result<&1,&1,U32 & String,WS.PendingUpgrade & Maybe<&1,List<
       IO.pure(Result<&1,&1,U32 & String,Connection>,Fail{error})
 
 def connect_with_key(key: Result<&1,&1,U32 & String,List<&2,U32>>, url: String,
-    seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String,Connection>):
+    seed: List<&2,U32>, max_version: U32, token: Maybe<&2,String>) -> IO(Result<&1,&1,U32 & String,Connection>):
   match key:
     case Done{public}:
       do IO<Result<&1,&1,U32 & String,Connection>>:
         reply : Result<&1,&1,U32 & String,WS.PendingUpgrade & Maybe<&1,List<&2,U32>>> <-
-          WS.prepare(url,max_version,public)
+          WS.prepare_token(url,max_version,public,token)
         prepared(reply,seed)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Connection>,Fail{error})
 
-def connect_with_version(url: String, +seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String,Connection>):
+def connect_with_token(url: String, +seed: List<&2,U32>, max_version: U32, token: Maybe<&2,String>)
+    -> IO(Result<&1,&1,U32 & String,Connection>):
   do IO<Result<&1,&1,U32 & String,Connection>>:
     key : Result<&1,&1,U32 & String,List<&2,U32>> <- Ed.public_key(seed)
-    connect_with_key(key,url,seed,max_version)
+    connect_with_key(key,url,seed,max_version,token)
+
+def connect_with_version(url: String, seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String,Connection>):
+  connect_with_token(url,seed,max_version,None{})
 
 def connect(url: String, seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String, Connection>):
   connect_with_version(url, seed, 2)
