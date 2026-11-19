@@ -21,7 +21,8 @@ client requires a libcurl build with WebSocket support.
    Run `make check-pkarr-http` with libcurl and Python 3 for Pkarr relay
    publishing, resolution, and error handling. Run
    `make check-pkarr-http-live PKARR_URL=http://127.0.0.1:8080/pkarr` against
-   a local upstream Iroh DNS server with a disposable store.
+   a local upstream Iroh DNS server with a disposable store. Run
+   `make check-pkarr-dht` for bencode and BEP 44 wire checks.
 3. Run `make check-direct UPSTREAM=/path/to/upstream-peer` for mixed-peer
    QUIC. The peer fixture accepts `listen` and `dial ADDRESS`, uses the
    ALPN, identity seeds, and echo payload in [tests/direct.bend](tests/direct.bend),
@@ -61,6 +62,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   Pass a base URL such as `https://dns.iroh.link/pkarr` and a transfer timeout
   in milliseconds. For a local HTTPS relay, set `CURL_CA_BUNDLE` to the
   trusted CA file.
+- [Pkarr DHT](src/pkarr_dht.bend) resolves or publishes a signed packet at a
+  specified IPv4 DHT peer over UDP. Supply the local 20-byte DHT node ID.
+  Publishing obtains the peer's write token on the same UDP socket and
+  requires a sequence in the nonnegative signed 64-bit range.
 
 
 ## Conformance scope
@@ -76,5 +81,5 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The TLS-exporter shortcut and native relay server are pending. |
 | Public endpoint lifecycle and QUIC features | Concurrent streams, native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
-| DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish and resolve passed against the upstream Iroh DNS server. Pkarr DHT transport is pending. |
+| DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish and resolve passed against the upstream Iroh DNS server. Single-peer BEP 44 get and put interoperate with upstream mainline. The upstream Iroh DNS fallback also resolves the Bend publication. Iterative routing and replication are pending. |
 | Connectivity | NAT traversal, automatic relay fallback, and path migration are pending. |

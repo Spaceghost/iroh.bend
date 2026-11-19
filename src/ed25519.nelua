@@ -6,7 +6,7 @@
 require 'C.stdlib'
 
 ##[[
-for _, name in ipairs{'sign','verify','Con','True','False'} do
+for _, name in ipairs{'sign','verify','sha1_public_key','Con','True','False'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_ed_%s CID(%s)\n#else\n#define iroh_ed_%s UINT32_MAX\n#endif',
     name, name, name, name))
@@ -14,6 +14,7 @@ end
 ]]
 local iroh_ed_sign: uint32 <cimport,nodecl>
 local iroh_ed_verify: uint32 <cimport,nodecl>
+local iroh_ed_sha1_public_key: uint32 <cimport,nodecl>
 local iroh_ed_Con: uint32 <cimport,nodecl>
 local iroh_ed_True: uint32 <cimport,nodecl>
 local iroh_ed_False: uint32 <cimport,nodecl>
@@ -50,6 +51,8 @@ local function EVP_DigestVerifyInit(ctx: *EVP_MD_CTX, pctx: pointer, md: pointer
     key: *EVP_PKEY): cint <cimport,nodecl> end
 local function EVP_DigestVerify(ctx: *EVP_MD_CTX, sig: *cuchar, sig_len: csize,
     data: *cuchar, data_len: csize): cint <cimport,nodecl> end
+local function EVP_Q_digest(libctx: pointer, name: cstring, props: cstring, data: pointer,
+    len: csize, digest: *cuchar, digest_len: *csize): cint <cimport,nodecl> end
 local function OPENSSL_cleanse(p: pointer, n: csize) <cimport,nodecl> end
 
 -- Bound the native copy for relay transcripts and Pkarr signed packets.
@@ -112,7 +115,21 @@ local function verify(e: Env, f: *[0]Term, work: *IoWork): Term
   return term_pak(iroh_ed_False, 0)
 end
 
+local function sha1_public_key(e: Env, f: *[0]Term, work: *IoWork): Term
+  local key: [32]cuchar
+  if read(e,f[0],(@*[0]cuchar)(&key[0]),32) ~= 32 then
+    return io_fail(e,EINVAL,'invalid DHT public key')
+  end
+  local digest: [20]cuchar
+  local len: csize
+  if EVP_Q_digest(nilptr,'SHA1',nilptr,&key[0],32,&digest[0],&len) ~= 1 or len ~= 20 then
+    return io_fail(e,EIO,'DHT target digest failed')
+  end
+  return io_done(e,io_list(e,(@cstring)(&digest[0]),len))
+end
+
 local function register() <cexport,codename 'iroh_register_ed25519',cattribute 'constructor'>
   if iroh_ed_sign ~= 0xffffffff then io_eff(iroh_ed_sign, sign) end
   if iroh_ed_verify ~= 0xffffffff then io_eff(iroh_ed_verify, verify) end
+  if iroh_ed_sha1_public_key ~= 0xffffffff then io_eff(iroh_ed_sha1_public_key, sha1_public_key) end
 end
