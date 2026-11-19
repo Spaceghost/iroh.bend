@@ -138,20 +138,61 @@ def server_first(first: Direct.QuicConnection & Direct.QuicIoStream) -> IO(Unit)
       poll(Direct.QuicConnection,Direct.QuicIoStream,Direct.quic_accept_stream,4000n,conn)
     server_second(second,stream)
 
+def serve(conn: Direct.QuicConnection) -> IO(Unit):
+  do IO<Unit>:
+    first : Direct.QuicConnection & Direct.QuicIoStream <-
+      poll(Direct.QuicConnection,Direct.QuicIoStream,Direct.quic_accept_stream,4000n,conn)
+    server_first(first)
+
 def server(bound: Direct.QuicListener & U32, prefix: String) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(String.append(prefix,U32.show(port)))
     conn : Direct.QuicConnection <- IO.try(Direct.QuicConnection,Direct.quic_accept_connection(listener))
-    first : Direct.QuicConnection & Direct.QuicIoStream <-
-      poll(Direct.QuicConnection,Direct.QuicIoStream,Direct.quic_accept_stream,4000n,conn)
-    server_first(first)
+    serve(conn)
 
 def listen(host: String, prefix: String) -> IO(Unit):
   do IO<Unit>:
     bound : Direct.QuicListener & U32 <- IO.try(Direct.QuicListener & U32,
       Direct.bind(host,0,List.replicate(U32,32n,42),Fixture.dialer_public(),Fixture.alpn()))
     server(bound,prefix)
+
+def check_rebound(bound: Direct.QuicListener & U32) -> IO(Unit):
+  (listener,_) = bound
+  IO.try(Unit,Direct.close(listener))
+
+def serve_both(accepted: Direct.QuicListener & Direct.QuicConnection, other: Direct.QuicConnection,
+    host: String, port: U32) -> IO(Unit):
+  (listener,conn) = accepted
+  do IO<Unit>:
+    IO.try(Unit,Direct.close(listener))
+    task : Chan(Unit) <- IO.fork(Unit,serve(other))
+    serve(conn)
+    IO.join(Unit,task)
+    rebound : Direct.QuicListener & U32 <- IO.try(Direct.QuicListener & U32,
+      Direct.bind(host,port,List.replicate(U32,32n,42),Fixture.dialer_public(),Fixture.alpn()))
+    check_rebound(rebound)
+
+def accept_next(accepted: Direct.QuicListener & Direct.QuicConnection, host: String, port: U32) -> IO(Unit):
+  (listener,conn) = accepted
+  do IO<Unit>:
+    next : Direct.QuicListener & Direct.QuicConnection <-
+      poll(Direct.QuicListener,Direct.QuicConnection,Direct.quic_try_accept_connection,4000n,listener)
+    serve_both(next,conn,host,port)
+
+def listen_again(bound: Direct.QuicListener & U32, host: String, prefix: String) -> IO(Unit):
+  (listener,+port) = bound
+  do IO<Unit>:
+    IO.print(String.append(prefix,U32.show(port)))
+    first : Direct.QuicListener & Direct.QuicConnection <-
+      poll(Direct.QuicListener,Direct.QuicConnection,Direct.quic_try_accept_connection,4000n,listener)
+    accept_next(first,host,port)
+
+def listen_many(+host: String, prefix: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Direct.QuicListener & U32 <- IO.try(Direct.QuicListener & U32,
+      Direct.bind(host,0,List.replicate(U32,32n,42),Fixture.dialer_public(),Fixture.alpn()))
+    listen_again(bound,host,prefix)
 
 def client_receive(incoming: Direct.QuicConnection & Direct.QuicIoStream) -> IO(Unit):
   (conn,source) = incoming
@@ -190,12 +231,12 @@ def client_first(first: Direct.QuicConnection & Direct.QuicIoStream) -> IO(Unit)
       poll(Direct.QuicConnection,Direct.QuicIoStream,open_bidi,4000n,conn)
     client_second(second,deferred)
 
-def dial(host: String, port: Maybe<&2,U32>) -> IO(Unit):
+def dial(host: String, port: Maybe<&2,U32>, seed: U32) -> IO(Unit):
   match port:
     case Some{p}:
       do IO<Unit>:
         conn : Direct.QuicConnection <- IO.try(Direct.QuicConnection,
-          Direct.quic_connect(host,p,List.replicate(U32,32n,73),Fixture.listener_public(),Fixture.alpn()))
+          Direct.quic_connect(host,p,List.replicate(U32,32n,seed),Fixture.listener_public(),Fixture.alpn()))
         opened : Direct.QuicConnection & Direct.QuicIoStream <-
           poll(Direct.QuicConnection,Direct.QuicIoStream,open_bidi,4000n,conn)
         client_first(opened)
@@ -208,12 +249,18 @@ def run(args: List<String>) -> IO(Unit):
       listen("127.0.0.1","127.0.0.1:")
     case Con{_,Con{"listen6",Nil{}}}:
       listen("::1","[::1]:")
+    case Con{_,Con{"listen-many",Nil{}}}:
+      listen_many("127.0.0.1","127.0.0.1:")
+    case Con{_,Con{"listen-many6",Nil{}}}:
+      listen_many("::1","[::1]:")
+    case Con{_,Con{"dial-unpinned",Con{port,Nil{}}}}:
+      dial("127.0.0.1",U32.read(port),74)
     case Con{_,Con{"dial",Con{port,Nil{}}}}:
-      dial("127.0.0.1",U32.read(port))
+      dial("127.0.0.1",U32.read(port),73)
     case Con{_,Con{"dial6",Con{port,Nil{}}}}:
-      dial("::1",U32.read(port))
+      dial("::1",U32.read(port),73)
     case _:
-      IO.die(Unit,2,"expected listen, listen6, dial PORT, or dial6 PORT")
+      IO.die(Unit,2,"expected a QUIC test mode")
 
 def main() -> IO(Unit):
   do IO<Unit>:

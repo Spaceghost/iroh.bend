@@ -47,6 +47,14 @@ def quic_connect(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U3
 def quic_accept_connection(listener: QuicListener) -> IO(Result<&1,&1,U32 & String,QuicConnection>):
   import "./direct.c"
 
+# Poll for an authenticated connection while retaining the listener. Once
+# polled, use this operation for subsequent accepts on that listener.
+# Closing the listener stops new handshakes. Accepted connections keep their
+# shared UDP socket until their own handles and stream handles are released.
+def quic_try_accept_connection(listener: QuicListener)
+    -> IO(QuicListener & Poll<&1,&1,Result<&1,&1,U32 & String,QuicConnection>,Unit>):
+  import "./direct.c"
+
 # A direction of 0 opens a bidirectional stream, and 1 opens a send-only
 # stream. Poll results preserve the connection even on a stream error.
 def quic_open_stream(conn: QuicConnection, direction: U32)
