@@ -1,55 +1,59 @@
 # iroh.bend
 
-A Rust-free implementation in progress targeting the Iroh 1.5.0 wire protocol.
-Bend implements the post-authentication WebSocket relay frame codec. A native
-OpenSSL host provides the transport and cryptography for the direct QUIC
-request/response API. The source tree and normal build have no Rust dependency.
-Upstream Iroh is built separately as the compatibility reference.
+A Rust-free implementation targeting the Iroh 1.5.0 wire protocol. Bend
+implements relay framing, authentication transcripts, and client state.
+Nelua binds OpenSSL for direct QUIC and Ed25519, and libcurl for WebSocket
+transport. The build generates native C from Bend and Nelua. Upstream Iroh
+runs separately as a compatibility reference.
 
 ## Build and verify
 
-Use Bend 2.0.39 and Clang. The direct tests also need OpenSSL 3.5 or later,
-`pkg-config`, and an upstream Iroh 1.5.0 test peer.
+Use Bend 2.0.39 and Clang. The native networking tests also use Nelua and
+`pkg-config`. Direct QUIC requires OpenSSL 3.5 or later. The live relay
+client requires a libcurl build with WebSocket support.
 
-1. Run `make check` for the native Bend codec suite. This runs the translated
-   upstream byte snapshots and malformed-frame, frame-size, version and
-   datagram metadata checks.
-2. Run `make check-direct UPSTREAM=/path/to/upstream` for direct QUIC. The
-   reference executable is the `upstream` binary produced by
-   `tests-iroh-bend/drop-in.sh` in the [reference fork](../iroh.bend).
-   The test covers both mixed-peer directions, Bend-to-Bend, and rejection
-   of a peer with the wrong endpoint key.
-3. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
-   and run `make check-gpu`. The runtime requires CUDA and decodes a batch
-   of 16,384 relay ping frames on the selected card.
+1. Run `make check` for the relay wire snapshots, malformed input, handshake
+   framing, and BLAKE3 challenge vectors.
+2. Run `make check-relay-auth` for the Ed25519 proof vector and tamper rejection.
+3. Run `make check-direct UPSTREAM=/path/to/upstream-peer` for mixed-peer
+   QUIC. The peer fixture accepts `listen` and `dial ADDRESS`, uses the
+   ALPN, identity seeds, and echo payload in [tests/direct.bend](tests/direct.bend),
+   and prints its bound address. Set `UPSTREAM_IPV6` to a peer fixture whose
+   listener binds to `::1` to exercise Bend dialing upstream over IPv6.
+4. Run `make check-relay-live RELAY_URL=ws://127.0.0.1:3340/relay` against
+   an upstream `iroh-relay` in development mode on the loopback interface.
+   Both relay protocol versions are exercised. For a local TLS relay, use a
+   `wss://` URL and set `CURL_CA_BUNDLE` to the trusted CA file.
+5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
+   and run `make check-gpu` to decode 16,384 relay ping frames on the device.
 
-Set `BEND` and `BUILD` to override the compiler and build directory.
+Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 
 ## Library interfaces
 
-- [Relay codec](src/relay.bend) reads and writes v1/v2 post-authentication
-  binary WebSocket payloads. It handles frame directions, QUIC varint tags,
-  wire size limits, v1 UTF-8 health messages, and datagram ECN and segment
-  sizes. The datagram API exposes the peer identity as 32 wire bytes.
-- [Direct QUIC](src/direct.bend) accepts one IPv4 connection and one
+- [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
+  It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
+  health messages, and datagram ECN and segment size.
+- [Relay client](src/relay_client.bend) upgrades a `ws://` or `wss://`
+  connection, negotiates v1/v2, and authenticates with an Ed25519 challenge
+  response. It sends datagrams and reads relay frames. A caller receiving
+  a relay ping sends the given payload back through `pong`.
+- [Direct QUIC](src/direct.bend) opens one IPv4 or IPv6 connection with one
   bidirectional stream. It pins both peers to explicitly supplied Ed25519
   keys, negotiates the caller's ALPN, and exchanges bounded binary messages.
-  Listener and stream values are affine and each must be consumed by its next
-  operation or released explicitly.
+  Listener, stream, and relay connection values are affine.
 
 ## Conformance scope
 
 The target is the [Iroh 1.5.0 release](https://github.com/n0-computer/iroh/releases/tag/v1.5.0)
-at `ea3bbb6ab41fa23816d7f9e3220ab77d444435b2`. The relay vectors come from
-[Iroh's wire codec tests](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/relay.rs).
+at `ea3bbb6ab41fa23816d7f9e3220ab77d444435b2`. The reference implementations
+for the wire tests are the upstream [relay message codec](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/relay.rs)
+and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/handshake.rs).
 
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
-| Ed25519 endpoint identity, ALPN, direct QUIC | Mixed-peer tests for one pinned-identity IPv4 request/response stream |
-| v1/v2 relay payloads | 13 upstream byte snapshots translated and matched in Bend, plus direction, version, malformed input and size checks |
-| Relay authentication and transport | Implement HTTP/WebSocket upgrade, the authenticated handshake and live relay client and server |
-| Public endpoint lifecycle and QUIC features | Implement concurrent streams, datagrams, 0-RTT, IPv6, multipath and stream affinity |
-| Connectivity and discovery | Implement NAT traversal, relay fallback, address discovery, DNS/Pkarr and path migration |
-
-This is a working protocol subset. Full Iroh interoperability requires the
-remaining features and their upstream end-to-end tests.
+| Ed25519 endpoint identity, ALPN, direct QUIC | One authenticated request/response stream with upstream Iroh over IPv4 and IPv6 in both directions |
+| v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
+| Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The TLS-exporter shortcut and native relay server are pending. |
+| Public endpoint lifecycle and QUIC features | Concurrent streams, native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
+| Connectivity and discovery | NAT traversal, automatic relay fallback, DNS/Pkarr, and path migration are pending. |

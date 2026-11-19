@@ -1,0 +1,118 @@
+-- The Bend boundary for the native OpenSSL Ed25519 primitive.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<openssl/evp.h>'
+## cinclude '<errno.h>'
+require 'C.stdlib'
+
+##[[
+for _, name in ipairs{'sign','verify','Con','True','False'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_ed_%s CID(%s)\n#else\n#define iroh_ed_%s UINT32_MAX\n#endif',
+    name, name, name, name))
+end
+]]
+local iroh_ed_sign: uint32 <cimport,nodecl>
+local iroh_ed_verify: uint32 <cimport,nodecl>
+local iroh_ed_Con: uint32 <cimport,nodecl>
+local iroh_ed_True: uint32 <cimport,nodecl>
+local iroh_ed_False: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, effect: Effect) <cimport,nodecl> end
+local function io_list(e: Env, p: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, word: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+
+local EVP_PKEY <cimport,nodecl> = @record{}
+local EVP_MD_CTX <cimport,nodecl> = @record{}
+local function EVP_PKEY_new_raw_private_key_ex(libctx: pointer, kind: cstring, props: cstring,
+    p: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_new_raw_public_key_ex(libctx: pointer, kind: cstring, props: cstring,
+    p: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_get_raw_public_key(key: *EVP_PKEY, p: *cuchar, n: *csize): cint <cimport,nodecl> end
+local function EVP_PKEY_free(key: *EVP_PKEY) <cimport,nodecl> end
+local function EVP_MD_CTX_new(): *EVP_MD_CTX <cimport,nodecl> end
+local function EVP_MD_CTX_free(ctx: *EVP_MD_CTX) <cimport,nodecl> end
+local function EVP_DigestSignInit(ctx: *EVP_MD_CTX, pctx: pointer, md: pointer, engine: pointer,
+    key: *EVP_PKEY): cint <cimport,nodecl> end
+local function EVP_DigestSign(ctx: *EVP_MD_CTX, sig: *cuchar, sig_len: *csize,
+    data: *cuchar, data_len: csize): cint <cimport,nodecl> end
+local function EVP_DigestVerifyInit(ctx: *EVP_MD_CTX, pctx: pointer, md: pointer, engine: pointer,
+    key: *EVP_PKEY): cint <cimport,nodecl> end
+local function EVP_DigestVerify(ctx: *EVP_MD_CTX, sig: *cuchar, sig_len: csize,
+    data: *cuchar, data_len: csize): cint <cimport,nodecl> end
+local function OPENSSL_cleanse(p: pointer, n: csize) <cimport,nodecl> end
+
+-- The only callers sign a fixed challenge digest or TLS exporter prefix.
+-- Bound the copies on the runtime side as well as checking lengths in Bend.
+local function read(e: Env, item: Term, out: *[0]cuchar, limit: csize): csize
+  local len: csize = 0
+  while term_aux(item) == iroh_ed_Con do
+    local at = term_peek(e.mem, item)
+    local value = e.mem[at]
+    if len >= limit or value > 255 then return limit + 1 end
+    out[len] = (@cuchar)(value)
+    len = len + 1
+    item = e.mem[at + 1]
+  end
+  return len
+end
+
+local function sign(e: Env, f: *[0]Term, work: *IoWork): Term
+  local seed: [32]cuchar
+  defer OPENSSL_cleanse(&seed[0], 32) end
+  local message: [32]cuchar
+  local size = read(e, f[1], (@*[0]cuchar)(&message[0]), 32)
+  if read(e, f[0], (@*[0]cuchar)(&seed[0]), 32) ~= 32 or (size ~= 16 and size ~= 32) then
+    return io_fail(e, EINVAL, 'invalid Ed25519 seed or relay transcript')
+  end
+  local key = EVP_PKEY_new_raw_private_key_ex(nilptr, 'ED25519', nilptr, &seed[0], 32)
+  defer EVP_PKEY_free(key) end
+  local ctx = EVP_MD_CTX_new()
+  defer EVP_MD_CTX_free(ctx) end
+  local public: [32]cuchar, signature: [64]cuchar
+  local key_size: csize = 32
+  local sig_size: csize = 64
+  if key == nilptr or ctx == nilptr or
+      EVP_PKEY_get_raw_public_key(key, &public[0], &key_size) ~= 1 or key_size ~= 32 or
+      EVP_DigestSignInit(ctx, nilptr, nilptr, nilptr, key) ~= 1 or
+      EVP_DigestSign(ctx, &signature[0], &sig_size, &message[0], size) ~= 1 or sig_size ~= 64 then
+    return io_fail(e, EIO, 'Ed25519 signing failed')
+  end
+  return io_done(e, io_tup(e, io_list(e, (@cstring)(&public[0]), 32),
+    io_list(e, (@cstring)(&signature[0]), 64)))
+end
+
+local function authentic(e: Env, f: *[0]Term): boolean
+  local public: [32]cuchar, signature: [64]cuchar, message: [32]cuchar
+  local size = read(e, f[2], (@*[0]cuchar)(&message[0]), 32)
+  if read(e, f[0], (@*[0]cuchar)(&public[0]), 32) ~= 32 or
+      read(e, f[1], (@*[0]cuchar)(&signature[0]), 64) ~= 64 or
+      (size ~= 16 and size ~= 32) then return false end
+  local key = EVP_PKEY_new_raw_public_key_ex(nilptr, 'ED25519', nilptr, &public[0], 32)
+  defer EVP_PKEY_free(key) end
+  local ctx = EVP_MD_CTX_new()
+  defer EVP_MD_CTX_free(ctx) end
+  return key ~= nilptr and ctx ~= nilptr and
+    EVP_DigestVerifyInit(ctx, nilptr, nilptr, nilptr, key) == 1 and
+    EVP_DigestVerify(ctx, &signature[0], 64, &message[0], size) == 1
+end
+
+local function verify(e: Env, f: *[0]Term, work: *IoWork): Term
+  if authentic(e, f) then return term_pak(iroh_ed_True, 0) end
+  return term_pak(iroh_ed_False, 0)
+end
+
+local function register() <cexport,codename 'iroh_register_ed25519',cattribute 'constructor'>
+  if iroh_ed_sign ~= 0xffffffff then io_eff(iroh_ed_sign, sign) end
+  if iroh_ed_verify ~= 0xffffffff then io_eff(iroh_ed_verify, verify) end
+end

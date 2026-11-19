@@ -25,7 +25,7 @@ type Size is Data:
   NonByte{}
   TooLarge{}
 
-def measure_go(bytes: List<&2, U32>, +size: U32, byte_ok: Bool, room: Bool) -> Size:
+def measure_go(bytes: List<&2, U32>, +size: U32, +limit: U32, byte_ok: Bool, room: Bool) -> Size:
   match bytes byte_ok room:
     case _ False{} _:
       NonByte{}
@@ -34,10 +34,13 @@ def measure_go(bytes: List<&2, U32>, +size: U32, byte_ok: Bool, room: Bool) -> S
     case Nil{} True{} True{}:
       Length{size}
     case Con{byte, tail} True{} True{}:
-      measure_go(tail, U32.inc(size), U32.is_le(byte, 255), U32.is_lt(size, 65544))
+      measure_go(tail, U32.inc(size), limit, U32.is_le(byte, 255), U32.is_lt(size, limit))
 
 def measure(bytes: List<&2, U32>, size: U32) -> Size:
-  measure_go(bytes, size, True{}, True{})
+  measure_go(bytes, size, 65544, True{}, True{})
+
+def measure_limited(bytes: List<&2, U32>, limit: U32) -> Size:
+  measure_go(bytes, 0, limit, True{}, True{})
 
 type Header is Data:
   Tag{value: U32, width: U32, payload: List<&2, U32>}

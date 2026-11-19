@@ -1,0 +1,520 @@
+-- Native effects for Bend 2.0.39.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<arpa/inet.h>'
+## cinclude '<openssl/ssl.h>'
+## cinclude '<openssl/x509_vfy.h>'
+## cinclude '<unistd.h>'
+## cdefine 'iroh_sockaddr_in struct sockaddr_in'
+## cdefine 'iroh_in_addr struct in_addr'
+## cdefine 'iroh_sockaddr_in6 struct sockaddr_in6'
+## cdefine 'iroh_in6_addr struct in6_addr'
+require 'C.stdlib'
+require 'C.string'
+
+-- The compiler resolves CID() within the importing Bend module.
+##[[
+for _, name in ipairs{'bind','accept','respond','close','abort','exchange',
+                      'BoundUdp','AcceptedStream','Con','Unit'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_tag_%s CID(%s)\n#else\n#define iroh_tag_%s UINT32_MAX\n#endif',
+    name, name, name, name))
+end
+]]
+local iroh_tag_bind: uint32 <cimport,nodecl>
+local iroh_tag_accept: uint32 <cimport,nodecl>
+local iroh_tag_respond: uint32 <cimport,nodecl>
+local iroh_tag_close: uint32 <cimport,nodecl>
+local iroh_tag_abort: uint32 <cimport,nodecl>
+local iroh_tag_exchange: uint32 <cimport,nodecl>
+local iroh_tag_BoundUdp: uint32 <cimport,nodecl>
+local iroh_tag_AcceptedStream: uint32 <cimport,nodecl>
+local iroh_tag_Con: uint32 <cimport,nodecl>
+local iroh_tag_Unit: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{data: cstring}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local Call = @function(*IoWork): void
+local Pack = @function(Env,*IoWork): Term
+local function io_eff(cid: uint32, effect: Effect) <cimport,nodecl> end
+local function io_work(work: *IoWork, call: Call, pack: Pack): Term <cimport,nodecl> end
+local function io_mem(p: pointer): pointer <cimport,nodecl> end
+local function io_cstr(e: Env, t: Term, n: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, n: uint64): boolean <cimport,nodecl> end
+local function io_cbuf(e: Env, t: Term, n: *uint64, tag: uint32): cstring <cimport,nodecl> end
+local function io_list(e: Env, data: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, text: cstring): Term <cimport,nodecl> end
+local function io_done(e: Env, data: Term): Term <cimport,nodecl> end
+local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
+local function io_tup(e: Env, first: Term, second: Term): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, value: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+
+local SSL <cimport,nodecl> = @record{}
+local SSL_CTX <cimport,nodecl> = @record{}
+local SSL_METHOD <cimport,nodecl> = @record{}
+local EVP_PKEY <cimport,nodecl> = @record{}
+local X509_STORE_CTX <cimport,nodecl> = @record{}
+local BIO_ADDR <cimport,nodecl> = @record{}
+local in_addr <cimport,nodecl,codename 'iroh_in_addr'> = @record{s_addr: uint32}
+local sockaddr_in <cimport,nodecl,codename 'iroh_sockaddr_in'> = @record{
+  sin_family: uint16, sin_port: uint16, sin_addr: in_addr, sin_zero: [8]cuchar
+}
+local in6_addr <cimport,nodecl,codename 'iroh_in6_addr'> = @record{words: [4]uint32}
+local sockaddr_in6 <cimport,nodecl,codename 'iroh_sockaddr_in6'> = @record{
+  sin6_family: uint16, sin6_port: uint16, sin6_flowinfo: uint32,
+  sin6_addr: in6_addr, sin6_scope_id: uint32
+}
+local Address = @record{family: cint, v4: sockaddr_in, v6: sockaddr_in6}
+local socklen_t <cimport,nodecl> = @cuint
+local SSL_STREAM_RESET_ARGS <cimport,nodecl> = @record{quic_error_code: uint64}
+local SSL_SHUTDOWN_EX_ARGS <cimport,nodecl> = @record{quic_error_code: uint64, quic_reason: cstring}
+
+local AF_INET: cint <cimport,nodecl>
+local AF_INET6: cint <cimport,nodecl>
+local SOCK_DGRAM: cint <cimport,nodecl>
+local IPPROTO_UDP: cint <cimport,nodecl>
+local SSL_VERIFY_PEER: cint <cimport,nodecl>
+local SSL_VERIFY_FAIL_IF_NO_PEER_CERT: cint <cimport,nodecl>
+local TLSEXT_cert_type_rpk: cuchar <cimport,nodecl>
+local SSL_DEFAULT_STREAM_MODE_NONE: uint32 <cimport,nodecl>
+local SSL_ERROR_ZERO_RETURN: cint <cimport,nodecl>
+local OPENSSL_NPN_NEGOTIATED: cint <cimport,nodecl>
+local SSL_TLSEXT_ERR_ALERT_FATAL: cint <cimport,nodecl>
+local SSL_TLSEXT_ERR_OK: cint <cimport,nodecl>
+local X509_V_OK: cint <cimport,nodecl>
+local X509_V_ERR_APPLICATION_VERIFICATION: cint <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl,cinclude '<errno.h>'>
+local EINVAL: uint32 <cimport,nodecl,cinclude '<errno.h>'>
+local EOVERFLOW: uint32 <cimport,nodecl,cinclude '<errno.h>'>
+
+local function socket(domain: cint, kind: cint, protocol: cint): cint <cimport,nodecl> end
+local function bind(fd: cint, addr: pointer, len: socklen_t): cint <cimport,nodecl> end
+local function getsockname(fd: cint, addr: pointer, len: *socklen_t): cint <cimport,nodecl> end
+local function close(fd: cint): cint <cimport,nodecl> end
+local function htons(port: uint16): uint16 <cimport,nodecl> end
+local function ntohs(port: uint16): uint16 <cimport,nodecl> end
+local function inet_pton(family: cint, addr: cstring, out: pointer): cint <cimport,nodecl> end
+
+local function OSSL_QUIC_server_method(): *SSL_METHOD <cimport,nodecl> end
+local function OSSL_QUIC_client_method(): *SSL_METHOD <cimport,nodecl> end
+local function SSL_CTX_new(method: *SSL_METHOD): *SSL_CTX <cimport,nodecl> end
+local function SSL_CTX_free(ctx: *SSL_CTX) <cimport,nodecl> end
+local function SSL_CTX_use_PrivateKey(ctx: *SSL_CTX, key: *EVP_PKEY): cint <cimport,nodecl> end
+local function SSL_CTX_set1_server_cert_type(ctx: *SSL_CTX, types: *cuchar, n: csize): cint <cimport,nodecl> end
+local function SSL_CTX_set1_client_cert_type(ctx: *SSL_CTX, types: *cuchar, n: csize): cint <cimport,nodecl> end
+local function SSL_CTX_set_verify(ctx: *SSL_CTX, mode: cint, callback: pointer) <cimport,nodecl> end
+local function SSL_CTX_set_cert_verify_callback(ctx: *SSL_CTX, callback: pointer, arg: pointer) <cimport,nodecl> end
+local function SSL_CTX_set_alpn_select_cb(ctx: *SSL_CTX, callback: pointer, arg: pointer) <cimport,nodecl> end
+local function SSL_select_next_proto(out: **cuchar, out_len: *cuchar, a: *cuchar, a_len: cuint,
+    b: *cuchar, b_len: cuint): cint <cimport,nodecl> end
+local function EVP_PKEY_new_raw_private_key_ex(ctx: pointer, kind: cstring, props: cstring,
+    bytes: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_new_raw_public_key_ex(ctx: pointer, kind: cstring, props: cstring,
+    bytes: *cuchar, n: csize): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_free(key: *EVP_PKEY) <cimport,nodecl> end
+local function EVP_PKEY_eq(a: *EVP_PKEY, b: *EVP_PKEY): cint <cimport,nodecl> end
+local function X509_STORE_CTX_get0_rpk(ctx: *X509_STORE_CTX): *EVP_PKEY <cimport,nodecl> end
+local function X509_STORE_CTX_set_error(ctx: *X509_STORE_CTX, err: cint) <cimport,nodecl> end
+local function OPENSSL_cleanse(p: pointer, n: csize) <cimport,nodecl> end
+local function SSL_free(ssl: *SSL) <cimport,nodecl> end
+local function SSL_new(ctx: *SSL_CTX): *SSL <cimport,nodecl> end
+local function SSL_new_listener(ctx: *SSL_CTX, flags: uint64): *SSL <cimport,nodecl> end
+local function SSL_set_fd(ssl: *SSL, fd: cint): cint <cimport,nodecl> end
+local function SSL_listen(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_accept_connection(ssl: *SSL, flags: uint64): *SSL <cimport,nodecl> end
+local function SSL_set_default_stream_mode(ssl: *SSL, mode: uint32): cint <cimport,nodecl> end
+local function SSL_accept_stream(ssl: *SSL, flags: uint64): *SSL <cimport,nodecl> end
+local function SSL_new_stream(ssl: *SSL, flags: uint64): *SSL <cimport,nodecl> end
+local function SSL_get0_peer_rpk(ssl: *SSL): *EVP_PKEY <cimport,nodecl> end
+local function SSL_get_error(ssl: *SSL, value: cint): cint <cimport,nodecl> end
+local function SSL_read_ex(ssl: *SSL, buf: pointer, len: csize, got: *csize): cint <cimport,nodecl> end
+local function SSL_write_ex(ssl: *SSL, buf: pointer, len: csize, wrote: *csize): cint <cimport,nodecl> end
+local function SSL_stream_conclude(ssl: *SSL, flags: uint64): cint <cimport,nodecl> end
+local function SSL_shutdown(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_shutdown_ex(ssl: *SSL, flags: uint64, args: *SSL_SHUTDOWN_EX_ARGS, n: csize): cint <cimport,nodecl> end
+local function SSL_stream_reset(ssl: *SSL, args: *SSL_STREAM_RESET_ARGS, n: csize): cint <cimport,nodecl> end
+local function SSL_set1_initial_peer_addr(ssl: *SSL, peer: *BIO_ADDR): cint <cimport,nodecl> end
+local function SSL_set_alpn_protos(ssl: *SSL, protos: *cuchar, size: cuint): cint <cimport,nodecl> end
+local function SSL_connect(ssl: *SSL): cint <cimport,nodecl> end
+local function BIO_ADDR_new(): *BIO_ADDR <cimport,nodecl> end
+local function BIO_ADDR_free(addr: *BIO_ADDR) <cimport,nodecl> end
+local function BIO_ADDR_rawmake(addr: *BIO_ADDR, family: cint, ip: pointer, len: csize,
+    port: uint16): cint <cimport,nodecl> end
+
+local MAX_MESSAGE <comptime> = 1024 * 1024
+local Direct = @record{
+  next: pointer, id: uint32, fd: cint, ctx: *SSL_CTX, listener: *SSL,
+  conn: *SSL, stream: *SSL, expected: *EVP_PKEY, alpn: [256]cuchar,
+  alpn_len: cuint
+}
+
+-- Only the Bend event loop accesses the registry. Worker jobs exclusively own
+-- their connection until they return it or free it.
+local handles: pointer
+local next_id: uint32 = 1
+local function keep(state: *Direct): uint32
+  if next_id == 0 then return 0 end
+  state.id = next_id
+  next_id = next_id + 1
+  state.next = handles
+  handles = state
+  return state.id
+end
+
+local function take(e: Env, handle: Term, stream: boolean): *Direct
+  local id = (@uint32)(e.mem[term_peek(e.mem, handle)])
+  local slot = &handles
+  while $slot ~= nilptr do
+    local state = (@*Direct)($slot)
+    if state.id == id and (state.stream ~= nilptr) == stream then
+      $slot = state.next
+      return state
+    end
+    slot = &state.next
+  end
+  return nilptr
+end
+
+local function release(state: *Direct)
+  if state == nilptr then return end
+  SSL_free(state.stream)
+  SSL_free(state.conn)
+  SSL_free(state.listener)
+  SSL_CTX_free(state.ctx)
+  EVP_PKEY_free(state.expected)
+  if state.fd >= 0 then close(state.fd) end
+  C.free(state)
+end
+
+local function bytes(e: Env, value: Term, limit: csize, out: **cuchar, len: *csize): boolean
+  local count: csize = 0
+  local item = value
+  while term_aux(item) == iroh_tag_Con do
+    local pos = term_peek(e.mem, item)
+    if count == limit or e.mem[pos] > 255 then return false end
+    count = count + 1
+    item = e.mem[pos + 1]
+  end
+  local size: uint64
+  $out = (@*cuchar)(io_cbuf(e, value, &size, iroh_tag_Con))
+  $len = (@csize)(size)
+  return true
+end
+
+local function verify(store: *X509_STORE_CTX, arg: pointer): cint
+  local key = X509_STORE_CTX_get0_rpk(store)
+  if key ~= nilptr and EVP_PKEY_eq(key, (@*EVP_PKEY)(arg)) == 1 then
+    X509_STORE_CTX_set_error(store, X509_V_OK)
+    return 1
+  end
+  X509_STORE_CTX_set_error(store, X509_V_ERR_APPLICATION_VERIFICATION)
+  return 0
+end
+
+local function select_alpn(ssl: *SSL, chosen: **cuchar, chosen_len: *cuchar,
+    offered: *cuchar, offered_len: cuint, arg: pointer): cint
+  local state = (@*Direct)(arg)
+  if SSL_select_next_proto(chosen, chosen_len, &state.alpn[0], state.alpn_len,
+      offered, offered_len) ~= OPENSSL_NPN_NEGOTIATED then
+    return SSL_TLSEXT_ERR_ALERT_FATAL
+  end
+  return SSL_TLSEXT_ERR_OK
+end
+
+local function configure(secret: *cuchar, peer: *cuchar, alpn: *cuchar, alpn_len: csize,
+    server: boolean): *Direct
+  local state = (@*Direct)(C.calloc(1, #Direct))
+  if state == nilptr then return nilptr end
+  state.fd = -1
+  local identity = EVP_PKEY_new_raw_private_key_ex(nilptr, 'ED25519', nilptr, secret, 32)
+  defer EVP_PKEY_free(identity) end
+  state.expected = EVP_PKEY_new_raw_public_key_ex(nilptr, 'ED25519', nilptr, peer, 32)
+  local method = OSSL_QUIC_client_method()
+  if server then method = OSSL_QUIC_server_method() end
+  state.ctx = SSL_CTX_new(method)
+  local raw_key = TLSEXT_cert_type_rpk
+  if identity == nilptr or state.expected == nilptr or state.ctx == nilptr or
+      SSL_CTX_use_PrivateKey(state.ctx, identity) ~= 1 or
+      SSL_CTX_set1_server_cert_type(state.ctx, &raw_key, 1) ~= 1 or
+      SSL_CTX_set1_client_cert_type(state.ctx, &raw_key, 1) ~= 1 then
+    release(state)
+    return nilptr
+  end
+  state.alpn[0] = (@cuchar)(alpn_len)
+  C.memcpy(&state.alpn[1], alpn, alpn_len)
+  state.alpn_len = (@cuint)(alpn_len) + 1
+  local mode = SSL_VERIFY_PEER
+  if server then mode = mode | SSL_VERIFY_FAIL_IF_NO_PEER_CERT end
+  SSL_CTX_set_verify(state.ctx, mode, nilptr)
+  SSL_CTX_set_cert_verify_callback(state.ctx, (@pointer)(verify), state.expected)
+  if server then SSL_CTX_set_alpn_select_cb(state.ctx, (@pointer)(select_alpn), state) end
+  return state
+end
+
+local function new(e: Env, f: *[0]Term, server: boolean): *Direct
+  local secret: *cuchar, peer: *cuchar, alpn: *cuchar
+  local secret_len: csize, peer_len: csize, alpn_len: csize
+  defer
+    if secret ~= nilptr then OPENSSL_cleanse(secret, secret_len) end
+    C.free(secret)
+    C.free(peer)
+    C.free(alpn)
+  end
+  if not bytes(e, f[2], 32, &secret, &secret_len) or secret_len ~= 32 or
+      not bytes(e, f[3], 32, &peer, &peer_len) or peer_len ~= 32 or
+      not bytes(e, f[4], 255, &alpn, &alpn_len) or alpn_len == 0 then return nilptr end
+  return configure(secret, peer, alpn, alpn_len, server)
+end
+
+local function address(e: Env, host: Term, port: uint32, out: *Address): boolean
+  if port > 65535 then return false end
+  local n: uint64
+  local text = io_cstr(e, host, &n)
+  defer C.free(text) end
+  if io_nul(text, n) then return false end
+  local network_port = htons((@uint16)(port))
+  if inet_pton(AF_INET, text, &out.v4.sin_addr) == 1 then
+    out.family = AF_INET
+    out.v4.sin_family = (@uint16)(AF_INET)
+    out.v4.sin_port = network_port
+    return true
+  end
+  if inet_pton(AF_INET6, text, &out.v6.sin6_addr) == 1 then
+    out.family = AF_INET6
+    out.v6.sin6_family = (@uint16)(AF_INET6)
+    out.v6.sin6_port = network_port
+    return true
+  end
+  return false
+end
+
+local function socket_address(addr: *Address): (pointer, socklen_t)
+  if addr.family == AF_INET then return &addr.v4, #sockaddr_in end
+  return &addr.v6, #sockaddr_in6
+end
+
+local function port_of(addr: *Address): uint16
+  if addr.family == AF_INET then return addr.v4.sin_port end
+  return addr.v6.sin6_port
+end
+
+local function make_peer(peer: *BIO_ADDR, addr: *Address): boolean
+  if addr.family == AF_INET then
+    return BIO_ADDR_rawmake(peer, AF_INET, &addr.v4.sin_addr, #in_addr, port_of(addr)) == 1
+  end
+  return BIO_ADDR_rawmake(peer, AF_INET6, &addr.v6.sin6_addr, #in6_addr, port_of(addr)) == 1
+end
+
+local function write(stream: *SSL, buf: *[0]cuchar, len: csize): boolean
+  local sent: csize = 0
+  while sent < len do
+    local n: csize = 0
+    if SSL_write_ex(stream, &buf[sent], len - sent, &n) ~= 1 or n == 0 then return false end
+    sent = sent + n
+  end
+  return SSL_stream_conclude(stream, 0) == 1
+end
+
+local Job = @record{
+  state: *Direct, addr: Address, send: *cuchar, recv: *cuchar,
+  send_len: csize, recv_len: csize, limit: csize, err: cstring
+}
+local function make_job(state: *Direct, limit: csize): *Job
+  local job = (@*Job)(io_mem(C.calloc(1, #Job)))
+  job.state = state
+  job.limit = limit
+  return job
+end
+local function free_job(job: *Job)
+  release(job.state)
+  C.free(job.send)
+  C.free(job.recv)
+  C.free(job)
+end
+local function read(job: *Job)
+  job.recv = (@*cuchar)(C.malloc(job.limit + 1))
+  if job.recv == nilptr then
+    job.err = 'cannot allocate QUIC receive buffer'
+    return
+  end
+  local buf = (@*[0]cuchar)(job.recv)
+  while job.recv_len <= job.limit do
+    local got: csize = 0
+    local status = SSL_read_ex(job.state.stream, &buf[job.recv_len], job.limit + 1 - job.recv_len, &got)
+    if status ~= 1 then
+      if SSL_get_error(job.state.stream, status) ~= SSL_ERROR_ZERO_RETURN then
+        job.err = 'QUIC read failed'
+      end
+      return
+    end
+    job.recv_len = job.recv_len + got
+  end
+  job.err = 'QUIC message exceeds receive limit'
+end
+
+local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local addr: Address = {}
+  if not address(e, f[0], (@uint32)(f[1]), &addr) then
+    return io_fail(e, EINVAL, 'invalid IP listener address')
+  end
+  local state = new(e, f, true)
+  if state == nilptr then return io_fail(e, EINVAL, 'invalid QUIC listener identity or ALPN') end
+  local sa, size = socket_address(&addr)
+  state.fd = socket(addr.family, SOCK_DGRAM, IPPROTO_UDP)
+  state.listener = SSL_new_listener(state.ctx, 0)
+  if state.fd < 0 or state.listener == nilptr or
+      bind(state.fd, sa, size) ~= 0 or getsockname(state.fd, sa, &size) ~= 0 or
+      SSL_set_fd(state.listener, state.fd) ~= 1 or SSL_listen(state.listener) ~= 1 then
+    release(state)
+    return io_fail(e, EIO, 'cannot start QUIC listener')
+  end
+  local id = keep(state)
+  if id == 0 then
+    release(state)
+    return io_fail(e, EOVERFLOW, 'QUIC handle space exhausted')
+  end
+  return io_done(e, io_tup(e, io_box(e, iroh_tag_BoundUdp, id), ntohs(port_of(&addr))))
+end
+
+local function accept_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local state = job.state
+  state.conn = SSL_accept_connection(state.listener, 0)
+  if state.conn ~= nilptr and SSL_set_default_stream_mode(state.conn, SSL_DEFAULT_STREAM_MODE_NONE) == 1 then
+    state.stream = SSL_accept_stream(state.conn, 0)
+  end
+  if state.stream == nilptr or SSL_get0_peer_rpk(state.conn) == nilptr then
+    job.err = 'QUIC accept or peer authentication failed'
+    return
+  end
+  read(job)
+end
+local function accept_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e, EIO, job.err) end
+  local id = keep(job.state)
+  if id == 0 then return io_fail(e, EOVERFLOW, 'QUIC handle space exhausted') end
+  job.state = nilptr
+  return io_done(e, io_tup(e, io_box(e, iroh_tag_AcceptedStream, id),
+    io_list(e, (@cstring)(job.recv), job.recv_len)))
+end
+local function accept_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = take(e, f[0], false)
+  local limit = (@uint32)(f[1])
+  if state == nilptr or limit > MAX_MESSAGE then
+    release(state)
+    return io_fail(e, EINVAL, 'invalid QUIC listener or receive limit')
+  end
+  work.data = (@cstring)(make_job(state, limit))
+  return io_work(work, accept_call, accept_pack)
+end
+
+local function finish_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e, EIO, job.err) end
+  return io_done(e, term_pak(iroh_tag_Unit, 0))
+end
+local function respond_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  if not write(job.state.stream, (@*[0]cuchar)(job.send), job.send_len) then
+    job.err = 'QUIC response write failed'
+  else
+    SSL_shutdown(job.state.conn)
+  end
+end
+local function respond_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = take(e, f[0], true)
+  if state == nilptr then return io_fail(e, EINVAL, 'invalid QUIC stream') end
+  local job = make_job(state, 0)
+  if not bytes(e, f[1], MAX_MESSAGE, &job.send, &job.send_len) then
+    free_job(job)
+    return io_fail(e, EINVAL, 'invalid or oversized QUIC response')
+  end
+  work.data = (@cstring)(job)
+  return io_work(work, respond_call, finish_pack)
+end
+
+local function close_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = take(e, f[0], false)
+  if state == nilptr then return io_fail(e, EINVAL, 'invalid QUIC listener') end
+  release(state)
+  return io_done(e, term_pak(iroh_tag_Unit, 0))
+end
+local function abort_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local reset: SSL_STREAM_RESET_ARGS = {quic_error_code = 1}
+  local args: SSL_SHUTDOWN_EX_ARGS = {quic_error_code = 1, quic_reason = 'stream aborted'}
+  if SSL_stream_reset(job.state.stream, &reset, #SSL_STREAM_RESET_ARGS) ~= 1 or
+      SSL_shutdown_ex(job.state.conn, 0, &args, #SSL_SHUTDOWN_EX_ARGS) < 0 then
+    job.err = 'could not abort QUIC connection'
+  end
+end
+local function abort_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local state = take(e, f[0], true)
+  if state == nilptr then return io_fail(e, EINVAL, 'invalid QUIC stream') end
+  work.data = (@cstring)(make_job(state, 0))
+  return io_work(work, abort_call, finish_pack)
+end
+
+local function exchange_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local state = job.state
+  local peer = BIO_ADDR_new()
+  defer BIO_ADDR_free(peer) end
+  state.conn = SSL_new(state.ctx)
+  state.fd = socket(job.addr.family, SOCK_DGRAM, IPPROTO_UDP)
+  if peer == nilptr or state.conn == nilptr or state.fd < 0 or
+      not make_peer(peer, &job.addr) or
+      SSL_set_fd(state.conn, state.fd) ~= 1 or SSL_set1_initial_peer_addr(state.conn, peer) ~= 1 or
+      SSL_set_alpn_protos(state.conn, &state.alpn[0], state.alpn_len) ~= 0 or
+      SSL_set_default_stream_mode(state.conn, SSL_DEFAULT_STREAM_MODE_NONE) ~= 1 or
+      SSL_connect(state.conn) ~= 1 or SSL_get0_peer_rpk(state.conn) == nilptr then
+    job.err = 'QUIC dial or peer authentication failed'
+    return
+  end
+  state.stream = SSL_new_stream(state.conn, 0)
+  if state.stream == nilptr or not write(state.stream, (@*[0]cuchar)(job.send), job.send_len) then
+    job.err = 'QUIC request write failed'
+  else
+    read(job)
+    SSL_shutdown(state.conn)
+  end
+end
+local function exchange_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e, EIO, job.err) end
+  return io_done(e, io_list(e, (@cstring)(job.recv), job.recv_len))
+end
+local function exchange_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local limit = (@uint32)(f[6])
+  local addr: Address = {}
+  if limit > MAX_MESSAGE or f[1] == 0 or not address(e, f[0], (@uint32)(f[1]), &addr) then
+    return io_fail(e, EINVAL, 'invalid QUIC remote address or receive limit')
+  end
+  local state = new(e, f, false)
+  if state == nilptr then return io_fail(e, EINVAL, 'invalid QUIC client identity or ALPN') end
+  local job = make_job(state, limit)
+  job.addr = addr
+  if not bytes(e, f[5], MAX_MESSAGE, &job.send, &job.send_len) then
+    free_job(job)
+    return io_fail(e, EINVAL, 'invalid or oversized QUIC request')
+  end
+  work.data = (@cstring)(job)
+  return io_work(work, exchange_call, exchange_pack)
+end
+
+local function register() <cexport,codename 'iroh_register_direct',cattribute 'constructor'>
+  if iroh_tag_bind ~= 0xffffffff then io_eff(iroh_tag_bind, bind_run) end
+  if iroh_tag_accept ~= 0xffffffff then io_eff(iroh_tag_accept, accept_run) end
+  if iroh_tag_respond ~= 0xffffffff then io_eff(iroh_tag_respond, respond_run) end
+  if iroh_tag_close ~= 0xffffffff then io_eff(iroh_tag_close, close_run) end
+  if iroh_tag_abort ~= 0xffffffff then io_eff(iroh_tag_abort, abort_run) end
+  if iroh_tag_exchange ~= 0xffffffff then io_eff(iroh_tag_exchange, exchange_run) end
+end

@@ -6,7 +6,7 @@ type QuicListener is Type:
 type QuicStream is Type:
   AcceptedStream{id: U32}
 
-# Direct IPv4 QUIC with mutually pinned Ed25519 endpoint keys and one
+# Direct IPv4/IPv6 QUIC with mutually pinned Ed25519 endpoint keys and one
 # bidirectional stream per connection. The native host uses OpenSSL.
 def bind(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String, QuicListener & U32>):

@@ -3,12 +3,17 @@ BUILD ?= build
 
 .PHONY: check check-gpu
 
-check: $(BUILD)/iroh-bend-check
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake
 	$(BUILD)/iroh-bend-check
+	$(BUILD)/iroh-bend-handshake
 
 $(BUILD)/iroh-bend-check: tests/check.bend src/relay.bend src/base32.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/check.bend -o $@
+
+$(BUILD)/iroh-bend-handshake: tests/handshake.bend src/handshake.bend src/relay_challenge.bend src/relay.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/handshake.bend -o $@
 
 check-gpu: $(BUILD)/iroh-bend-gpu
 	BENDRTS= $(BUILD)/iroh-bend-gpu +RTS --gpu 1GB
@@ -17,6 +22,7 @@ $(BUILD)/iroh-bend-gpu: tests/gpu.bend src/relay.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/gpu.bend -o $@
 
+NELUA ?= nelua
 CLANG ?= clang
 PKG_CONFIG ?= pkg-config
 UPSTREAM ?= iroh-upstream-peer
@@ -26,9 +32,55 @@ UPSTREAM ?= iroh-upstream-peer
 check-direct: $(BUILD)/iroh-bend-direct
 	tests/direct.sh $(BUILD)/iroh-bend-direct "$(UPSTREAM)"
 
-$(BUILD)/direct.c: tests/direct.bend src/direct.bend src/direct.c
-	mkdir -p $(BUILD)
-	BEND_NO_TELEMETRY=1 $(BEND) tests/direct.bend -o $@
+$(BUILD)/direct.c: tests/direct.bend src/direct.bend src/direct.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/stage/src" "$(BUILD)/stage/tests"
+	cp src/direct.bend "$(BUILD)/stage/src/"
+	cp tests/direct.bend "$(BUILD)/stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/direct.nelua \
+		"$(abspath $(BUILD)/stage/src/direct.c)"
+	cd "$(BUILD)/stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/direct.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-direct: $(BUILD)/direct.c
-	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-relay-auth
+
+check-relay-auth: $(BUILD)/iroh-bend-relay-auth
+	$(BUILD)/iroh-bend-relay-auth
+
+AUTH_SOURCES = src/ed25519.bend src/handshake.bend src/relay.bend src/relay_auth.bend src/relay_challenge.bend
+
+$(BUILD)/relay-auth.c: tests/relay_auth.bend $(AUTH_SOURCES) src/ed25519.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/stage/src" "$(BUILD)/stage/tests"
+	cp $(AUTH_SOURCES) "$(BUILD)/stage/src/"
+	cp tests/relay_auth.bend "$(BUILD)/stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(BUILD)/stage/src/ed25519.c)"
+	cd "$(BUILD)/stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_auth.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-auth: $(BUILD)/relay-auth.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-relay-live
+RELAY_URL ?= ws://127.0.0.1:3340/relay
+RELAY_SOURCES = $(AUTH_SOURCES) src/relay_client.bend src/relay_socket.bend
+
+check-relay-live: $(BUILD)/iroh-bend-relay-live
+	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)"
+	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)" v1
+
+$(BUILD)/relay-live.c: tests/relay_live.bend $(RELAY_SOURCES) src/ed25519.nelua src/relay_socket.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/relay-stage/src" "$(BUILD)/relay-stage/tests"
+	cp $(RELAY_SOURCES) "$(BUILD)/relay-stage/src/"
+	cp tests/relay_live.bend "$(BUILD)/relay-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(BUILD)/relay-stage/src/ed25519.c)"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/relay_socket.nelua \
+		"$(abspath $(BUILD)/relay-stage/src/relay_socket.c)"
+	cd "$(BUILD)/relay-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_live.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)

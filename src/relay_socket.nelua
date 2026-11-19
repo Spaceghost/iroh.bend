@@ -1,0 +1,344 @@
+-- Native WebSocket operations for Bend. libcurl handles the HTTP upgrade,
+-- masking, and certificate validation. Relay protocol messages stay in Bend.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<curl/curl.h>'
+## cinclude '<poll.h>'
+## cinclude '<errno.h>'
+## cdefine 'iroh_curl_ws_frame struct curl_ws_frame'
+## cdefine 'iroh_curl_header struct curl_header'
+## cdefine 'iroh_pollfd struct pollfd'
+require 'C.stdlib'
+require 'C.string'
+
+##[[
+for _, name in ipairs{'open','recv','send','close','Connected','Con','Unit'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_ws_%s CID(%s)\n#else\n#define iroh_ws_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_ws_open: uint32 <cimport,nodecl>
+local iroh_ws_recv: uint32 <cimport,nodecl>
+local iroh_ws_send: uint32 <cimport,nodecl>
+local iroh_ws_close: uint32 <cimport,nodecl>
+local iroh_ws_Connected: uint32 <cimport,nodecl>
+local iroh_ws_Con: uint32 <cimport,nodecl>
+local iroh_ws_Unit: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EOVERFLOW: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{data: cstring}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local Call = @function(*IoWork): void
+local Pack = @function(Env,*IoWork): Term
+local function io_eff(tag: uint32, effect: Effect) <cimport,nodecl> end
+local function io_work(work: *IoWork, call: Call, pack: Pack): Term <cimport,nodecl> end
+local function io_tick(): uint64 <cimport,nodecl> end
+local function io_mem(p: pointer): pointer <cimport,nodecl> end
+local function io_cstr(e: Env, t: Term, n: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, n: uint64): boolean <cimport,nodecl> end
+local function io_cbuf(e: Env, t: Term, n: *uint64, tag: uint32): cstring <cimport,nodecl> end
+local function io_list(e: Env, p: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, word: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+
+local CURL <cimport,nodecl> = @record{}
+local curl_slist <cimport,nodecl,codename 'iroh_curl_list'> = @record{}
+## cdefine 'iroh_curl_list struct curl_slist'
+local curl_ws_frame <cimport,nodecl,codename 'iroh_curl_ws_frame'> = @record{flags: cint, bytesleft: int64}
+local curl_header <cimport,nodecl,codename 'iroh_curl_header'> = @record{value: cstring, amount: csize}
+local pollfd <cimport,nodecl,codename 'iroh_pollfd'> = @record{fd: cint, events: cshort, revents: cshort}
+local CURLE_OK: cint <cimport,nodecl>
+local CURLE_AGAIN: cint <cimport,nodecl>
+local CURL_GLOBAL_DEFAULT: clong <cimport,nodecl>
+local CURLOPT_URL: cint <cimport,nodecl>
+local CURLOPT_CONNECT_ONLY: cint <cimport,nodecl>
+local CURLOPT_HTTPHEADER: cint <cimport,nodecl>
+local CURLOPT_PROTOCOLS_STR: cint <cimport,nodecl>
+local CURLOPT_TIMEOUT_MS: cint <cimport,nodecl>
+local CURLOPT_NOSIGNAL: cint <cimport,nodecl>
+local CURLOPT_CAINFO: cint <cimport,nodecl>
+local CURLINFO_ACTIVESOCKET: cint <cimport,nodecl>
+local CURLH_HEADER: cuint <cimport,nodecl>
+local CURLH_1XX: cuint <cimport,nodecl>
+local CURLWS_BINARY: cuint <cimport,nodecl>
+local CURLWS_CONT: cuint <cimport,nodecl>
+local CURLWS_CLOSE: cuint <cimport,nodecl>
+local CURLWS_PONG: cuint <cimport,nodecl>
+local POLLIN: cshort <cimport,nodecl>
+local POLLOUT: cshort <cimport,nodecl>
+local function curl_global_init(flags: clong): cint <cimport,nodecl> end
+local function curl_easy_init(): *CURL <cimport,nodecl> end
+local function curl_easy_cleanup(curl: *CURL) <cimport,nodecl> end
+local function curl_easy_perform(curl: *CURL): cint <cimport,nodecl> end
+local function set_number(curl: *CURL, option: cint, value: clong): cint <cimport 'curl_easy_setopt',nodecl> end
+local function set_ptr(curl: *CURL, option: cint, value: pointer): cint <cimport 'curl_easy_setopt',nodecl> end
+local function set_str(curl: *CURL, option: cint, value: cstring): cint <cimport 'curl_easy_setopt',nodecl> end
+local function curl_easy_getinfo(curl: *CURL, key: cint, fd: *cint): cint <cimport,nodecl> end
+local function curl_easy_header(curl: *CURL, name: cstring, index: csize,
+    origin: cuint, request: cint, header: pointer): cint <cimport,nodecl> end
+local function curl_slist_append(old: *curl_slist, header: cstring): *curl_slist <cimport,nodecl> end
+local function curl_slist_free_all(headers: *curl_slist) <cimport,nodecl> end
+local function curl_ws_send(curl: *CURL, buf: pointer, len: csize, sent: *csize,
+    frame_size: int64, flags: cuint): cint <cimport,nodecl> end
+local function poll(fd: *pollfd, count: culong, timeout: cint): cint <cimport,nodecl> end
+## cinclude '#define iroh_ws_recv_call(e,b,n,g,m) curl_ws_recv((e),(b),(n),(g),(const struct curl_ws_frame **)(m))'
+local function native_recv(curl: *CURL, buf: pointer, limit: csize, got: *csize,
+    meta: **curl_ws_frame): cint <cimport 'iroh_ws_recv_call',nodecl> end
+
+local MAX_MESSAGE <comptime> = 1048576
+local WRITE_TIMEOUT_NS <comptime> = 10000000000
+local READ_TIMEOUT_NS <comptime> = 40000000000
+local Socket = @record{next: pointer, id: uint32, curl: *CURL, headers: *curl_slist}
+local Job = @record{ws: *Socket, url: cstring, data: cstring, size: csize, err: cstring, version: uint32}
+local sockets: pointer
+local next_id: uint32 = 1
+local curl_ready: boolean
+
+local function free_socket(ws: *Socket)
+  if ws == nilptr then return end
+  if ws.curl ~= nilptr then curl_easy_cleanup(ws.curl) end
+  curl_slist_free_all(ws.headers)
+  C.free(ws)
+end
+local function free_job(job: *Job)
+  free_socket(job.ws)
+  C.free(job.url)
+  C.free(job.data)
+  C.free(job)
+end
+local function job_for(ws: *Socket): *Job
+  local job = (@*Job)(io_mem(C.calloc(1,#Job)))
+  job.ws = ws
+  return job
+end
+local function store(e: Env, job: *Job): Term
+  if next_id == 0 then return io_fail(e,EOVERFLOW,'relay handle space exhausted') end
+  local ws = job.ws
+  job.ws = nilptr
+  ws.id = next_id
+  next_id = next_id + 1
+  ws.next = sockets
+  sockets = ws
+  return io_box(e, iroh_ws_Connected, ws.id)
+end
+local function take(e: Env, handle: Term): *Socket
+  local id = (@uint32)(e.mem[term_peek(e.mem,handle)])
+  local slot = &sockets
+  while $slot ~= nilptr do
+    local ws = (@*Socket)($slot)
+    if ws.id == id then
+      $slot = ws.next
+      return ws
+    end
+    slot = &ws.next
+  end
+  return nilptr
+end
+
+local function connect(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local ws = job.ws
+  local connect_only: clong = 2
+  local no_signal: clong = 1
+  local timeout_ms: clong = 10000
+  ws.curl = curl_easy_init()
+  local offered: cstring = 'Sec-WebSocket-Protocol: iroh-relay-v1'
+  if job.version == 2 then offered = 'Sec-WebSocket-Protocol: iroh-relay-v2, iroh-relay-v1' end
+  ws.headers = curl_slist_append(nilptr, offered)
+  local ca_file = C.getenv('CURL_CA_BUNDLE')
+  if ws.curl == nilptr or ws.headers == nilptr or
+      set_ptr(ws.curl, CURLOPT_URL, job.url) ~= CURLE_OK or
+      set_str(ws.curl, CURLOPT_PROTOCOLS_STR, 'ws,wss') ~= CURLE_OK or
+      set_number(ws.curl, CURLOPT_CONNECT_ONLY, connect_only) ~= CURLE_OK or
+      set_number(ws.curl, CURLOPT_NOSIGNAL, no_signal) ~= CURLE_OK or
+      set_number(ws.curl, CURLOPT_TIMEOUT_MS, timeout_ms) ~= CURLE_OK or
+      set_ptr(ws.curl, CURLOPT_HTTPHEADER, ws.headers) ~= CURLE_OK or
+      (ca_file ~= nilptr and set_str(ws.curl, CURLOPT_CAINFO, ca_file) ~= CURLE_OK) or
+      curl_easy_perform(ws.curl) ~= CURLE_OK then
+    job.err = 'relay WebSocket upgrade failed'
+    return
+  end
+  local protocol: *curl_header
+  if curl_easy_header(ws.curl,'Sec-WebSocket-Protocol',0,CURLH_HEADER | CURLH_1XX,-1,&protocol) ~= 0 or
+      protocol == nilptr or protocol.amount ~= 1 then
+    job.err = 'relay did not negotiate a WebSocket protocol'
+  elseif job.version == 2 and C.strcmp(protocol.value,'iroh-relay-v2') == 0 then
+    job.version = 2
+  elseif C.strcmp(protocol.value,'iroh-relay-v1') == 0 then
+    job.version = 1
+  else
+    job.err = 'relay selected an unsupported WebSocket protocol'
+  end
+end
+local function open_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
+  if next_id == 0 then return io_fail(e,EOVERFLOW,'relay handle space exhausted') end
+  return io_done(e,io_tup(e,store(e,job),job.version))
+end
+local function open_run(e: Env, fields: *[0]Term, work: *IoWork): Term
+  if not curl_ready then return io_fail(e,EIO,'libcurl initialization failed') end
+  if fields[1] ~= 1 and fields[1] ~= 2 then return io_fail(e,EINVAL,'invalid maximum relay version') end
+  local n: uint64
+  local url = io_cstr(e,fields[0],&n)
+  if io_nul(url,n) then
+    C.free(url)
+    return io_fail(e,EINVAL,'relay URL contains NUL')
+  end
+  local job = job_for((@*Socket)(io_mem(C.calloc(1,#Socket))))
+  job.url = url
+  job.version = (@uint32)(fields[1])
+  work.data = (@cstring)(job)
+  return io_work(work,connect,open_pack)
+end
+
+local function ready(ws: *Socket, events: cshort, end_time: uint64): boolean
+  local now = io_tick()
+  if now >= end_time then return false end
+  local fd: pollfd = {fd = -1, events = events, revents = 0}
+  if curl_easy_getinfo(ws.curl,CURLINFO_ACTIVESOCKET,&fd.fd) ~= CURLE_OK or fd.fd < 0 then return false end
+  return poll(&fd,1,(@cint)((end_time - now + 999999) // 1000000)) > 0
+end
+
+local function receive(work: *IoWork)
+  local job = (@*Job)(work.data)
+  job.data = (@cstring)(C.malloc(MAX_MESSAGE + 1))
+  if job.data == nilptr then job.err = 'cannot allocate relay read buffer' return end
+  local data = (@*[0]cuchar)(job.data)
+  local end_time = io_tick() + READ_TIMEOUT_NS
+  while io_tick() < end_time do
+    local got: csize
+    local meta: *curl_ws_frame
+    local rc = native_recv(job.ws.curl,&data[job.size],MAX_MESSAGE + 1 - job.size,&got,&meta)
+    if rc == CURLE_AGAIN then
+      if not ready(job.ws,POLLIN,end_time) then break end
+    elseif rc ~= CURLE_OK or meta == nilptr or ((@cuint)(meta.flags) & CURLWS_CLOSE) ~= 0 then
+      job.err = 'relay closed or WebSocket read failed'
+      return
+    elseif ((@cuint)(meta.flags) & CURLWS_BINARY) ~= 0 then
+      job.size = job.size + got
+      if job.size > MAX_MESSAGE or meta.bytesleft > (@int64)(MAX_MESSAGE - job.size) then
+        job.err = 'relay frame exceeds one MiB'
+        return
+      end
+      if meta.bytesleft == 0 and ((@cuint)(meta.flags) & CURLWS_CONT) == 0 then return end
+    elseif ((@cuint)(meta.flags) & CURLWS_PONG) == 0 then
+      job.err = 'expected a binary relay WebSocket message'
+      return
+    end
+  end
+  job.err = 'relay WebSocket read timed out'
+end
+local function recv_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
+  if next_id == 0 then return io_fail(e,EOVERFLOW,'relay handle space exhausted') end
+  return io_done(e,io_tup(e,store(e,job),io_list(e,job.data,job.size)))
+end
+local function recv_run(e: Env, fields: *[0]Term, work: *IoWork): Term
+  local ws = take(e,fields[0])
+  if ws == nilptr then return io_fail(e,EINVAL,'invalid relay socket') end
+  work.data = (@cstring)(job_for(ws))
+  return io_work(work,receive,recv_pack)
+end
+
+local function transmit(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local data = (@*[0]cuchar)(job.data)
+  local sent: csize = 0
+  local end_time = io_tick() + WRITE_TIMEOUT_NS
+  repeat
+    local n: csize
+    local rc = curl_ws_send(job.ws.curl,&data[sent],job.size - sent,&n,0,CURLWS_BINARY)
+    sent = sent + n
+    if rc == CURLE_OK and sent == job.size then return end
+    if rc ~= CURLE_OK and rc ~= CURLE_AGAIN then
+      job.err = 'relay WebSocket write failed'
+      return
+    end
+    if rc == CURLE_AGAIN and not ready(job.ws,POLLOUT,end_time) then break end
+  until io_tick() >= end_time
+  job.err = 'relay WebSocket write timed out'
+end
+local function send_pack(e: Env, work: *IoWork): Term
+  local job = (@*Job)(work.data)
+  defer free_job(job) end
+  if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
+  if next_id == 0 then return io_fail(e,EOVERFLOW,'relay handle space exhausted') end
+  return io_done(e,store(e,job))
+end
+local function send_run(e: Env, fields: *[0]Term, work: *IoWork): Term
+  local ws = take(e,fields[0])
+  if ws == nilptr then return io_fail(e,EINVAL,'invalid relay socket') end
+  local count: csize = 0
+  local item = fields[1]
+  while term_aux(item) == iroh_ws_Con do
+    local at = term_peek(e.mem,item)
+    if count >= MAX_MESSAGE or e.mem[at] > 255 then
+      free_socket(ws)
+      return io_fail(e,EINVAL,'invalid or oversized relay message')
+    end
+    count = count + 1
+    item = e.mem[at + 1]
+  end
+  local n: uint64
+  local job = job_for(ws)
+  job.data = io_cbuf(e,fields[1],&n,iroh_ws_Con)
+  job.size = (@csize)(n)
+  work.data = (@cstring)(job)
+  return io_work(work,transmit,send_pack)
+end
+local function close_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  local end_time = io_tick() + 1000000000
+  local normal: [2]cuchar = {3, 232}
+  local offset: csize = 0
+  while io_tick() < end_time do
+    local n: csize
+    local rc = curl_ws_send(job.ws.curl,&normal[offset],2 - offset,&n,0,CURLWS_CLOSE)
+    offset = offset + n
+    if offset == 2 then break end
+    if rc ~= CURLE_OK and rc ~= CURLE_AGAIN then return end
+    if rc == CURLE_AGAIN and not ready(job.ws,POLLOUT,end_time) then return end
+  end
+  local rest: [256]cuchar
+  while io_tick() < end_time do
+    local n: csize
+    local meta: *curl_ws_frame
+    local rc = native_recv(job.ws.curl,&rest[0],#rest,&n,&meta)
+    if rc == CURLE_AGAIN then
+      if not ready(job.ws,POLLIN,end_time) then return end
+    elseif rc ~= CURLE_OK or meta == nilptr or ((@cuint)(meta.flags) & CURLWS_CLOSE) ~= 0 then
+      return
+    end
+  end
+end
+local function close_pack(e: Env, work: *IoWork): Term
+  free_job((@*Job)(work.data))
+  return term_pak(iroh_ws_Unit,0)
+end
+local function close_run(e: Env, fields: *[0]Term, work: *IoWork): Term
+  local ws = take(e,fields[0])
+  if ws == nilptr then return term_pak(iroh_ws_Unit,0) end
+  work.data = (@cstring)(job_for(ws))
+  return io_work(work,close_call,close_pack)
+end
+local function register() <cexport,codename 'iroh_register_relay_socket',cattribute 'constructor'>
+  curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK
+  if iroh_ws_open ~= 0xffffffff then io_eff(iroh_ws_open,open_run) end
+  if iroh_ws_recv ~= 0xffffffff then io_eff(iroh_ws_recv,recv_run) end
+  if iroh_ws_send ~= 0xffffffff then io_eff(iroh_ws_send,send_run) end
+  if iroh_ws_close ~= 0xffffffff then io_eff(iroh_ws_close,close_run) end
+end

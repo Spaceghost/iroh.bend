@@ -47,6 +47,19 @@ start "$native" bend
 timeout 20 "$upstream" dial "$address"
 pass 'upstream Iroh dialer -> Bend listener'
 
+start "$native" bend-self-ipv6 listen6
+timeout 20 "$native" dial6 "${address##*:}"
+pass 'Bend dialer -> Bend listener over IPv6'
+start "$native" bend-ipv6 listen6
+timeout 20 "$upstream" dial "$address"
+pass 'upstream Iroh dialer -> Bend listener over IPv6'
+
+if [ -n "${UPSTREAM_IPV6:-}" ]; then
+    start "$UPSTREAM_IPV6" upstream-ipv6
+    timeout 20 "$native" dial6 "${address##*:}"
+    pass 'Bend dialer -> upstream Iroh listener over IPv6'
+fi
+
 timeout 20 "$native" close
 start "$native" aborting abort-listen
 abort_status=0
