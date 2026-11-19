@@ -106,6 +106,62 @@ def decode_sized(header: List<&2,U32>, size: Wire.Size) -> Proof:
 def decode(+header: List<&2,U32>) -> Proof:
   decode_sized(header,Wire.measure_limited(header,151))
 
+def symbol_range(+n: U32, upper: Bool, lower: Bool, number: Bool) -> U32:
+  match upper lower number:
+    case True{} _ _:
+      U32.add(n,65)
+    case _ True{} _:
+      U32.add(n,71)
+    case _ _ True{}:
+      U32.sub(n,4)
+    case _ _ _:
+      95
+
+def symbol(+n: U32) -> U32:
+  match n:
+    case 62:
+      45
+    case _:
+      symbol_range(n,U32.is_lt(n,26),U32.is_lt(n,52),U32.is_lt(n,62))
+
+def encode_groups(bytes: List<&2,U32>) -> List<&2,U32>:
+  match bytes:
+    case Con{+a,Con{+b,Con{+c,rest}}}:
+      Con{symbol(U32.shrn(a,2n)),
+        Con{symbol(U32.or(U32.shln(U32.and(a,3),4n),U32.shrn(b,4n))),
+        Con{symbol(U32.or(U32.shln(U32.and(b,15),2n),U32.shrn(c,6n))),
+        Con{symbol(U32.and(c,63)),encode_groups(rest)}}}}
+    case [+a,+b]:
+      [symbol(U32.shrn(a,2n)),
+        symbol(U32.or(U32.shln(U32.and(a,3),4n),U32.shrn(b,4n))),
+        symbol(U32.shln(U32.and(b,15),2n))]
+    case _:
+      []
+
+def encode_proof(key: List<&2,U32>, signature: List<&2,U32>,
+    suffix: List<&2,U32>) -> List<&2,U32>:
+  encode_groups(List.append(&2,U32,key,Con{64,List.append(&2,U32,signature,suffix)}))
+
+def signed(proof: Result<&1,&1,U32 & String,List<&2,U32> & List<&2,U32>>,
+    suffix: List<&2,U32>) -> Maybe<&1,List<&2,U32>>:
+  match proof:
+    case Done{(key,signature)}:
+      Some{encode_proof(key,signature,suffix)}
+    case Fail{_}:
+      None{}
+
+def sign_split(parts: Wire.Split, seed: List<&2,U32>) -> IO(Maybe<&1,List<&2,U32>>):
+  match parts:
+    case Wire.Prefix{message,suffix}:
+      do IO<Maybe<&1,List<&2,U32>>>:
+        proof : Result<&1,&1,U32 & String,List<&2,U32> & List<&2,U32>> <- Ed.sign(seed,message)
+        return signed(proof,suffix)
+    case _:
+      IO.pure(Maybe<&1,List<&2,U32>>,None{})
+
+def sign(seed: List<&2,U32>, material: List<&2,U32>) -> IO(Maybe<&1,List<&2,U32>>):
+  sign_split(Wire.split_peer(16n,material,[]),seed)
+
 def same_bytes(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
   match a b:
     case Nil{} Nil{}:

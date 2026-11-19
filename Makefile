@@ -73,7 +73,7 @@ $(BUILD)/iroh-bend-relay-auth: $(BUILD)/relay-auth.c
 
 .PHONY: check-relay-live
 RELAY_URL ?= ws://127.0.0.1:3340/relay
-RELAY_SOURCES = $(AUTH_SOURCES) src/relay_client.bend src/relay_socket.bend
+RELAY_SOURCES = $(AUTH_SOURCES) src/relay_client.bend src/relay_exporter.bend src/relay_socket.bend
 
 check-relay-live: $(BUILD)/iroh-bend-relay-live
 	$(BUILD)/iroh-bend-relay-live "$(RELAY_URL)"

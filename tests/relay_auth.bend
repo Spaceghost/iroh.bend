@@ -54,29 +54,42 @@ def exporter_bytes(chars: List<&2,Char>) -> List<&2,U32>:
     case Con{c,rest}:
       Con{Char.to_u32(c),exporter_bytes(rest)}
 
-def exporter_result(valid: Bool, replayed: Bool) -> IO(Unit):
-  match valid replayed:
-    case True{} False{}:
-      IO.print("PASS Iroh relay TLS exporter proof vector and replay rejection")
-    case _ _:
+def same_header(encoded: Maybe<&1,List<&2,U32>>, want: List<&2,U32>) -> Bool:
+  match encoded:
+    case Some{header}:
+      equal(header,want)
+    case None{}:
+      False{}
+
+def exporter_result(ok: Bool) -> IO(Unit):
+  match ok:
+    case True{}:
+      IO.print("PASS Iroh relay TLS exporter proof encoding, verification, and replay rejection")
+    case False{}:
       IO.die(Unit,1,"relay exporter proof verification mismatch")
 
-def test_exporter(proof: Exporter.Proof) -> IO(Unit):
+def exporter_material(last: U32) -> List<&2,U32>:
+  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+    16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,last]
+
+def test_exporter(proof: Exporter.Proof, expected: List<&2,U32>) -> IO(Unit):
   match proof:
     case Exporter.ExporterProof{+key,+sig,+suffix}:
       do IO<Unit>:
-        valid : Bool <- Exporter.verify(key,sig,suffix,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-          16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31])
-        replayed : Bool <- Exporter.verify(key,sig,suffix,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-          16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,30])
-        exporter_result(valid,replayed)
+        valid : Bool <- Exporter.verify(key,sig,suffix,exporter_material(31))
+        replayed : Bool <- Exporter.verify(key,sig,suffix,exporter_material(30))
+        encoded : Maybe<&1,List<&2,U32>> <- Exporter.sign(List.replicate(U32,32n,42),exporter_material(31))
+        exporter_result(valid && Bool.not(replayed) && same_header(encoded,expected))
     case Exporter.MalformedExporterProof{}:
       IO.die(Unit,1,"relay exporter vector failed to decode")
+
+def test_exporter_header(+expected: List<&2,U32>) -> IO(Unit):
+  test_exporter(Exporter.decode(expected),expected)
 
 def main() -> IO(Unit):
   do IO<Unit>:
     proof : Handshake.Auth <- IO.try(Handshake.Auth, Auth.sign_challenge(List.replicate(U32, 32n, 42), nonce()))
     test_proof(proof)
-    # OpenSSL Ed25519 signature using the fixed seed and exporter bytes 0 through 31.
-    test_exporter(Exporter.decode(exporter_bytes(String.to_list(
-      "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWFAQb98VXtFUshaBKOJKabtiBrsmgnPjpFdRpJqAzcy9jOAPc-kOvzLgXjeT9vCG8qx2yO7aDoF4n5vbE4kJbh2CBAREhMUFRYXGBkaGxwdHh8"))))
+    test_exporter_header(exporter_bytes(String.to_list(
+      "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWFAQb98VXtFUshaBKOJKabtiBrsmgnPjpFdRpJqAzcy9jOAPc-kOvzLgXjeT9vCG8qx2yO7aDoF4n5vbE4kJbh2CBAREhMUFRYXGBkaGxwdHh8"))
+    )

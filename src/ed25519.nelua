@@ -6,13 +6,14 @@
 require 'C.stdlib'
 
 ##[[
-for _, name in ipairs{'sign','verify','sha1_public_key','Con','True','False'} do
+for _, name in ipairs{'public_key','sign','verify','sha1_public_key','Con','True','False'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_ed_%s CID(%s)\n#else\n#define iroh_ed_%s UINT32_MAX\n#endif',
     name, name, name, name))
 end
 ]]
 local iroh_ed_sign: uint32 <cimport,nodecl>
+local iroh_ed_public_key: uint32 <cimport,nodecl>
 local iroh_ed_verify: uint32 <cimport,nodecl>
 local iroh_ed_sha1_public_key: uint32 <cimport,nodecl>
 local iroh_ed_Con: uint32 <cimport,nodecl>
@@ -70,22 +71,38 @@ local function read(e: Env, item: Term, out: *[0]cuchar, limit: csize): csize
   return len
 end
 
-local function sign(e: Env, f: *[0]Term, work: *IoWork): Term
+local function private_key(e: Env, item: Term): *EVP_PKEY
   local seed: [32]cuchar
   defer OPENSSL_cleanse(&seed[0], 32) end
+  if read(e, item, (@*[0]cuchar)(&seed[0]), 32) ~= 32 then return nilptr end
+  return EVP_PKEY_new_raw_private_key_ex(nilptr, 'ED25519', nilptr, &seed[0], 32)
+end
+
+local function public_key(e: Env, f: *[0]Term, work: *IoWork): Term
+  local key = private_key(e,f[0])
+  defer EVP_PKEY_free(key) end
+  local public: [32]cuchar
+  local len: csize = 32
+  if key == nilptr or EVP_PKEY_get_raw_public_key(key,&public[0],&len) ~= 1 or len ~= 32 then
+    return io_fail(e,EINVAL,'invalid Ed25519 seed or public key')
+  end
+  return io_done(e,io_list(e,(@cstring)(&public[0]),len))
+end
+
+local function sign(e: Env, f: *[0]Term, work: *IoWork): Term
   local message: [MAX_TRANSCRIPT]cuchar
   local size = read(e, f[1], (@*[0]cuchar)(&message[0]), MAX_TRANSCRIPT)
-  if read(e, f[0], (@*[0]cuchar)(&seed[0]), 32) ~= 32 or size > MAX_TRANSCRIPT then
+  local key = private_key(e,f[0])
+  defer EVP_PKEY_free(key) end
+  if key == nilptr or size > MAX_TRANSCRIPT then
     return io_fail(e, EINVAL, 'invalid Ed25519 seed or transcript')
   end
-  local key = EVP_PKEY_new_raw_private_key_ex(nilptr, 'ED25519', nilptr, &seed[0], 32)
-  defer EVP_PKEY_free(key) end
   local ctx = EVP_MD_CTX_new()
   defer EVP_MD_CTX_free(ctx) end
   local public: [32]cuchar, signature: [64]cuchar
   local key_size: csize = 32
   local sig_size: csize = 64
-  if key == nilptr or ctx == nilptr or
+  if ctx == nilptr or
       EVP_PKEY_get_raw_public_key(key, &public[0], &key_size) ~= 1 or key_size ~= 32 or
       EVP_DigestSignInit(ctx, nilptr, nilptr, nilptr, key) ~= 1 or
       EVP_DigestSign(ctx, &signature[0], &sig_size, &message[0], size) ~= 1 or sig_size ~= 64 then
@@ -129,6 +146,7 @@ local function sha1_public_key(e: Env, f: *[0]Term, work: *IoWork): Term
 end
 
 local function register() <cexport,codename 'iroh_register_ed25519',cattribute 'constructor'>
+  if iroh_ed_public_key ~= 0xffffffff then io_eff(iroh_ed_public_key, public_key) end
   if iroh_ed_sign ~= 0xffffffff then io_eff(iroh_ed_sign, sign) end
   if iroh_ed_verify ~= 0xffffffff then io_eff(iroh_ed_verify, verify) end
   if iroh_ed_sha1_public_key ~= 0xffffffff then io_eff(iroh_ed_sha1_public_key, sha1_public_key) end

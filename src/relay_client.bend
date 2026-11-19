@@ -2,6 +2,8 @@ import Base
 import ./relay.bend as Wire
 import ./handshake.bend as Handshake
 import ./relay_auth.bend as Auth
+import ./relay_exporter.bend as Exporter
+import ./ed25519.bend as Ed
 import ./relay_socket.bend as WS
 
 type Connection is Type:
@@ -66,22 +68,24 @@ def proof_ready(socket: WS.RelaySocket, protocol: Wire.Version,
       fail_open(socket, message)
 
 def answer_challenge(socket: WS.RelaySocket, protocol: Wire.Version,
-    seed: List<&2,U32>, frame: Handshake.Auth) -> IO(Result<&1,&1,U32 & String, Connection>):
-  match frame:
-    case Handshake.Challenge{nonce}:
+    seed: List<&2,U32>, frame: Handshake.Auth, offered: Bool) -> IO(Result<&1,&1,U32 & String, Connection>):
+  match frame offered:
+    case Handshake.Challenge{nonce} _:
       do IO<Result<&1,&1,U32 & String, Connection>>:
         proof : Result<&1,&1,U32 & String, Handshake.Auth> <- Auth.sign_challenge(seed, nonce)
         proof_ready(socket, protocol, proof)
-    case Handshake.Denied{_}:
+    case Handshake.Confirmed{} True{}:
+      IO.pure(Result<&1,&1,U32 & String,Connection>,Done{Online{socket,protocol}})
+    case Handshake.Denied{_} _:
       fail_open(socket, "relay denied endpoint authentication")
-    case _:
+    case _ _:
       fail_open(socket, "expected relay authentication challenge")
 
 def authenticate(reply: Result<&1,&1,U32 & String, WS.RelaySocket & List<&2,U32>>,
-    protocol: Wire.Version, seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String, Connection>):
+    protocol: Wire.Version, seed: List<&2,U32>, offered: Bool) -> IO(Result<&1,&1,U32 & String, Connection>):
   match reply:
     case Done{(socket, frame)}:
-      answer_challenge(socket, protocol, seed, Handshake.decode(frame))
+      answer_challenge(socket, protocol, seed, Handshake.decode(frame), offered)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String, Connection>, Fail{error})
 
@@ -92,20 +96,49 @@ def version(+number: U32) -> Wire.Version:
     case _:
       Wire.V2{}
 
-def upgraded(reply: Result<&1,&1,U32 & String, WS.RelaySocket & U32>, seed: List<&2,U32>) ->
+def upgraded(reply: Result<&1,&1,U32 & String, WS.RelaySocket & (U32 & Bool)>, seed: List<&2,U32>) ->
     IO(Result<&1,&1,U32 & String, Connection>):
   match reply:
-    case Done{(socket, number)}:
+    case Done{(socket, (number, offered))}:
       do IO<Result<&1,&1,U32 & String, Connection>>:
         challenge : Result<&1,&1,U32 & String, WS.RelaySocket & List<&2,U32>> <- WS.recv(socket)
-        authenticate(challenge, version(number), seed)
+        authenticate(challenge, version(number), seed, offered)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String, Connection>, Fail{error})
 
-def connect_with_version(url: String, seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String, Connection>):
-  do IO<Result<&1,&1,U32 & String, Connection>>:
-    reply : Result<&1,&1,U32 & String, WS.RelaySocket & U32> <- WS.open(url, max_version)
-    upgraded(reply, seed)
+def exporter_proof(material: Maybe<&1,List<&2,U32>>, seed: List<&2,U32>) -> IO(Maybe<&1,List<&2,U32>>):
+  match material:
+    case Some{bytes}:
+      Exporter.sign(seed,bytes)
+    case None{}:
+      IO.pure(Maybe<&1,List<&2,U32>>,None{})
+
+def prepared(reply: Result<&1,&1,U32 & String,WS.PendingUpgrade & Maybe<&1,List<&2,U32>>>,
+    +seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Connection>):
+  match reply:
+    case Done{(pending,material)}:
+      do IO<Result<&1,&1,U32 & String,Connection>>:
+        header : Maybe<&1,List<&2,U32>> <- exporter_proof(material,seed)
+        result : Result<&1,&1,U32 & String,WS.RelaySocket & (U32 & Bool)> <- WS.upgrade(pending,header)
+        upgraded(result,seed)
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,Connection>,Fail{error})
+
+def connect_with_key(key: Result<&1,&1,U32 & String,List<&2,U32>>, url: String,
+    seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String,Connection>):
+  match key:
+    case Done{public}:
+      do IO<Result<&1,&1,U32 & String,Connection>>:
+        reply : Result<&1,&1,U32 & String,WS.PendingUpgrade & Maybe<&1,List<&2,U32>>> <-
+          WS.prepare(url,max_version,public)
+        prepared(reply,seed)
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,Connection>,Fail{error})
+
+def connect_with_version(url: String, +seed: List<&2,U32>, max_version: U32) -> IO(Result<&1,&1,U32 & String,Connection>):
+  do IO<Result<&1,&1,U32 & String,Connection>>:
+    key : Result<&1,&1,U32 & String,List<&2,U32>> <- Ed.public_key(seed)
+    connect_with_key(key,url,seed,max_version)
 
 def connect(url: String, seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String, Connection>):
   connect_with_version(url, seed, 2)
