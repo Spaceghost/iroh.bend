@@ -4,6 +4,7 @@ import ../src/discovery.bend as Bytes
 import ../src/krpc.bend as Krpc
 import ../src/pkarr.bend as Pkarr
 import ../src/pkarr_dht.bend as Dht
+import ../src/pkarr_dht_search.bend as Search
 import ./pkarr.bend as Fixture
 
 def report(label: String, ok: Bool) -> IO(Unit):
@@ -115,6 +116,40 @@ def resolve(peer: Dht.Peer, missing: Bool) -> IO(Unit):
       Dht.resolve_at(peer,node_id(),Fixture.key(),2500))
     compare(found,missing)
 
+def signed_at(seq: U32) -> IO(List<&2,U32>):
+  IO.try(List<&2,U32>,Pkarr.sign(List.replicate(U32,32n,42),Fixture.key(),
+    [0,0,0,0,0,0,0,seq],Fixture.records(),30))
+
+def search_publish(peer: Dht.Peer) -> IO(Unit):
+  do IO<Unit>:
+    signed : List<&2,U32> <- signed_at(42)
+    count : U32 <- IO.try(U32,Search.publish([peer],node_id(),Fixture.key(),signed,400))
+    report("DHT publication replicated to multiple peers",U32.is_ge(count,2))
+
+def search_resolve(peer: Dht.Peer) -> IO(Unit):
+  do IO<Unit>:
+    proof : Maybe<&2,Pkarr.Verification> <- IO.try(Maybe<&2,Pkarr.Verification>,
+      Search.resolve([peer],node_id(),Fixture.key(),400))
+    report("DHT lookup follows referrals and selects the latest verified item",valid(proof))
+
+def stale_result(result: Result<&1,&1,U32 & String,U32>) -> IO(Unit):
+  match result:
+    case Fail{(302,_)}:
+      IO.print("PASS DHT stale publication rejected")
+    case _:
+      IO.die(Unit,1,"DHT accepted a stale publication")
+
+def search_stale(peer: Dht.Peer) -> IO(Unit):
+  do IO<Unit>:
+    signed : List<&2,U32> <- signed_at(41)
+    result : Result<&1,&1,U32 & String,U32> <- Search.publish([peer],node_id(),Fixture.key(),signed,400)
+    stale_result(result)
+
+def publish_old(peer: Dht.Peer) -> IO(Unit):
+  do IO<Unit>:
+    signed : List<&2,U32> <- signed_at(41)
+    IO.try(Unit,Dht.publish_at(peer,node_id(),Fixture.key(),signed,400))
+
 def against(mode: String, port: Maybe<&2,U32>) -> IO(Unit):
   match mode port:
     case "publish" Some{p}:
@@ -123,8 +158,16 @@ def against(mode: String, port: Maybe<&2,U32>) -> IO(Unit):
       resolve(Dht.DhtPeer{"127.0.0.1",p},False{})
     case "missing" Some{p}:
       resolve(Dht.DhtPeer{"127.0.0.1",p},True{})
+    case "publish-old" Some{p}:
+      publish_old(Dht.DhtPeer{"127.0.0.1",p})
+    case "search-publish" Some{p}:
+      search_publish(Dht.DhtPeer{"127.0.0.1",p})
+    case "search-resolve" Some{p}:
+      search_resolve(Dht.DhtPeer{"127.0.0.1",p})
+    case "search-stale" Some{p}:
+      search_stale(Dht.DhtPeer{"127.0.0.1",p})
     case _ _:
-      IO.die(Unit,2,"usage: pkarr-dht-check [publish|resolve|missing port]")
+      IO.die(Unit,2,"usage: pkarr-dht-check [mode port]")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
@@ -133,7 +176,7 @@ def run(args: List<String>) -> IO(Unit):
     case Con{_,Con{mode,Con{port,Nil{}}}}:
       against(mode,U32.read(port))
     case _:
-      IO.die(Unit,2,"usage: pkarr-dht-check [publish|resolve|missing port]")
+      IO.die(Unit,2,"usage: pkarr-dht-check [mode port]")
 
 def main() -> IO(Unit):
   do IO<Unit>:

@@ -161,3 +161,41 @@ def pack_item(key: Maybe<&2,List<&2,U32>>, signature: Maybe<&2,List<&2,U32>>,
 def item(+fields: List<&2,Ben.Value>) -> Maybe<&2,List<&2,U32>>:
   pack_item(exact(text(Ben.get(fields,"k")),32),exact(text(Ben.get(fields,"sig")),64),
     timestamp(integer(Ben.get(fields,"seq"))),text(Ben.get(fields,"v")))
+
+type CompactNode is Data:
+  CompactV4{id: List<&2,U32>, a: U32, b: U32, c: U32, d: U32, port: U32}
+
+def compact_node(part: Wire.Split, next: List<&2,CompactNode>) -> List<&2,CompactNode>:
+  match part:
+    case Wire.Prefix{id,[a,b,c,d,hi,lo]}:
+      Con{CompactV4{id,a,b,c,d,Bytes.be16(hi,lo)},next}
+    case _:
+      next
+
+def compact_nodes(+fuel: Nat, split: Wire.Split) -> List<&2,CompactNode>:
+  match fuel split:
+    case 1n+k Wire.Prefix{entry,remaining}:
+      compact_node(Wire.split_peer(20n,entry,[]),compact_nodes(k,Wire.split_peer(26n,remaining,[])))
+    case _ _:
+      []
+
+def nodes_block(bytes: List<&2,U32>, valid: Bool) -> List<&2,CompactNode>:
+  match valid:
+    case True{}:
+      compact_nodes(78n,Wire.split_peer(26n,bytes,[]))
+    case False{}:
+      []
+
+def nodes_sized(bytes: List<&2,U32>, size: Wire.Size) -> List<&2,CompactNode>:
+  match size:
+    case Wire.Length{n}:
+      nodes_block(bytes,U32.is_eq(U32.mod(n,26),0))
+    case _:
+      []
+
+def nodes(value: Maybe<&2,List<&2,U32>>) -> List<&2,CompactNode>:
+  match value:
+    case Some{+bytes}:
+      nodes_sized(bytes,Wire.measure_limited(bytes,2048))
+    case None{}:
+      []

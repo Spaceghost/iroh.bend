@@ -138,10 +138,11 @@ $(BUILD)/iroh-bend-pkarr-http: $(BUILD)/pkarr-http.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
 .PHONY: check-pkarr-dht
-PKARR_DHT_SOURCES = $(PKARR_SOURCES) src/bencode.bend src/krpc.bend src/pkarr_dht.bend
+PKARR_DHT_SOURCES = $(PKARR_SOURCES) src/bencode.bend src/krpc.bend src/pkarr_dht.bend src/pkarr_dht_search.bend
 
 check-pkarr-dht: $(BUILD)/iroh-bend-pkarr-dht
 	"$(BUILD)/iroh-bend-pkarr-dht"
+	python3 tests/pkarr_dht_routing.py "$(BUILD)/iroh-bend-pkarr-dht"
 
 $(BUILD)/pkarr-dht.c: tests/pkarr_dht.bend tests/pkarr.bend $(PKARR_DHT_SOURCES) src/ed25519.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/pkarr-dht-stage/src" "$(BUILD)/pkarr-dht-stage/tests"
