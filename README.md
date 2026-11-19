@@ -1,7 +1,8 @@
 # iroh.bend
 
 A Rust-free implementation targeting the Iroh 1.5.0 wire protocol. Bend
-implements relay framing, authentication transcripts, and client state.
+implements relay framing, authentication transcripts, client state, and DNS
+and Pkarr discovery packets.
 Nelua binds OpenSSL for direct QUIC and Ed25519, and libcurl for WebSocket
 transport. The build generates native C from Bend and Nelua. Upstream Iroh
 runs separately as a compatibility reference.
@@ -13,8 +14,9 @@ Use Bend 2.0.39 and Clang. The native networking tests also use Nelua and
 client requires a libcurl build with WebSocket support.
 
 1. Run `make check` for the relay wire snapshots, malformed input, handshake
-   framing, and BLAKE3 challenge vectors.
-2. Run `make check-relay-auth` for the Ed25519 proof vector and tamper rejection.
+   framing, BLAKE3 challenge vectors, and DNS query and TXT vectors.
+2. Run `make check-relay-auth` and `make check-pkarr` for Ed25519 relay proofs,
+   canonical Pkarr signing, and rejection of tampered packets and wrong keys.
 3. Run `make check-direct UPSTREAM=/path/to/upstream-peer` for mixed-peer
    QUIC. The peer fixture accepts `listen` and `dial ADDRESS`, uses the
    ALPN, identity seeds, and echo payload in [tests/direct.bend](tests/direct.bend),
@@ -42,6 +44,13 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   bidirectional stream. It pins both peers to explicitly supplied Ed25519
   keys, negotiates the caller's ALPN, and exchanges bounded binary messages.
   Listener, stream, and relay connection values are affine.
+- [Discovery](src/discovery.bend) looks up Iroh TXT attributes through an
+  IPv4 UDP DNS resolver. It checks the resolver address, transaction ID and
+  question, expands compressed DNS names, and reports truncated responses.
+  [Pkarr](src/pkarr.bend) signs and verifies endpoint TXT packets. The caller
+  supplies a timestamp when signing and applies its freshness policy when
+  verifying.
+
 
 ## Conformance scope
 
@@ -56,4 +65,4 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The TLS-exporter shortcut and native relay server are pending. |
 | Public endpoint lifecycle and QUIC features | Concurrent streams, native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
-| Connectivity and discovery | NAT traversal, automatic relay fallback, DNS/Pkarr, and path migration are pending. |
+| Connectivity and discovery | DNS TXT lookup passed against a local upstream Iroh DNS server after Pkarr publication. Signed Pkarr packets pass byte-for-byte and tamper tests. DNS TCP fallback, Pkarr HTTP/DHT transport, NAT traversal, automatic relay fallback, and path migration are pending. |

@@ -3,9 +3,10 @@ BUILD ?= build
 
 .PHONY: check check-gpu
 
-check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery
 	$(BUILD)/iroh-bend-check
 	$(BUILD)/iroh-bend-handshake
+	$(BUILD)/iroh-bend-discovery
 
 $(BUILD)/iroh-bend-check: tests/check.bend src/relay.bend src/base32.bend
 	mkdir -p $(BUILD)
@@ -14,6 +15,10 @@ $(BUILD)/iroh-bend-check: tests/check.bend src/relay.bend src/base32.bend
 $(BUILD)/iroh-bend-handshake: tests/handshake.bend src/handshake.bend src/relay_challenge.bend src/relay.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/handshake.bend -o $@
+
+$(BUILD)/iroh-bend-discovery: tests/discovery.bend src/discovery.bend src/relay.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/discovery.bend -o $@
 
 check-gpu: $(BUILD)/iroh-bend-gpu
 	BENDRTS= $(BUILD)/iroh-bend-gpu +RTS --gpu 1GB
@@ -84,3 +89,21 @@ $(BUILD)/relay-live.c: tests/relay_live.bend $(RELAY_SOURCES) src/ed25519.nelua 
 $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
+
+.PHONY: check-pkarr
+
+check-pkarr: $(BUILD)/iroh-bend-pkarr
+	$(BUILD)/iroh-bend-pkarr
+
+PKARR_SOURCES = src/pkarr.bend src/discovery.bend src/ed25519.bend src/relay.bend
+$(BUILD)/pkarr.c: tests/pkarr.bend $(PKARR_SOURCES) src/ed25519.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/pkarr-stage/src" "$(BUILD)/pkarr-stage/tests"
+	cp $(PKARR_SOURCES) "$(BUILD)/pkarr-stage/src/"
+	cp tests/pkarr.bend "$(BUILD)/pkarr-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(BUILD)/pkarr-stage/src/ed25519.c)"
+	cd "$(BUILD)/pkarr-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/pkarr.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-pkarr: $(BUILD)/pkarr.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
