@@ -187,9 +187,11 @@ local NGTCP2_ERR_DISCARD_PKT: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_ARGUMENT: cint <cimport,nodecl>
 
 local PACKET_CAPACITY <comptime> = 1500
-local DATAGRAM_FRAME_LIMIT <comptime> = 1200
-local INBOX_CAPACITY <comptime> = 16
-local Datagram = @record{size: csize, bytes: [DATAGRAM_FRAME_LIMIT]cuchar}
+local DATAGRAM_FRAME_LIMIT <comptime> = 65535
+-- Iroh's default receive budget includes metadata, even for empty payloads.
+local INBOX_BUDGET <comptime> = 1250000
+local DATAGRAM_OVERHEAD <comptime> = 32
+local Datagram = @record{next: pointer, size: csize}
 local Connection = @record{
   next: pointer,
   id: uint32,
@@ -205,9 +207,9 @@ local Connection = @record{
   local_size: cuint,
   output: [PACKET_CAPACITY]cuchar,
   output_size: csize,
-  inbox: [INBOX_CAPACITY]Datagram,
-  first: uint32,
-  received: uint32,
+  inbox_first: *Datagram,
+  inbox_last: *Datagram,
+  inbox_size: csize,
   acknowledgments: uint32,
   datagram_id: uint64,
   pin_status: cint,
@@ -247,15 +249,36 @@ local function new_connection_id(engine: *ngtcp2_conn, cid: *ngtcp2_cid,
   return 0
 end
 
+local function datagram_data(item: *Datagram): *cuchar
+  return &((@*[0]cuchar)(item))[#Datagram]
+end
+
+local function pop_datagram(conn: *Connection)
+  local item = conn.inbox_first
+  conn.inbox_first = (@*Datagram)(item.next)
+  if conn.inbox_first == nilptr then conn.inbox_last = nilptr end
+  conn.inbox_size = conn.inbox_size - (item.size + DATAGRAM_OVERHEAD)
+  C.free(item)
+end
+
 local function receive_datagram(engine: *ngtcp2_conn, flags: uint32, bytes: *cuchar,
     size: csize, user: pointer): cint
   local conn = (@*Connection)(user)
-  if size <= DATAGRAM_FRAME_LIMIT and conn.received < INBOX_CAPACITY then
-    local item = &conn.inbox[(conn.first + conn.received) % INBOX_CAPACITY]
-    item.size = size
-    if size ~= 0 then C.memcpy(&item.bytes[0],bytes,size) end
-    conn.received = conn.received + 1
+  if size > DATAGRAM_FRAME_LIMIT then return NGTCP2_ERR_CALLBACK_FAILURE end
+  local item = (@*Datagram)(C.malloc(#Datagram + size))
+  if item == nilptr then return 0 end
+  item.next = nilptr
+  item.size = size
+  if size ~= 0 then C.memcpy(datagram_data(item),bytes,size) end
+  local occupied = size + DATAGRAM_OVERHEAD
+  while conn.inbox_size + occupied > INBOX_BUDGET do pop_datagram(conn) end
+  if conn.inbox_last == nilptr then
+    conn.inbox_first = item
+  else
+    conn.inbox_last.next = item
   end
+  conn.inbox_last = item
+  conn.inbox_size = conn.inbox_size + occupied
   return 0
 end
 
@@ -356,6 +379,7 @@ local function destroy(conn: *Connection)
   SSL_free(conn.ssl)
   EVP_PKEY_free(conn.expected_key)
   if conn.fd >= 0 then close(conn.fd) end
+  while conn.inbox_first ~= nilptr do pop_datagram(conn) end
   C.free(conn)
 end
 
@@ -378,19 +402,23 @@ local function unpack(e: Env, item: Term, out: *cuchar, limit: csize): isize
   local size: csize = 0
   local dst = (@*[0]cuchar)(out)
   local valid = true
+  local oversized = false
   while term_aux(item) == iroh_dgram_Con do
     local fields: [2]Term
     spare_free(e,cls_fit(2),ctr_take(e,item,2,&fields[0]))
     local byte = fields[0]
-    if size < limit and byte <= 255 then
+    if byte > 255 then
+      valid = false
+    elseif size >= limit then
+      oversized = true
+    else
       dst[size] = (@cuchar)(byte)
       size = size + 1
-    else
-      valid = false
     end
     item = fields[1]
   end
   if not valid or term_aux(item) ~= iroh_dgram_Nil then return -1 end
+  if oversized then return -2 end
   return (@isize)(size)
 end
 
@@ -497,9 +525,10 @@ local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function write(e: Env, conn: *Connection, payload: Term): Term
-  local bytes: [DATAGRAM_FRAME_LIMIT]cuchar
-  local size = unpack(e,payload,&bytes[0],DATAGRAM_FRAME_LIMIT)
-  if size < 0 then return io_fail(e,EINVAL,'invalid or oversized QUIC datagram') end
+  local bytes: [PACKET_CAPACITY]cuchar
+  local size = unpack(e,payload,&bytes[0],PACKET_CAPACITY)
+  if size == -2 then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds packet capacity') end
+  if size < 0 then return io_fail(e,EINVAL,'invalid QUIC datagram bytes') end
   if conn == nilptr or conn.failed then return closed(e) end
   local transport = ngtcp2_conn_get_remote_transport_params2(conn.engine)
   if transport == nilptr or conn.pin_status ~= 1 or ngtcp2_conn_get_handshake_completed2(conn.engine) == 0 then
@@ -537,11 +566,10 @@ local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
   local value = term_pak(iroh_dgram_None,0)
-  if conn.received > 0 and conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 then
-    local item = &conn.inbox[conn.first]
-    value = io_box(e,iroh_dgram_Some,io_list(e,(@cstring)(&item.bytes[0]),item.size))
-    conn.first = (conn.first + 1) % INBOX_CAPACITY
-    conn.received = conn.received - 1
+  if conn.inbox_first ~= nilptr and conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 then
+    local item = conn.inbox_first
+    value = io_box(e,iroh_dgram_Some,io_list(e,(@cstring)(datagram_data(item)),item.size))
+    pop_datagram(conn)
   end
   return io_tup(e,args[0],io_done(e,value))
 end

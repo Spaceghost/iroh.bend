@@ -235,10 +235,12 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 .PHONY: check-quic-datagram
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
+UPSTREAM_DATAGRAM_ECHO ?=
 DATAGRAM_LIBS = libngtcp2_crypto_ossl libngtcp2 openssl
 
 check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram
-	sh tests/quic_datagram.sh "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_DATAGRAM_V4)" "$(UPSTREAM_DATAGRAM_V6)"
+	sh tests/quic_datagram.sh "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_DATAGRAM_V4)" \
+		"$(UPSTREAM_DATAGRAM_V6)" "$(UPSTREAM_DATAGRAM_ECHO)"
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"
