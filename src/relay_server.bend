@@ -1,6 +1,7 @@
 import Base
 import ./relay_server_socket.bend as Net
 import ./relay_auth.bend as Auth
+import ./relay_exporter.bend as Exporter
 import ./handshake.bend as Handshake
 import ./relay.bend as Wire
 
@@ -170,13 +171,59 @@ def deny_after_send(queued: Net.ServerSocket & Bool, id: U32, clients: List<&2,C
   (socket,_) = queued
   kick(socket,id,1,clients)
 
-def authenticated(valid: Bool, socket: Net.ServerSocket, +clients: List<&2,Client>,
-    +id: U32, protocol: Wire.Version, +key: List<&2,U32>) -> IO(Server):
+def confirm(socket: Net.ServerSocket, +clients: List<&2,Client>, +id: U32, protocol: Wire.Version,
+    +key: List<&2,U32>) -> IO(Server):
+  do IO<Server>:
+    queued : Net.ServerSocket & Bool <- queue_auth(socket,id,Handshake.encode(Handshake.Confirmed{}))
+    confirmed(queued,clients,id,protocol,key,by_key(clients,key))
+
+def challenge(socket: Net.ServerSocket, clients: List<&2,Client>, id: U32, protocol: Wire.Version) -> IO(Server):
+  do IO<Server>:
+    nonce : Result<&1,&1,U32 & String,List<&2,U32>> <- Net.relay_nonce()
+    begin_claim(nonce,socket,clients,id,protocol)
+
+def export_verified(valid: Bool, socket: Net.ServerSocket, clients: List<&2,Client>, id: U32,
+    protocol: Wire.Version, key: List<&2,U32>) -> IO(Server):
   match valid:
     case True{}:
+      confirm(socket,clients,id,protocol,key)
+    case False{}:
+      challenge(socket,clients,id,protocol)
+
+def export_proof(exported: Net.ServerSocket & Maybe<&1,List<&2,U32>>, clients: List<&2,Client>,
+    id: U32, protocol: Wire.Version, +key: List<&2,U32>,
+    signature: List<&2,U32>, suffix: List<&2,U32>) -> IO(Server):
+  match exported:
+    case (socket,Some{material}):
       do IO<Server>:
-        queued : Net.ServerSocket & Bool <- queue_auth(socket,id,Handshake.encode(Handshake.Confirmed{}))
-        confirmed(queued,clients,id,protocol,key,by_key(clients,key))
+        valid : Bool <- Exporter.verify(key,signature,suffix,material)
+        export_verified(valid,socket,clients,id,protocol,key)
+    case (socket,None{}):
+      challenge(socket,clients,id,protocol)
+
+def check_exporter(proof: Exporter.Proof, socket: Net.ServerSocket, clients: List<&2,Client>,
+    +id: U32, protocol: Wire.Version) -> IO(Server):
+  match proof:
+    case Exporter.ExporterProof{+key,signature,suffix}:
+      do IO<Server>:
+        exported : Net.ServerSocket & Maybe<&1,List<&2,U32>> <- Net.relay_export_keying_material(socket,id,key)
+        export_proof(exported,clients,id,protocol,key,signature,suffix)
+    case Exporter.MalformedExporterProof{}:
+      kick(socket,id,0,clients)
+
+def client_header(header: Net.ServerSocket & Maybe<&1,List<&2,U32>>, clients: List<&2,Client>,
+    id: U32, protocol: Wire.Version) -> IO(Server):
+  match header:
+    case (socket,Some{bytes}):
+      check_exporter(Exporter.decode(bytes),socket,clients,id,protocol)
+    case (socket,None{}):
+      challenge(socket,clients,id,protocol)
+
+def authenticated(valid: Bool, socket: Net.ServerSocket, clients: List<&2,Client>,
+    +id: U32, protocol: Wire.Version, key: List<&2,U32>) -> IO(Server):
+  match valid:
+    case True{}:
+      confirm(socket,clients,id,protocol,key)
     case False{}:
       do IO<Server>:
         queued : Net.ServerSocket & Bool <- queue_auth(socket,id,
@@ -234,10 +281,10 @@ def event(socket: Net.ServerSocket, +clients: List<&2,Client>, update: Net.Socke
   match update:
     case Net.RelayIdle{}:
       IO.pure(Server,Serving{socket,clients})
-    case Net.RelayJoined{id,number}:
+    case Net.RelayJoined{+id,number}:
       do IO<Server>:
-        nonce : Result<&1,&1,U32 & String,List<&2,U32>> <- Net.relay_nonce()
-        begin_claim(nonce,socket,clients,id,version(number))
+        header : Net.ServerSocket & Maybe<&1,List<&2,U32>> <- Net.relay_client_auth_header(socket,id)
+        client_header(header,clients,id,version(number))
     case Net.RelayBytes{id,bytes}:
       handle_bytes(socket,clients,by_id(clients,id),bytes)
     case Net.RelayLeft{id}:

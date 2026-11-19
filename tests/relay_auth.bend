@@ -1,6 +1,7 @@
 import Base
 import ../src/handshake.bend as Handshake
 import ../src/relay_auth.bend as Auth
+import ../src/relay_exporter.bend as Exporter
 
 def nonce() -> List<&2,U32>:
   [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
@@ -46,7 +47,36 @@ def test_proof(+proof: Handshake.Auth) -> IO(Unit):
     tampered : Bool <- Auth.verify_challenge(proof, [1,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])
     require(matches_vector(proof) && valid && Bool.not(tampered))
 
+def exporter_bytes(chars: List<&2,Char>) -> List<&2,U32>:
+  match chars:
+    case Nil{}:
+      []
+    case Con{c,rest}:
+      Con{Char.to_u32(c),exporter_bytes(rest)}
+
+def exporter_result(valid: Bool, replayed: Bool) -> IO(Unit):
+  match valid replayed:
+    case True{} False{}:
+      IO.print("PASS Iroh relay TLS exporter proof vector and replay rejection")
+    case _ _:
+      IO.die(Unit,1,"relay exporter proof verification mismatch")
+
+def test_exporter(proof: Exporter.Proof) -> IO(Unit):
+  match proof:
+    case Exporter.ExporterProof{+key,+sig,+suffix}:
+      do IO<Unit>:
+        valid : Bool <- Exporter.verify(key,sig,suffix,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+          16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31])
+        replayed : Bool <- Exporter.verify(key,sig,suffix,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+          16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,30])
+        exporter_result(valid,replayed)
+    case Exporter.MalformedExporterProof{}:
+      IO.die(Unit,1,"relay exporter vector failed to decode")
+
 def main() -> IO(Unit):
   do IO<Unit>:
     proof : Handshake.Auth <- IO.try(Handshake.Auth, Auth.sign_challenge(List.replicate(U32, 32n, 42), nonce()))
     test_proof(proof)
+    # OpenSSL Ed25519 signature using the fixed seed and exporter bytes 0 through 31.
+    test_exporter(Exporter.decode(exporter_bytes(String.to_list(
+      "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWFAQb98VXtFUshaBKOJKabtiBrsmgnPjpFdRpJqAzcy9jOAPc-kOvzLgXjeT9vCG8qx2yO7aDoF4n5vbE4kJbh2CBAREhMUFRYXGBkaGxwdHh8"))))

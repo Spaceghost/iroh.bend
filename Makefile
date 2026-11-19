@@ -59,9 +59,9 @@ check-relay-auth: $(BUILD)/iroh-bend-relay-auth
 
 AUTH_SOURCES = src/ed25519.bend src/handshake.bend src/relay.bend src/relay_auth.bend src/relay_challenge.bend
 
-$(BUILD)/relay-auth.c: tests/relay_auth.bend $(AUTH_SOURCES) src/ed25519.nelua tools/nelua-effect.sh
+$(BUILD)/relay-auth.c: tests/relay_auth.bend $(AUTH_SOURCES) src/relay_exporter.bend src/ed25519.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/stage/src" "$(BUILD)/stage/tests"
-	cp $(AUTH_SOURCES) "$(BUILD)/stage/src/"
+	cp $(AUTH_SOURCES) src/relay_exporter.bend "$(BUILD)/stage/src/"
 	cp tests/relay_auth.bend "$(BUILD)/stage/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
 		"$(abspath $(BUILD)/stage/src/ed25519.c)"
@@ -176,7 +176,7 @@ $(BUILD)/iroh-bend-quic-streams: $(BUILD)/quic-streams.c
 
 .PHONY: check-relay-server
 UPSTREAM_RELAY_CLIENT ?=
-RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_server.bend src/relay_server_socket.bend
+RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_exporter.bend src/relay_server.bend src/relay_server_socket.bend
 
 check-relay-server: $(BUILD)/iroh-bend-relay-server $(BUILD)/iroh-bend-relay-live
 	tests/relay_server.sh "$(BUILD)/iroh-bend-relay-server" "$(BUILD)/iroh-bend-relay-live" "$(UPSTREAM_RELAY_CLIENT)"

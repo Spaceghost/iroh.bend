@@ -3,6 +3,7 @@
 ## pragmas.nogc = true
 ## cinclude '<libwebsockets.h>'
 ## cinclude '<openssl/rand.h>'
+## cinclude '<openssl/ssl.h>'
 ## cinclude '<errno.h>'
 ## cdefine 'bend_lws_info struct lws_context_creation_info'
 ## cdefine 'bend_lws_protocol struct lws_protocols'
@@ -14,7 +15,8 @@ require 'C.string'
 ##[[
 for _, name in ipairs{'relay_bind','relay_poll','relay_queue','relay_authorized','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
-                      'Con','True','False','Unit'} do
+                      'Con','True','False','Unit','Some','None',
+                      'relay_client_auth_header','relay_export_keying_material'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_srv_%s CID(%s)\n#else\n#define iroh_srv_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -37,6 +39,10 @@ local iroh_srv_True: uint32 <cimport,nodecl>
 local iroh_srv_False: uint32 <cimport,nodecl>
 local iroh_srv_Unit: uint32 <cimport,nodecl>
 
+local iroh_srv_Some: uint32 <cimport,nodecl>
+local iroh_srv_None: uint32 <cimport,nodecl>
+local iroh_srv_relay_client_auth_header: uint32 <cimport,nodecl>
+local iroh_srv_relay_export_keying_material: uint32 <cimport,nodecl>
 local Env <cimport,nodecl> = @record{mem: *[0]uint64}
 local IoWork <cimport,nodecl> = @record{}
 local Term = @uint64
@@ -83,6 +89,12 @@ local LWS_CALLBACK_RECEIVE: cint <cimport,nodecl>
 local LWS_CALLBACK_CLOSED: cint <cimport,nodecl>
 local LWS_CALLBACK_SERVER_WRITEABLE: cint <cimport,nodecl>
 local LWS_CALLBACK_HTTP: cint <cimport,nodecl>
+local SSL <cimport,nodecl> = @record{}
+local function lws_get_ssl(wsi: *lws): *SSL <cimport,nodecl> end
+local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
+    label: cstring, label_len: csize, context: *cuchar, context_len: csize, use_context: cint): cint <cimport,nodecl> end
+local function lws_hdr_custom_length(ws: *lws, name: cstring, len: cint): cint <cimport,nodecl> end
+local function lws_hdr_custom_copy(ws: *lws, dst: cstring, cap: cint, name: cstring, len: cint): cint <cimport,nodecl> end
 local WSI_TOKEN_GET_URI: cint <cimport,nodecl>
 local LWS_WRITE_BINARY: cint <cimport,nodecl>
 local LWS_PRE: csize <cimport,nodecl>
@@ -115,6 +127,7 @@ local MAX_SEND <comptime> = 32
 local Frame = @record{next: pointer, data: *cuchar, size: csize}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
+  auth_header: [152]cchar, auth_len: cint,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
 }
 local Event = @record{next: pointer, tag: uint32, id: uint32, version: uint32, body: cstring, size: csize}
@@ -229,6 +242,21 @@ local function send(peer: *Peer): cint
   return 0
 end
 
+local function capture_auth_header(peer: *Peer, ws: *lws)
+  local header: cstring = 'x-iroh-relay-client-auth-v1:'
+  local name_len = (@cint)(C.strlen(header))
+  local len = lws_hdr_custom_length(ws,header,name_len)
+  -- Keep absence distinct from a present header with invalid length.
+  peer.auth_len = len
+  if len ~= 151 then
+    if len >= 0 then peer.auth_len = 0 end
+    return
+  end
+  if lws_hdr_custom_copy(ws,(@cstring)(&peer.auth_header[0]),152,header,name_len) ~= len then
+    peer.auth_len = 0
+  end
+end
+
 local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
   if reason == LWS_CALLBACK_HTTP then
     lws_return_http_status(ws,404,nilptr)
@@ -256,6 +284,7 @@ local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, l
     peer.id = next_id
     next_id = next_id + 1
     peer.ws = ws
+    capture_auth_header(peer,ws)
     peer.next = server.peers
     server.peers = peer
     server.peer_count = server.peer_count + 1
@@ -401,6 +430,38 @@ local function queue_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_tup(e,f[0],term_pak(iroh_srv_True,0))
 end
 
+local function auth_header_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer == nilptr or peer.auth_len < 0 then
+    return io_tup(e,f[0],term_pak(iroh_srv_None,0))
+  end
+  local bytes = io_list(e,(@cstring)(&peer.auth_header[0]),(@uint64)(peer.auth_len))
+  return io_tup(e,f[0],io_box(e,iroh_srv_Some,bytes))
+end
+
+local function export_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  local none = term_pak(iroh_srv_None,0)
+  if peer == nilptr or peer.closing or peer.authorized or size_bytes(e,f[2]) ~= 32 then
+    return io_tup(e,f[0],none)
+  end
+  local ssl = lws_get_ssl(peer.ws)
+  if ssl == nilptr then return io_tup(e,f[0],none) end
+  local key: [32]cchar, material: [32]cchar
+  local item = f[2]
+  for i: csize = 0,<32 do
+    local at = term_peek(e.mem,item)
+    key[i] = (@cchar)(e.mem[at])
+    item = e.mem[at + 1]
+  end
+  local label: cstring = 'iroh-relay handshake v1'
+  if SSL_export_keying_material(ssl,(@*cuchar)(&material[0]),32,label,C.strlen(label),
+      (@*cuchar)(&key[0]),32,1) ~= 1 then
+    return io_tup(e,f[0],none)
+  end
+  return io_tup(e,f[0],io_box(e,iroh_srv_Some,io_list(e,&material[0],32)))
+end
+
 local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
   if peer ~= nilptr then peer.authorized = true end
@@ -434,6 +495,12 @@ local function nonce_run(e: Env, f: *[0]Term, work: *IoWork): Term
 end
 
 local function register() <cexport,codename 'iroh_register_relay_server',cattribute 'constructor'>
+  if iroh_srv_relay_client_auth_header ~= 0xffffffff then
+    io_eff(iroh_srv_relay_client_auth_header,auth_header_run)
+  end
+  if iroh_srv_relay_export_keying_material ~= 0xffffffff then
+    io_eff(iroh_srv_relay_export_keying_material,export_run)
+  end
   if iroh_srv_relay_bind ~= 0xffffffff then io_eff(iroh_srv_relay_bind,bind_run) end
   if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end

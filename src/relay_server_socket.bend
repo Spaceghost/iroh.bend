@@ -33,3 +33,11 @@ def relay_stop(server: ServerSocket) -> IO(Unit):
 
 def relay_nonce() -> IO(Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./relay_server_socket.c"
+
+def relay_client_auth_header(server: ServerSocket, id: U32)
+    -> IO(ServerSocket & Maybe<&1,List<&2,U32>>):
+  import "./relay_server_socket.c"
+
+def relay_export_keying_material(server: ServerSocket, id: U32, key: List<&2,U32>)
+    -> IO(ServerSocket & Maybe<&1,List<&2,U32>>):
+  import "./relay_server_socket.c"

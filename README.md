@@ -17,7 +17,7 @@ client requires a libcurl build with WebSocket support.
 1. Run `make check` for the relay wire snapshots, malformed input, handshake
    framing, BLAKE3 challenge vectors, and DNS query and TXT vectors.
    Run `make check-dns-tcp` with Python 3 for the loopback DNS fallback test.
-2. Run `make check-relay-auth` and `make check-pkarr` for Ed25519 relay proofs,
+2. Run `make check-relay-auth` and `make check-pkarr` for Ed25519 challenge and TLS-exporter proofs,
    canonical Pkarr signing, and rejection of tampered packets and wrong keys.
    Run `make check-pkarr-http` with libcurl and Python 3 for Pkarr relay
    publishing, resolution, and error handling. Run
@@ -38,8 +38,9 @@ client requires a libcurl build with WebSocket support.
    an upstream `iroh-relay` in development mode on the loopback interface.
    Both relay protocol versions are exercised. For a local TLS relay, use a
    `wss://` URL and set `CURL_CA_BUNDLE` to the trusted CA file.
-   Run `make check-relay-server` with libwebsockets, Python 3, and the
-   OpenSSL CLI to test the Bend server with WS and WSS. Set
+   Run `make check-relay-server` with libwebsockets built with OpenSSL and
+   custom HTTP header support, Python 3, and the OpenSSL CLI to test the
+   Bend server with WS and WSS. Set
    `UPSTREAM_RELAY_CLIENT` to an Iroh client fixture that accepts a relay
    base URL and an optional CA certificate in DER format.
 5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
@@ -57,7 +58,7 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   response. It sends datagrams and reads relay frames. A caller receiving
   a relay ping sends the given payload back through `pong`.
 - [Relay server](src/relay_server.bend) accepts v1/v2 WebSocket upgrades,
-  authenticates clients with fresh Ed25519 challenges, and routes datagrams
+  authenticates clients with TLS-exporter proofs or fresh Ed25519 challenges, and routes datagrams
   using the authenticated sender identity. It answers relay pings and
   replaces duplicate endpoint sessions. Supply certificate and private key
   paths for WSS, or two empty strings for WS. Drive `step` regularly and
@@ -105,7 +106,7 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | --- | --- |
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
-| Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The Bend WS/WSS relay server passes challenge authentication, mixed v1/v2 routing, batched datagrams, and ping/pong interoperability. TLS-exporter authentication, relay-generated keepalives, endpoint departure notifications, and production access and rate controls are pending. |
+| Relay authentication and transport | Challenge-authenticated clients exchange datagrams through upstream Iroh over WS and WSS. Untrusted TLS certificates are rejected. The Bend relay server passes mixed v1/v2 routing, batched datagrams, ping/pong, and v1/v2 TLS-exporter authentication. Replayed proofs and invalid signatures fall back to the challenge, and malformed proofs are rejected. Bend client TLS-exporter support, relay-generated keepalives, endpoint departure notifications, and production access and rate controls are pending. |
 | Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. Native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish and resolve passed against the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. The upstream Iroh DNS fallback resolves the replicated Bend publication. IPv6 DHT routing and automatic republishing are pending. |
 | Connectivity | NAT traversal, automatic relay fallback, and path migration are pending. |

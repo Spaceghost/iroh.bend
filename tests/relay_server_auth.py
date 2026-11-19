@@ -1,6 +1,6 @@
-"""Check challenge freshness and rejection of an invalid relay proof."""
+"""Check challenge freshness, plaintext exporter fallback and malformed proof handling."""
 
-from base64 import b64encode
+from base64 import b64encode, urlsafe_b64encode
 from os import urandom
 from socket import create_connection
 from sys import argv
@@ -18,21 +18,27 @@ def frame(stream):
     return op, payload
 
 
-def challenge(port):
+def challenge(port, auth=None, malformed=False):
     with create_connection(("127.0.0.1", port), timeout=4) as ws, ws.makefile("rb") as stream:
         token = b64encode(urandom(16)).decode()
         request = (
             f"GET /relay HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
             "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
-            f"Sec-WebSocket-Key: {token}\r\nSec-WebSocket-Protocol: iroh-relay-v2\r\n\r\n"
+            f"Sec-WebSocket-Key: {token}\r\nSec-WebSocket-Protocol: iroh-relay-v2\r\n"
         )
-        ws.sendall(request.encode())
+        if auth is not None:
+            request += f"X-Iroh-Relay-Client-Auth-V1: {auth}\r\n"
+        ws.sendall((request + "\r\n").encode())
         assert stream.readline().startswith(b"HTTP/1.1 101 ")
         for line in stream:
             if line == b"\r\n":
                 break
         else:
             raise AssertionError("upgrade response ended before its headers")
+        if malformed:
+            first_byte = stream.read(1)
+            assert first_byte in (b"", b"\x88"), first_byte
+            return None
         op, nonce = frame(stream)
         assert op == 0x82 and len(nonce) == 17 and nonce[0] == 0
 
@@ -46,5 +52,9 @@ def challenge(port):
 
 
 port = int(argv[1])
-assert challenge(port) != challenge(port)
-print("PASS relay challenge freshness and invalid signature rejection")
+formatted_proof = urlsafe_b64encode(KEY + b"\x40" + bytes(80)).rstrip(b"=").decode()
+assert challenge(port) != challenge(port, auth=formatted_proof)
+challenge(port, auth="!" * 151, malformed=True)
+challenge(port, auth=formatted_proof[:-1] + "B", malformed=True)
+challenge(port, auth="short", malformed=True)
+print("PASS relay challenge freshness, exporter fallback and malformed proof rejection")
