@@ -142,7 +142,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=Relay-Test-CA \
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
     -out "$scratch/leaf.csr" -keyout "$scratch/key.pem" 2>> "$scratch/openssl.log"
 printf '%s\n' 'basicConstraints=critical,CA:FALSE' 'extendedKeyUsage=serverAuth' \
-    'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$scratch/leaf.ext"
+    'authorityKeyIdentifier=keyid:always' 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$scratch/leaf.ext"
 openssl x509 -req -in "$scratch/leaf.csr" -CA "$scratch/ca.pem" -CAkey "$scratch/ca.key" \
     -CAcreateserial -days 1 -extfile "$scratch/leaf.ext" -out "$scratch/cert.pem" 2>> "$scratch/openssl.log"
 start wss "$scratch/cert.pem" "$scratch/key.pem"
@@ -176,6 +176,14 @@ stop
 
 start wss-access access "$scratch/cert.pem" "$scratch/key.pem"
 exercise_access wss
+stop
+
+start headers-ws headers
+python3 tests/relay_server_headers.py "$port" "$client"
+stop
+
+start headers-wss headers "$scratch/cert.pem" "$scratch/key.pem"
+python3 tests/relay_server_headers.py "$port" "$client" "$scratch/ca.pem"
 stop
 
 start rate-ws rate

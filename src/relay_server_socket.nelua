@@ -106,6 +106,7 @@ local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
 local function lws_hdr_custom_length(ws: *lws, name: cstring, len: cint): cint <cimport,nodecl> end
 local function lws_hdr_custom_copy(ws: *lws, dst: cstring, cap: cint, name: cstring, len: cint): cint <cimport,nodecl> end
 local WSI_TOKEN_GET_URI: cint <cimport,nodecl>
+local WSI_TOKEN_COUNT: cint <cimport,nodecl>
 local WSI_TOKEN_HTTP_AUTHORIZATION: cint <cimport,nodecl>
 local WSI_TOKEN_HTTP_URI_ARGS: cint <cimport,nodecl>
 local LWS_WRITE_BINARY: cint <cimport,nodecl>
@@ -122,6 +123,11 @@ local function lws_get_vhost_by_name(ctx: *lws_context, name: cstring): *lws_vho
 local function lws_get_vhost_listen_port(host: *lws_vhost): cint <cimport,nodecl> end
 local function lws_hdr_copy(wsi: *lws, text: cstring, max: cint, token: cint): cint <cimport,nodecl> end
 local function lws_hdr_copy_fragment(wsi: *lws, text: cstring, max: cint, token: cint, index: cint): cint <cimport,nodecl> end
+local function lws_token_to_string(token: cint): pointer <cimport,nodecl> end
+## cdefine 'bend_lws_header_name const char'
+local HeaderName <cimport,nodecl,codename 'bend_lws_header_name'> = @record{}
+local HeaderVisitor = @function(*HeaderName,cint,pointer): void
+local function lws_hdr_custom_name_foreach(wsi: *lws, visitor: HeaderVisitor, context: pointer): cint <cimport,nodecl> end
 local function lws_frame_is_binary(wsi: *lws): cint <cimport,nodecl> end
 local function lws_is_final_fragment(wsi: *lws): cint <cimport,nodecl> end
 local function lws_rx_flow_control(wsi: *lws, enable: cint): cint <cimport,nodecl> end
@@ -142,11 +148,13 @@ local MAX_METADATA <comptime> = 8192
 
 local Frame = @record{next: pointer, data: *cuchar, size: csize}
 local Field = @record{next: pointer, value: cstring, size: csize}
+local Header = @record{next: pointer, name: cstring, size: csize, values: pointer, repeated: boolean}
+local HeaderCapture = @record{ws: *lws, text: cstring, headers: pointer, used: csize, failed: boolean}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
   metered: boolean, rx_held: boolean,
   auth_header: [152]cchar, auth_len: cint,
-  path: [24]cchar, path_len: cint, authorization: pointer, query: pointer,
+  path: [24]cchar, path_len: cint, authorization: pointer, query: pointer, headers: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
 }
 local Event = @record{next: pointer, tag: uint32, id: uint32, version: uint32, body: cstring, size: csize}
@@ -217,6 +225,13 @@ local function clear_request(peer: *Peer)
   free_fields(peer.query)
   peer.authorization = nilptr
   peer.query = nilptr
+  while peer.headers ~= nilptr do
+    local header = (@*Header)(peer.headers)
+    peer.headers = header.next
+    free_fields(header.values)
+    C.free(header.name)
+    C.free(header)
+  end
   peer.path_len = -1
 end
 local function remove_peer(server: *Server, peer: *Peer)
@@ -297,30 +312,105 @@ local function capture_auth_header(peer: *Peer, ws: *lws)
   end
 end
 
-local function capture_fields(ws: *lws, token: cint, fields: *pointer): boolean
-  local text: [MAX_METADATA]cchar
-  defer cleanse(&text[0],MAX_METADATA) end
-  local used: csize = 0
+local function append_field(fields: *pointer, text: cstring, len: csize, used: *csize): boolean
+  if len + 1 > MAX_METADATA - $used then return false end
+  local entry = (@*Field)(io_mem(C.calloc(1,#Field)))
+  entry.size = len
+  entry.value = (@cstring)(io_mem(C.malloc(len + 1)))
+  C.memcpy(entry.value,text,len + 1)
+  entry.next = $fields
+  $fields = entry
+  $used = $used + len + 1
+  return true
+end
+
+local function capture_fields(ws: *lws, token: cint, fields: *pointer, used: *csize, text: cstring): boolean
   local index: cint = 0
-  while used < MAX_METADATA do
-    local len = lws_hdr_copy_fragment(ws,(@cstring)(&text[0]),MAX_METADATA,token,index)
+  while true do
+    local len = lws_hdr_copy_fragment(ws,text,MAX_METADATA,token,index)
     if len == -1 then return true end
-    if len < 0 or (@csize)(len) + 1 > MAX_METADATA - used then return false end
-    local entry = (@*Field)(io_mem(C.calloc(1,#Field)))
-    entry.size = (@csize)(len)
-    entry.value = (@cstring)(io_mem(C.malloc(entry.size + 1)))
-    C.memcpy(entry.value,&text[0],entry.size + 1)
-    entry.next = $fields
-    $fields = entry
-    used = used + entry.size + 1
+    if len < 0 or not append_field(fields,text,(@csize)(len),used) then return false end
     index = index + 1
   end
-  return false
 end
+
+local function add_header(capture: *HeaderCapture, name: cstring, len: csize): *Header
+  if len + 1 > MAX_METADATA - capture.used then return nilptr end
+  local header = (@*Header)(io_mem(C.calloc(1,#Header)))
+  header.name = (@cstring)(io_mem(C.calloc(1,len + 1)))
+  C.memcpy(header.name,name,len)
+  header.size = len
+  header.next = capture.headers
+  capture.headers = header
+  capture.used = capture.used + len + 1
+  return header
+end
+
+local function capture_custom(source: *HeaderName, n: cint, context: pointer)
+  local capture = (@*HeaderCapture)(context)
+  if capture.failed or n <= 1 then return end
+  local name = (@cstring)(source)
+  local len = (@csize)(n - 1)
+  local next_header = capture.headers
+  while next_header ~= nilptr do
+    local header = (@*Header)(next_header)
+    if header.size == len and C.strncmp(header.name,name,len) == 0 then
+      -- The public custom-header lookup returns the first value only.
+      -- Preserve the ambiguity instead of publishing a partial value list.
+      header.repeated = true
+      free_fields(header.values)
+      header.values = nilptr
+      return
+    end
+    next_header = header.next
+  end
+  local header = add_header(capture,name,len)
+  local copied = lws_hdr_custom_copy(capture.ws,capture.text,MAX_METADATA,name,n)
+  capture.failed = header == nilptr or copied < 0 or
+    not append_field(&header.values,capture.text,(@csize)(copied),&capture.used)
+end
+
+local function capture_headers(capture: *HeaderCapture): boolean
+  for token: cint = 0,<WSI_TOKEN_COUNT do
+    local name = (@cstring)(lws_token_to_string(token))
+    if name ~= nilptr and token ~= WSI_TOKEN_HTTP_URI_ARGS then
+      local len = C.strlen(name)
+      local bytes = (@*[0]cchar)(name)
+      if len > 1 and bytes[0] ~= 58 and bytes[len - 1] == 58 then
+        local values: pointer
+        if not capture_fields(capture.ws,token,&values,&capture.used,capture.text) then
+          free_fields(values)
+          return false
+        end
+        if values ~= nilptr then
+          local header = add_header(capture,name,len - 1)
+          if header == nilptr then
+            free_fields(values)
+            return false
+          end
+          header.values = values
+        end
+      end
+    end
+  end
+  return lws_hdr_custom_name_foreach(capture.ws,capture_custom,capture) == 0 and not capture.failed
+end
+
 local function capture_request(peer: *Peer, ws: *lws)
   peer.path_len = lws_hdr_copy(ws,(@cstring)(&peer.path[0]),24,WSI_TOKEN_GET_URI)
-  if peer.path_len < 0 or not capture_fields(ws,WSI_TOKEN_HTTP_AUTHORIZATION,&peer.authorization) or
-      not capture_fields(ws,WSI_TOKEN_HTTP_URI_ARGS,&peer.query) then clear_request(peer) end
+  local text: [MAX_METADATA]cchar
+  defer cleanse(&text[0],MAX_METADATA) end
+  local bytes = (@cstring)(&text[0])
+  local used: csize = 0
+  if peer.path_len < 0 or not capture_fields(ws,WSI_TOKEN_HTTP_AUTHORIZATION,&peer.authorization,&used,bytes) or
+      not capture_fields(ws,WSI_TOKEN_HTTP_URI_ARGS,&peer.query,&used,bytes) then
+    clear_request(peer)
+    return
+  end
+  local captured: HeaderCapture = {ws = ws, text = bytes}
+  local ok = capture_headers(&captured)
+  peer.headers = captured.headers
+  if not ok then clear_request(peer) end
 end
 
 local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
@@ -515,6 +605,19 @@ local function list_fields(e: Env, fields: pointer): Term
   end
   return list
 end
+local function list_headers(e: Env, headers: pointer): Term
+  local list = term_pak(iroh_srv_Nil,0)
+  while headers ~= nilptr do
+    local header = (@*Header)(headers)
+    local flag: cchar = 0
+    if header.repeated then flag = 1 end
+    local name = io_list(e,header.name,header.size)
+    local values = io_node(e,iroh_srv_Con,io_list(e,(@cstring)(&flag),1),list_fields(e,header.values))
+    list = io_node(e,iroh_srv_Con,io_node(e,iroh_srv_Con,name,values),list)
+    headers = header.next
+  end
+  return list
+end
 local function request_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local server = find_server(e,f[0])
   local peer = find_peer(server,(@uint32)(f[1]))
@@ -525,7 +628,7 @@ local function request_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local path = io_list(e,(@cstring)(&peer.path[0]),(@uint64)(peer.path_len))
   -- The native bridge uses the runtime's generic list representation.
   -- Bend constructs and flattens the public RequestDetails record.
-  local query = io_node(e,iroh_srv_Con,list_fields(e,peer.query),empty)
+  local query = io_node(e,iroh_srv_Con,list_fields(e,peer.query),list_headers(e,peer.headers))
   local fields = io_node(e,iroh_srv_Con,list_fields(e,peer.authorization),query)
   local raw = io_node(e,iroh_srv_Con,io_node(e,iroh_srv_Con,path,empty),fields)
   clear_request(peer)

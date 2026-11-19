@@ -146,6 +146,39 @@ def access_fixture(fuel: Nat) -> Access.Control:
     case 0n:
       Access.ControlWith{_ => IO.die(Access.Control & Access.Decision,1,"fixture event limit exceeded")}
 
+def duplicate_standard(values: Maybe<&2,Net.RequestHeaderValues>) -> Bool:
+  match values:
+    case Some{Net.HeaderValues{[[111,110,101],[116,119,111]]}}:
+      True{}
+    case _:
+      False{}
+
+def header_decision(custom: Maybe<&2,Net.RequestHeaderValues>, standard: Bool) -> Access.Decision:
+  match custom standard:
+    case Some{Net.RepeatedCustomHeader{}} _:
+      Access.Deny{Some{[97,109,98,105,103,117,111,117,115,32,104,101,97,100,101,114]}}
+    case Some{Net.HeaderValues{[[118,97,108,117,101]]}} True{}:
+      Access.Allow{}
+    case _ _:
+      Access.Deny{None{}}
+
+def check_headers(event: Access.AccessEvent, next: Access.Control) -> IO(Access.Control & Access.Decision):
+  match event:
+    case Access.Admission{+request}:
+      # Mixed case in the lookup asks for the same HTTP field.
+      custom = Access.header(request,[88,45,102,105,120])
+      standard = Access.header(request,[97,99,99,101,112,116,45,108,97,110,103,117,97,103,101])
+      IO.pure(Access.Control & Access.Decision,(next,header_decision(custom,duplicate_standard(standard))))
+    case Access.Disconnected{_,_}:
+      IO.pure(Access.Control & Access.Decision,(next,Access.Allow{}))
+
+def header_fixture(fuel: Nat) -> Access.Control:
+  match fuel:
+    case 1n+left:
+      Access.ControlWith{entry => check_headers(entry,header_fixture(left))}
+    case 0n:
+      Access.ControlWith{_ => IO.die(Access.Control & Access.Decision,1,"fixture event limit exceeded")}
+
 def policy_result(ok: Bool) -> IO(Unit):
   match ok:
     case True{}:
@@ -170,6 +203,10 @@ def run(args: List<String>) -> IO(Unit):
       serve("","",access_fixture(20n))
     case Con{_,Con{"shared-token",Nil{}}}:
       serve("","",Access.WithPolicy{Access.SharedTokens{[[97,108,108,111,119]]}})
+    case Con{_,Con{"headers",Nil{}}}:
+      serve("","",header_fixture(8n))
+    case Con{_,Con{"headers",Con{cert,Con{key,Nil{}}}}}:
+      serve(cert,key,header_fixture(8n))
     case Con{_,Con{"rate",Nil{}}}:
       serve_limited("","")
     case Con{_,Con{"rate",Con{cert,Con{key,Nil{}}}}}:

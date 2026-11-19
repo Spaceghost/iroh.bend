@@ -10,8 +10,17 @@ type SocketEvent is Data:
   RelayBufferedBytes{id: U32, bytes: List<&2,U32>}
   RelayLeft{id: U32}
 
+type RequestHeaderValues is Data:
+  HeaderValues{values: List<&2,List<&2,U32>>}
+  RepeatedCustomHeader{}
+
+type RequestHeader is Data:
+  HeaderField{name: List<&2,U32>, values: RequestHeaderValues}
+
 type RequestFields is Data:
   Fields{authorization: List<&2,List<&2,U32>>, query: List<&2,List<&2,U32>>}
+  FieldsWithHeaders{authorization: List<&2,List<&2,U32>>, query: List<&2,List<&2,U32>>,
+    headers: List<&2,RequestHeader>}
 
 type RequestDetails is Data:
   Details{path: List<&2,U32>, fields: RequestFields}
@@ -62,10 +71,44 @@ def relay_request_raw(server: ServerSocket, id: U32)
     -> IO(ServerSocket & List<&2,List<&2,List<&2,U32>>>):
   import "./relay_server_socket.c"
 
+def drop_header_whitespace(bytes: List<&2,U32>) -> List<&2,U32>:
+  match bytes:
+    case Con{32,tail}:
+      drop_header_whitespace(tail)
+    case Con{9,tail}:
+      drop_header_whitespace(tail)
+    case _:
+      bytes
+
+def header_value(bytes: List<&2,U32>) -> List<&2,U32>:
+  leading_trimmed = drop_header_whitespace(bytes)
+  reversed = List.reverse(&2,U32,leading_trimmed)
+  List.reverse(&2,U32,drop_header_whitespace(reversed))
+
+def header_values(values: List<&2,List<&2,U32>>) -> List<&2,List<&2,U32>>:
+  match values:
+    case Con{value,rest}:
+      Con{header_value(value),header_values(rest)}
+    case Nil{}:
+      []
+
+def decoded_headers(raw: List<&2,List<&2,List<&2,U32>>>) -> List<&2,RequestHeader>:
+  match raw:
+    case Nil{}:
+      []
+    case Con{Con{name,Con{[0],values}},rest}:
+      Con{HeaderField{name,HeaderValues{header_values(values)}},decoded_headers(rest)}
+    case Con{[name,[1]],rest}:
+      Con{HeaderField{name,RepeatedCustomHeader{}},decoded_headers(rest)}
+    case Con{_,rest}:
+      decoded_headers(rest)
+
 def request_details(raw: List<&2,List<&2,List<&2,U32>>>) -> RequestDetails:
   match raw:
     case [[path],authorization,query]:
       Details{path,Fields{authorization,query}}
+    case Con{[path],Con{authorization,Con{query,headers}}}:
+      Details{path,FieldsWithHeaders{authorization,query,decoded_headers(headers)}}
     case _:
       MissingDetails{}
 

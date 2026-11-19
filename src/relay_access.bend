@@ -85,6 +85,8 @@ def token(request: Request) -> Maybe<&2,List<&2,U32>>:
   match request:
     case Connecting{_,_,_,Net.Details{_,Net.Fields{headers,query}}}:
       headers_token(headers,query)
+    case Connecting{_,_,_,Net.Details{_,Net.FieldsWithHeaders{headers,query,_}}}:
+      headers_token(headers,query)
     case _:
       None{}
 
@@ -96,6 +98,51 @@ def equal_bytes(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
       U32.is_eq(x,y) && equal_bytes(xs,ys)
     case _ _:
       False{}
+
+def header_name_byte(+byte: U32, uppercase: Bool) -> U32:
+  match uppercase:
+    case True{}:
+      U32.add(byte,32)
+    case False{}:
+      byte
+
+def ascii_lower(+byte: U32) -> U32:
+  header_name_byte(byte,U32.is_ge(byte,65) && U32.is_le(byte,90))
+
+def same_header_name(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
+  match a b:
+    case Nil{} Nil{}:
+      True{}
+    case Con{x,xs} Con{y,ys}:
+      U32.is_eq(ascii_lower(x),ascii_lower(y)) && same_header_name(xs,ys)
+    case _ _:
+      False{}
+
+def choose_header(values: Net.RequestHeaderValues, rest: Unit -> Maybe<&2,Net.RequestHeaderValues>,
+    found: Bool) -> Maybe<&2,Net.RequestHeaderValues>:
+  match found:
+    case True{}:
+      Some{values}
+    case False{}:
+      rest(Unit{})
+
+def find_header(headers: List<&2,Net.RequestHeader>, +name: List<&2,U32>)
+    -> Maybe<&2,Net.RequestHeaderValues>:
+  match headers:
+    case Nil{}:
+      None{}
+    case Con{Net.HeaderField{field,values},rest}:
+      choose_header(values,_ => find_header(rest,name),same_header_name(name,field))
+
+def request_headers(request: Request) -> List<&2,Net.RequestHeader>:
+  match request:
+    case Connecting{_,_,_,Net.Details{_,Net.FieldsWithHeaders{_,_,headers}}}:
+      headers
+    case _:
+      []
+
+def header(request: Request, name: List<&2,U32>) -> Maybe<&2,Net.RequestHeaderValues>:
+  find_header(request_headers(request),name)
 
 def contains(values: List<&2,List<&2,U32>>, +key: List<&2,U32>) -> Bool:
   match values:
