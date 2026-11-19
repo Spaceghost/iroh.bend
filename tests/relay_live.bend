@@ -43,20 +43,45 @@ def complete(reply: Client.Connection & Wire.Frame, sender: Client.Connection) -
     Client.close(receiver)
     result(matches(Wire.packet(frame)))
 
-def test(+url: String, +max_version: U32) -> IO(Unit):
+def test(+url: String, receiver_version: U32, sender_version: U32) -> IO(Unit):
   do IO<Unit>:
-    receiver : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,42), max_version))
-    sender : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,73), max_version))
+    receiver : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,42), receiver_version))
+    sender : Client.Connection <- IO.try(Client.Connection, Client.connect_with_version(url, List.replicate(U32,32n,73), sender_version))
     sent : Client.Connection <- IO.try(Client.Connection, Client.send_datagram(sender, peer(), 3, 0, payload()))
     got : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame, Client.receive(receiver))
     complete(got, sent)
 
+def replacement_notice(frame: Wire.Frame) -> IO(Unit):
+  match frame:
+    case Wire.Message{13,[1]}:
+      IO.print("PASS relay notified the previous connection for the same endpoint")
+    case _:
+      IO.die(Unit,1,"relay did not notify the replaced connection")
+
+def replaced(received: Client.Connection & Wire.Frame, new: Client.Connection) -> IO(Unit):
+  (old,frame) = received
+  do IO<Unit>:
+    Client.close(old)
+    Client.close(new)
+    replacement_notice(frame)
+
+def duplicate(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    old : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    new : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    received : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(old))
+    replaced(received,new)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{url,Nil{}}}:
-      test(url, 2)
+      test(url, 2, 2)
+    case Con{_,Con{url,Con{"duplicate",Nil{}}}}:
+      duplicate(url)
+    case Con{_,Con{url,Con{"mixed",Nil{}}}}:
+      test(url, 1, 2)
     case Con{_,Con{url,Con{_,Nil{}}}}:
-      test(url, 1)
+      test(url, 1, 1)
     case _:
       IO.die(Unit,2,"expected the ws:// or wss:// relay URL")
 

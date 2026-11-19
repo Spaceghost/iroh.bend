@@ -1,0 +1,444 @@
+-- libwebsockets owns HTTP upgrades, WS framing and TLS. Bend owns relay state.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<libwebsockets.h>'
+## cinclude '<openssl/rand.h>'
+## cinclude '<errno.h>'
+## cdefine 'bend_lws_info struct lws_context_creation_info'
+## cdefine 'bend_lws_protocol struct lws_protocols'
+## cdefine 'bend_lws_protocol_size sizeof(struct lws_protocols)'
+local bend_lws_protocol_size: csize <cimport,nodecl>
+require 'C.stdlib'
+require 'C.string'
+
+##[[
+for _, name in ipairs{'relay_bind','relay_poll','relay_queue','relay_authorized','relay_kick','relay_stop',
+                      'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
+                      'Con','True','False','Unit'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_srv_%s CID(%s)\n#else\n#define iroh_srv_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_srv_relay_bind: uint32 <cimport,nodecl>
+local iroh_srv_relay_poll: uint32 <cimport,nodecl>
+local iroh_srv_relay_queue: uint32 <cimport,nodecl>
+local iroh_srv_relay_authorized: uint32 <cimport,nodecl>
+local iroh_srv_relay_kick: uint32 <cimport,nodecl>
+local iroh_srv_relay_stop: uint32 <cimport,nodecl>
+local iroh_srv_relay_nonce: uint32 <cimport,nodecl>
+local iroh_srv_RelayListener: uint32 <cimport,nodecl>
+local iroh_srv_RelayIdle: uint32 <cimport,nodecl>
+local iroh_srv_RelayJoined: uint32 <cimport,nodecl>
+local iroh_srv_RelayBytes: uint32 <cimport,nodecl>
+local iroh_srv_RelayLeft: uint32 <cimport,nodecl>
+local iroh_srv_Con: uint32 <cimport,nodecl>
+local iroh_srv_True: uint32 <cimport,nodecl>
+local iroh_srv_False: uint32 <cimport,nodecl>
+local iroh_srv_Unit: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, effect: Effect) <cimport,nodecl> end
+local function io_tick(): uint64 <cimport,nodecl> end
+local function io_mem(p: pointer): pointer <cimport,nodecl> end
+local function io_cstr(e: Env, t: Term, n: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, n: uint64): boolean <cimport,nodecl> end
+local function io_list(e: Env, p: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
+local function io_node(e: Env, tag: uint64, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, word: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+local function term_tag(t: Term): uint64 <cimport,nodecl> end
+local function term_loc(t: Term): uint64 <cimport,nodecl> end
+local TAG_PAK: uint64 <cimport,nodecl>
+local TAG_CTR: uint64 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local function RAND_bytes(buf: *cuchar, n: cint): cint <cimport,nodecl> end
+
+## cdefine 'bend_lws struct lws'
+local lws <cimport,nodecl,codename 'bend_lws'> = @record{}
+## cdefine 'bend_lws_context struct lws_context'
+local lws_context <cimport,nodecl,codename 'bend_lws_context'> = @record{}
+## cdefine 'bend_lws_vhost struct lws_vhost'
+local lws_vhost <cimport,nodecl,codename 'bend_lws_vhost'> = @record{}
+local Callback = @function(*lws,cint,pointer,pointer,csize): cint
+local Protocol <cimport,nodecl,codename 'bend_lws_protocol'> = @record{
+  name: cstring, callback: Callback, per_session_data_size: csize, rx_buffer_size: csize, id: cuint
+}
+local Info <cimport,nodecl,codename 'bend_lws_info'> = @record{
+  port: cint, iface: cstring, protocols: *Protocol, options: uint64, user: pointer,
+  vhost_name: cstring, ssl_cert_filepath: cstring, ssl_private_key_filepath: cstring, timeout_secs: cuint
+}
+local LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION: cint <cimport,nodecl>
+local LWS_CALLBACK_ESTABLISHED: cint <cimport,nodecl>
+local LWS_CALLBACK_RECEIVE: cint <cimport,nodecl>
+local LWS_CALLBACK_CLOSED: cint <cimport,nodecl>
+local LWS_CALLBACK_SERVER_WRITEABLE: cint <cimport,nodecl>
+local LWS_CALLBACK_HTTP: cint <cimport,nodecl>
+local WSI_TOKEN_GET_URI: cint <cimport,nodecl>
+local LWS_WRITE_BINARY: cint <cimport,nodecl>
+local LWS_PRE: csize <cimport,nodecl>
+local LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT: uint64 <cimport,nodecl>
+local PENDING_TIMEOUT_USER_OK: cint <cimport,nodecl>
+local LWS_TO_KILL_ASYNC: cint <cimport,nodecl>
+local function lws_create_context(info: *Info): *lws_context <cimport,nodecl> end
+local function lws_context_destroy(ctx: *lws_context) <cimport,nodecl> end
+local function lws_context_user(ctx: *lws_context): pointer <cimport,nodecl> end
+local function lws_get_context(wsi: *lws): *lws_context <cimport,nodecl> end
+local function lws_get_protocol(wsi: *lws): *Protocol <cimport,nodecl> end
+local function lws_get_vhost_by_name(ctx: *lws_context, name: cstring): *lws_vhost <cimport,nodecl> end
+local function lws_get_vhost_listen_port(host: *lws_vhost): cint <cimport,nodecl> end
+local function lws_hdr_copy(wsi: *lws, text: cstring, max: cint, token: cint): cint <cimport,nodecl> end
+local function lws_frame_is_binary(wsi: *lws): cint <cimport,nodecl> end
+local function lws_is_final_fragment(wsi: *lws): cint <cimport,nodecl> end
+local function lws_remaining_packet_payload(wsi: *lws): csize <cimport,nodecl> end
+local function lws_callback_on_writable(wsi: *lws): cint <cimport,nodecl> end
+local function lws_write(wsi: *lws, bytes: *cuchar, size: csize, kind: cint): cint <cimport,nodecl> end
+local function lws_cancel_service(ctx: *lws_context) <cimport,nodecl> end
+local function lws_service(ctx: *lws_context, timeout: cint): cint <cimport,nodecl> end
+local function lws_set_timeout(wsi: *lws, reason: cint, seconds: cint) <cimport,nodecl> end
+local function lws_return_http_status(wsi: *lws, code: cuint, text: cstring): cint <cimport,nodecl> end
+
+local MAX_FRAME <comptime> = 65544
+local MAX_PEERS <comptime> = 128
+local MAX_EVENTS <comptime> = 512
+local MAX_SEND <comptime> = 32
+
+local Frame = @record{next: pointer, data: *cuchar, size: csize}
+local Peer = @record{
+  next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
+  body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
+}
+local Event = @record{next: pointer, tag: uint32, id: uint32, version: uint32, body: cstring, size: csize}
+local Server = @record{
+  next: pointer, id: uint32, ctx: *lws_context, iface: cstring, cert: cstring, key: cstring,
+  protocols: *[0]Protocol, peers: pointer, peer_count: cuint,
+  events: pointer, event_tail: pointer, event_count: cuint
+}
+local servers: pointer
+local next_id: uint32 = 1
+
+local function find_slot(e: Env, handle: Term): *pointer
+  if term_aux(handle) ~= iroh_srv_RelayListener then return nilptr end
+  local id: uint32
+  if term_tag(handle) == TAG_PAK then id = (@uint32)(term_loc(handle))
+  elseif term_tag(handle) == TAG_CTR then id = (@uint32)(e.mem[term_peek(e.mem,handle)])
+  else return nilptr end
+  local slot = &servers
+  while $slot ~= nilptr do
+    local server = (@*Server)($slot)
+    if server.id == id then return slot end
+    slot = &server.next
+  end
+  return nilptr
+end
+local function find_server(e: Env, handle: Term): *Server
+  local slot = find_slot(e,handle)
+  if slot ~= nilptr then return (@*Server)($slot) end
+  return nilptr
+end
+local function find_peer(server: *Server, id: uint32): *Peer
+  if server == nilptr then return nilptr end
+  local at = server.peers
+  while at ~= nilptr do
+    local peer = (@*Peer)(at)
+    if peer.id == id then return peer end
+    at = peer.next
+  end
+  return nilptr
+end
+
+local function post(server: *Server, tag: uint32, id: uint32): *Event
+  if server.event_count >= MAX_EVENTS then return nilptr end
+  local ev = (@*Event)(io_mem(C.calloc(1,#Event)))
+  ev.tag = tag
+  ev.id = id
+  if server.event_tail == nilptr then server.events = ev
+  else (@*Event)(server.event_tail).next = ev end
+  server.event_tail = ev
+  server.event_count = server.event_count + 1
+  return ev
+end
+local function free_frame(frame: *Frame)
+  C.free(frame.data)
+  C.free(frame)
+end
+local function remove_peer(server: *Server, peer: *Peer)
+  local slot = &server.peers
+  while $slot ~= nilptr and $slot ~= peer do
+    slot = &(@*Peer)($slot).next
+  end
+  if $slot ~= peer then return end
+  $slot = peer.next
+  server.peer_count = server.peer_count - 1
+  C.free(peer.body)
+  while peer.outgoing ~= nilptr do
+    local frame = (@*Frame)(peer.outgoing)
+    peer.outgoing = frame.next
+    free_frame(frame)
+  end
+  post(server,iroh_srv_RelayLeft,peer.id)
+end
+
+local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize): cint
+  if not peer.authorized and peer.length + len > 128 then return -1 end
+  if lws_frame_is_binary(peer.ws) == 0 or len > MAX_FRAME - peer.length then return -1 end
+  local required = peer.length + len
+  if required > peer.capacity then
+    local capacity = peer.capacity * 2
+    if capacity < required then capacity = required end
+    if capacity > MAX_FRAME then capacity = MAX_FRAME end
+    local data = C.realloc(peer.body,capacity)
+    if data == nilptr then return -1 end
+    peer.body = data
+    peer.capacity = capacity
+  end
+  if len > 0 then C.memcpy(&(@*[0]cuchar)(peer.body)[peer.length],bytes,len) end
+  peer.length = required
+  if lws_is_final_fragment(peer.ws) == 0 or lws_remaining_packet_payload(peer.ws) ~= 0 then return 0 end
+  local ev = post(server,iroh_srv_RelayBytes,peer.id)
+  if ev == nilptr then return -1 end
+  ev.body = (@cstring)(peer.body)
+  ev.size = peer.length
+  peer.body = nilptr
+  peer.length = 0
+  peer.capacity = 0
+  return 0
+end
+local function send(peer: *Peer): cint
+  local frame = (@*Frame)(peer.outgoing)
+  if frame == nilptr then
+    if peer.closing then return -1 end
+    return 0
+  end
+  local data = (@*[0]cuchar)(frame.data)
+  if lws_write(peer.ws,&data[LWS_PRE],frame.size,LWS_WRITE_BINARY) ~= (@cint)(frame.size) then return -1 end
+  peer.outgoing = frame.next
+  peer.queued = peer.queued - 1
+  free_frame(frame)
+  if peer.outgoing == nilptr then peer.tail = nilptr end
+  if peer.outgoing ~= nilptr or peer.closing then lws_callback_on_writable(peer.ws) end
+  return 0
+end
+
+local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
+  if reason == LWS_CALLBACK_HTTP then
+    lws_return_http_status(ws,404,nilptr)
+    return -1
+  end
+  if reason == LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION then
+    local uri: [24]cchar
+    if lws_hdr_copy(ws,(@cstring)(&uri[0]),24,WSI_TOKEN_GET_URI) < 0 or
+        (C.strcmp((@cstring)(&uri[0]),'/relay') ~= 0 and C.strcmp((@cstring)(&uri[0]),'/derp') ~= 0) then
+      return 1
+    end
+    return 0
+  end
+  if reason ~= LWS_CALLBACK_ESTABLISHED and reason ~= LWS_CALLBACK_RECEIVE and
+      reason ~= LWS_CALLBACK_CLOSED and reason ~= LWS_CALLBACK_SERVER_WRITEABLE then return 0 end
+  if user == nilptr then return -1 end
+  local peer = (@*Peer)(user)
+  local server = (@*Server)(lws_context_user(lws_get_context(ws)))
+  if reason == LWS_CALLBACK_ESTABLISHED then
+    local version = lws_get_protocol(ws).id
+    if server.peer_count >= MAX_PEERS or next_id == 0 or version == 0 or
+        server.event_count >= MAX_EVENTS - MAX_PEERS then return -1 end
+    local ev = post(server,iroh_srv_RelayJoined,next_id)
+    ev.version = version
+    peer.id = next_id
+    next_id = next_id + 1
+    peer.ws = ws
+    peer.next = server.peers
+    server.peers = peer
+    server.peer_count = server.peer_count + 1
+    peer.deadline = io_tick() + 10000000000
+    return 0
+  end
+  if peer.id == 0 then return 0 end
+  if reason == LWS_CALLBACK_RECEIVE then
+    if peer.closing or server.event_count >= MAX_EVENTS - MAX_PEERS then return -1 end
+    return receive(server,peer,bytes,len)
+  end
+  if reason == LWS_CALLBACK_SERVER_WRITEABLE then return send(peer) end
+  remove_peer(server,peer)
+  return 0
+end
+
+local function free_server(server: *Server)
+  if server.ctx ~= nilptr then lws_context_destroy(server.ctx) end
+  while server.events ~= nilptr do
+    local ev = (@*Event)(server.events)
+    server.events = ev.next
+    C.free(ev.body)
+    C.free(ev)
+  end
+  C.free(server.protocols)
+  C.free(server.iface)
+  C.free(server.cert)
+  C.free(server.key)
+  C.free(server)
+end
+local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  if f[1] > 65535 or next_id == 0 then return io_fail(e,EINVAL,'invalid relay port or listener handle') end
+  local server = (@*Server)(io_mem(C.calloc(1,#Server)))
+  local n: uint64, cert_len: uint64, key_len: uint64
+  server.iface = io_cstr(e,f[0],&n)
+  server.cert = io_cstr(e,f[2],&cert_len)
+  server.key = io_cstr(e,f[3],&key_len)
+  if io_nul(server.iface,n) or io_nul(server.cert,cert_len) or io_nul(server.key,key_len) or
+      (cert_len == 0) ~= (key_len == 0) then
+    free_server(server)
+    return io_fail(e,EINVAL,'invalid relay interface or TLS paths')
+  end
+  server.protocols = (@*[0]Protocol)(io_mem(C.calloc(4,bend_lws_protocol_size)))
+  server.protocols[0] = {name = 'http', callback = callback, per_session_data_size = #Peer}
+  server.protocols[1] = {name = 'iroh-relay-v2', callback = callback, per_session_data_size = #Peer,
+    rx_buffer_size = 4096, id = 2}
+  server.protocols[2] = {name = 'iroh-relay-v1', callback = callback, per_session_data_size = #Peer,
+    rx_buffer_size = 4096, id = 1}
+  local info: Info = {port = (@cint)(f[1]), iface = server.iface, protocols = &server.protocols[0],
+    user = server, timeout_secs = 10, vhost_name = 'iroh'}
+  if cert_len > 0 then
+    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT
+    info.ssl_cert_filepath = server.cert
+    info.ssl_private_key_filepath = server.key
+  end
+  server.ctx = lws_create_context(&info)
+  if server.ctx == nilptr then
+    free_server(server)
+    return io_fail(e,EIO,'could not bind relay WebSocket server')
+  end
+  local vhost = lws_get_vhost_by_name(server.ctx,'iroh')
+  local port: cint = -1
+  if vhost ~= nilptr then port = lws_get_vhost_listen_port(vhost) end
+  if port <= 0 then
+    free_server(server)
+    return io_fail(e,EIO,'could not determine relay listener port')
+  end
+  server.id = next_id
+  next_id = next_id + 1
+  server.next = servers
+  servers = server
+  return io_done(e,io_tup(e,term_pak(iroh_srv_RelayListener,server.id),(@uint32)(port)))
+end
+local function kick(peer: *Peer)
+  peer.closing = true
+  lws_set_timeout(peer.ws,PENDING_TIMEOUT_USER_OK,LWS_TO_KILL_ASYNC)
+end
+local function poll_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local server = find_server(e,f[0])
+  local result = term_pak(iroh_srv_RelayIdle,0)
+  if server == nilptr then return io_tup(e,f[0],result) end
+  local now = io_tick()
+  local p = server.peers
+  while p ~= nilptr do
+    local peer = (@*Peer)(p)
+    if not peer.authorized and not peer.closing and now >= peer.deadline then kick(peer) end
+    p = peer.next
+  end
+  if server.events == nilptr then
+    lws_cancel_service(server.ctx)
+    lws_service(server.ctx,0)
+  end
+  local ev = (@*Event)(server.events)
+  if ev ~= nilptr then
+    server.events = ev.next
+    if server.events == nilptr then server.event_tail = nilptr end
+    server.event_count = server.event_count - 1
+    if ev.tag == iroh_srv_RelayJoined then
+      result = io_node(e,ev.tag,ev.id,ev.version)
+    elseif ev.tag == iroh_srv_RelayBytes then
+      result = io_node(e,ev.tag,ev.id,io_list(e,ev.body,ev.size))
+    else
+      result = term_pak(ev.tag,ev.id)
+    end
+    C.free(ev.body)
+    C.free(ev)
+  end
+  return io_tup(e,f[0],result)
+end
+
+local function size_bytes(e: Env, item: Term): csize
+  local count: csize = 0
+  while term_aux(item) == iroh_srv_Con do
+    local at = term_peek(e.mem,item)
+    if count == MAX_FRAME or e.mem[at] > 255 then return MAX_FRAME + 1 end
+    count = count + 1
+    item = e.mem[at + 1]
+  end
+  return count
+end
+local function queue_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer == nilptr or peer.closing or peer.queued >= MAX_SEND then
+    return io_tup(e,f[0],term_pak(iroh_srv_False,0))
+  end
+  local n = size_bytes(e,f[2])
+  if n > MAX_FRAME then return io_tup(e,f[0],term_pak(iroh_srv_False,0)) end
+  local frame = (@*Frame)(io_mem(C.calloc(1,#Frame)))
+  frame.size = n
+  frame.data = (@*cuchar)(io_mem(C.malloc(n + LWS_PRE)))
+  local buf = (@*[0]cuchar)(frame.data)
+  local item = f[2]
+  for i: csize = 0,<n do
+    local at = term_peek(e.mem,item)
+    buf[LWS_PRE + i] = (@cuchar)(e.mem[at])
+    item = e.mem[at + 1]
+  end
+  if peer.tail == nilptr then peer.outgoing = frame
+  else (@*Frame)(peer.tail).next = frame end
+  peer.tail = frame
+  peer.queued = peer.queued + 1
+  lws_callback_on_writable(peer.ws)
+  return io_tup(e,f[0],term_pak(iroh_srv_True,0))
+end
+
+local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer ~= nilptr then peer.authorized = true end
+  return f[0]
+end
+local function kick_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer ~= nilptr then
+    if f[2] == 1 then
+      peer.closing = true
+      lws_callback_on_writable(peer.ws)
+    else
+      kick(peer)
+    end
+  end
+  return f[0]
+end
+local function stop_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local slot = find_slot(e,f[0])
+  if slot ~= nilptr then
+    local server = (@*Server)($slot)
+    $slot = server.next
+    free_server(server)
+  end
+  return term_pak(iroh_srv_Unit,0)
+end
+local function nonce_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local nonce: [16]cuchar
+  if RAND_bytes(&nonce[0],16) ~= 1 then return io_fail(e,EIO,'could not generate relay challenge') end
+  return io_done(e,io_list(e,(@cstring)(&nonce[0]),16))
+end
+
+local function register() <cexport,codename 'iroh_register_relay_server',cattribute 'constructor'>
+  if iroh_srv_relay_bind ~= 0xffffffff then io_eff(iroh_srv_relay_bind,bind_run) end
+  if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end
+  if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end
+  if iroh_srv_relay_authorized ~= 0xffffffff then io_eff(iroh_srv_relay_authorized,authorized_run) end
+  if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end
+  if iroh_srv_relay_stop ~= 0xffffffff then io_eff(iroh_srv_relay_stop,stop_run) end
+  if iroh_srv_relay_nonce ~= 0xffffffff then io_eff(iroh_srv_relay_nonce,nonce_run) end
+end

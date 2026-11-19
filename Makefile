@@ -173,3 +173,24 @@ $(BUILD)/quic-streams.c: tests/quic_streams.bend tests/direct.bend src/direct.be
 $(BUILD)/iroh-bend-quic-streams: $(BUILD)/quic-streams.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-relay-server
+UPSTREAM_RELAY_CLIENT ?=
+RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_server.bend src/relay_server_socket.bend
+
+check-relay-server: $(BUILD)/iroh-bend-relay-server $(BUILD)/iroh-bend-relay-live
+	tests/relay_server.sh "$(BUILD)/iroh-bend-relay-server" "$(BUILD)/iroh-bend-relay-live" "$(UPSTREAM_RELAY_CLIENT)"
+
+$(BUILD)/relay-server.c: tests/relay_server.bend $(RELAY_SERVER_SOURCES) src/ed25519.nelua src/relay_server_socket.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/relay-server-stage/src" "$(BUILD)/relay-server-stage/tests"
+	cp $(RELAY_SERVER_SOURCES) "$(BUILD)/relay-server-stage/src/"
+	cp tests/relay_server.bend "$(BUILD)/relay-server-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(BUILD)/relay-server-stage/src/ed25519.c)"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/relay_server_socket.nelua \
+		"$(abspath $(BUILD)/relay-server-stage/src/relay_server_socket.c)"
+	cd "$(BUILD)/relay-server-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_server.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
