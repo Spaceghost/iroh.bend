@@ -1,0 +1,252 @@
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<arpa/inet.h>'
+## cinclude '<errno.h>'
+## cinclude '<netdb.h>'
+## cinclude '<netinet/in.h>'
+## cinclude '<poll.h>'
+## cinclude '<sys/socket.h>'
+## cinclude '<unistd.h>'
+require 'C.stdlib'
+require 'C.string'
+
+##[[
+for _, name in ipairs{'dht_bind','dht_ipv6_bytes','dht_send','dht_receive','Con'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_dht_%s CID(%s)\n#else\n#define iroh_dht_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_dht_dht_bind: uint32 <cimport,nodecl>
+local iroh_dht_dht_ipv6_bytes: uint32 <cimport,nodecl>
+local iroh_dht_dht_send: uint32 <cimport,nodecl>
+local iroh_dht_dht_receive: uint32 <cimport,nodecl>
+local iroh_dht_Con: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{data: cstring, hand: isize, time: uint64}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local Continue = @function(Env,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_wait_on(work: *IoWork, fd: cint, event: cshort, time: uint64, more: Continue): Term <cimport,nodecl> end
+local function io_until(ms: uint32): uint64 <cimport,nodecl> end
+local function io_tick(): uint64 <cimport,nodecl> end
+local function io_mem(mem: pointer): pointer <cimport,nodecl> end
+local function io_hand(fd: uint64): Term <cimport,nodecl> end
+local function io_hand_v(handle: Term): uint64 <cimport,nodecl> end
+local function io_cstr(e: Env, text: Term, len: *uint64): cstring <cimport,nodecl> end
+local function io_nul(text: cstring, len: uint64): boolean <cimport,nodecl> end
+local function io_list(e: Env, bytes: cstring, len: uint64): Term <cimport,nodecl> end
+local function io_tup(e: Env, first: Term, second: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, result: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, message: cstring): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, word: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+## cdefine 'iroh_dht_unit CID(Unit)'
+local iroh_dht_unit: uint32 <cimport,nodecl>
+
+## cdefine 'iroh_dht_storage struct sockaddr_storage'
+## cdefine 'iroh_dht_address4 struct sockaddr_in'
+## cdefine 'iroh_dht_address6 struct sockaddr_in6'
+## cdefine 'iroh_dht_addrinfo struct addrinfo'
+local Storage <cimport,nodecl,codename 'iroh_dht_storage'> = @record{
+  ss_family: cushort, padding: [118]cuchar, alignment: uint64
+}
+local Addr4 <cimport,nodecl,codename 'iroh_dht_address4'> = @record{
+  sin_family: cushort, sin_port: uint16, sin_addr: uint32, sin_zero: [8]cuchar
+}
+local Addr6 <cimport,nodecl,codename 'iroh_dht_address6'> = @record{
+  sin6_family: cushort, sin6_port: uint16, sin6_flowinfo: uint32, sin6_addr: [16]cuchar, sin6_scope_id: uint32
+}
+local AddrInfo <cimport,nodecl,codename 'iroh_dht_addrinfo'> = @record{
+  ai_family: cint, ai_flags: cint, ai_socktype: cint, ai_addr: pointer, ai_addrlen: cuint
+}
+local socklen_t <cimport,nodecl> = @cuint
+local AF_INET: cint <cimport,nodecl>
+local AF_INET6: cint <cimport,nodecl>
+local SOCK_DGRAM: cint <cimport,nodecl>
+local SOCK_NONBLOCK: cint <cimport,nodecl>
+local SOCK_CLOEXEC: cint <cimport,nodecl>
+local AI_NUMERICHOST: cint <cimport,nodecl>
+local AI_V4MAPPED: cint <cimport,nodecl>
+local IPPROTO_IPV6: cint <cimport,nodecl>
+local IPV6_V6ONLY: cint <cimport,nodecl>
+local POLLIN: cshort <cimport,nodecl>
+local POLLOUT: cshort <cimport,nodecl>
+local MSG_TRUNC: cint <cimport,nodecl>
+local EINTR: cint <cimport,nodecl>
+local EAGAIN: cint <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local ETIMEDOUT: uint32 <cimport,nodecl>
+local errno: cint <cimport,nodecl>
+local function socket(family: cint, kind: cint, protocol: cint): cint <cimport,nodecl> end
+local function bind(fd: cint, addr: pointer, size: socklen_t): cint <cimport,nodecl> end
+local function setsockopt(fd: cint, level: cint, option: cint, value: pointer, size: socklen_t): cint <cimport,nodecl> end
+local function getsockname(fd: cint, addr: pointer, size: *socklen_t): cint <cimport,nodecl> end
+local function close(fd: cint): cint <cimport,nodecl> end
+local function getaddrinfo(host: cstring, service: cstring, hints: *AddrInfo, out: **AddrInfo): cint <cimport,nodecl> end
+local function freeaddrinfo(info: *AddrInfo) <cimport,nodecl> end
+local function htons(port: uint16): uint16 <cimport,nodecl> end
+local function inet_pton(family: cint, host: cstring, out: pointer): cint <cimport,nodecl> end
+local function sendto(fd: cint, bytes: pointer, size: csize, flags: cint, to: pointer, len: socklen_t): isize <cimport,nodecl> end
+local function recvfrom(fd: cint, bytes: pointer, size: csize, flags: cint, from: pointer, len: *socklen_t): isize <cimport,nodecl> end
+
+local LIMIT <comptime> = 2048
+local Packet = @record{peer: Storage, peer_size: socklen_t, payload: [LIMIT]cuchar, size: csize}
+
+local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local kind = SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC
+  local fd = socket(AF_INET6,kind,0)
+  if fd >= 0 then
+    local dual: cint = 0
+    local addr: Addr6
+    C.memset(&addr,0,#Addr6)
+    addr.sin6_family = (@cushort)(AF_INET6)
+    if setsockopt(fd,IPPROTO_IPV6,IPV6_V6ONLY,&dual,#cint) == 0 and bind(fd,&addr,#Addr6) == 0 then
+      return io_done(e,io_hand((@uint64)(fd)))
+    end
+    close(fd)
+  end
+  fd = socket(AF_INET,kind,0)
+  if fd < 0 then return io_fail(e,(@uint32)(errno),nilptr) end
+  local addr: Addr4 = {sin_family = (@cushort)(AF_INET)}
+  if bind(fd,&addr,#Addr4) ~= 0 then
+    local code = (@uint32)(errno)
+    close(fd)
+    return io_fail(e,code,nilptr)
+  end
+  return io_done(e,io_hand((@uint64)(fd)))
+end
+
+local function ipv6_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local length: uint64
+  local host = io_cstr(e,args[0],&length)
+  defer C.free(host) end
+  local addr: [16]cuchar
+  local binary = not io_nul(host,length) and inet_pton(AF_INET6,host,&addr[0]) == 1
+  return io_list(e,(@cstring)(&addr[0]),binary and 16 or 0)
+end
+
+local function peer_address(e: Env, fd: cint, host: Term, port: Term, packet: *Packet): boolean
+  if port == 0 or port > 65535 then return false end
+  local current: Storage
+  local current_size: socklen_t = #Storage
+  if getsockname(fd,&current,&current_size) ~= 0 then return false end
+  if current.ss_family ~= AF_INET and current.ss_family ~= AF_INET6 then return false end
+  local length: uint64
+  local text = io_cstr(e,host,&length)
+  defer C.free(text) end
+  if io_nul(text,length) then return false end
+  local ipv4: uint32
+  if C.strchr(text,58) == nilptr and inet_pton(AF_INET,text,&ipv4) ~= 1 then return false end
+  local hints: AddrInfo = {ai_family = (@cint)(current.ss_family), ai_socktype = SOCK_DGRAM, ai_flags = AI_NUMERICHOST}
+  if hints.ai_family == AF_INET6 then hints.ai_flags = hints.ai_flags | AI_V4MAPPED end
+  local address: *AddrInfo
+  if getaddrinfo(text,nilptr,&hints,&address) ~= 0 then return false end
+  defer freeaddrinfo(address) end
+  if address.ai_addrlen > #Storage then return false end
+  C.memcpy(&packet.peer,address.ai_addr,address.ai_addrlen)
+  packet.peer_size = address.ai_addrlen
+  local net_port = htons((@uint16)(port))
+  if hints.ai_family == AF_INET6 then
+    ((@*Addr6)(&packet.peer)).sin6_port = net_port
+  else
+    ((@*Addr4)(&packet.peer)).sin_port = net_port
+  end
+  return true
+end
+
+local function same_peer(expected: *Storage, source: *Storage): boolean
+  if source.ss_family ~= expected.ss_family then return false end
+  if source.ss_family == AF_INET6 then
+    local a = (@*Addr6)(expected)
+    local b = (@*Addr6)(source)
+    return a.sin6_port == b.sin6_port and a.sin6_scope_id == b.sin6_scope_id and
+      C.memcmp(&a.sin6_addr,&b.sin6_addr,16) == 0
+  end
+  local a = (@*Addr4)(expected)
+  local b = (@*Addr4)(source)
+  return a.sin_port == b.sin_port and C.memcmp(&a.sin_addr,&b.sin_addr,4) == 0
+end
+
+local function finish(e: Env, work: *IoWork, result: Term): Term
+  C.free(work.data)
+  work.data = nilptr
+  return io_tup(e,io_hand((@uint64)(work.hand)),result)
+end
+
+local function transfer_error(e: Env, work: *IoWork, code: cint): Term
+  if code == EAGAIN then return finish(e,work,io_fail(e,ETIMEDOUT,'DHT query timed out')) end
+  return finish(e,work,io_fail(e,(@uint32)(code),nilptr))
+end
+
+local function send_more(e: Env, work: *IoWork): Term
+  local packet = (@*Packet)(work.data)
+  local fd = (@cint)(work.hand)
+  local n = sendto(fd,&packet.payload[0],packet.size,0,&packet.peer,packet.peer_size)
+  if n < 0 then
+    local code = errno
+    if (code == EAGAIN or code == EINTR) and io_tick() < work.time then
+      return io_wait_on(work,fd,POLLOUT,work.time,send_more)
+    end
+    return transfer_error(e,work,code)
+  end
+  if (@csize)(n) ~= packet.size then return finish(e,work,io_fail(e,EIO,'incomplete DHT datagram')) end
+  return finish(e,work,io_done(e,term_pak(iroh_dht_unit,0)))
+end
+
+local function receive_more(e: Env, work: *IoWork): Term
+  local packet = (@*Packet)(work.data)
+  local fd = (@cint)(work.hand)
+  local source: Storage
+  local size: socklen_t = #Storage
+  local n = recvfrom(fd,&packet.payload[0],LIMIT,MSG_TRUNC,&source,&size)
+  if n < 0 then
+    local code = errno
+    if (code == EAGAIN or code == EINTR) and io_tick() < work.time then
+      return io_wait_on(work,fd,POLLIN,work.time,receive_more)
+    end
+    return transfer_error(e,work,code)
+  end
+  if n > LIMIT or not same_peer(&packet.peer,&source) then n = 0 end
+  return finish(e,work,io_done(e,io_list(e,(@cstring)(&packet.payload[0]),(@uint64)(n))))
+end
+
+local function prepare(e: Env, args: *[0]Term, work: *IoWork, ms: Term): boolean
+  work.hand = (@isize)(io_hand_v(args[0]))
+  local packet = (@*Packet)(io_mem(C.malloc(#Packet)))
+  work.data = (@cstring)(packet)
+  work.time = io_until((@uint32)(ms))
+  return peer_address(e,(@cint)(work.hand),args[1],args[2],packet)
+end
+
+local function send_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  if not prepare(e,args,work,args[4]) then return finish(e,work,io_fail(e,EINVAL,'invalid DHT peer address')) end
+  local packet = (@*Packet)(work.data)
+  local item = args[3]
+  packet.size = 0
+  while term_aux(item) == iroh_dht_Con do
+    local field = term_peek(e.mem,item)
+    local byte = e.mem[field]
+    if packet.size >= LIMIT or byte > 255 then return finish(e,work,io_fail(e,EINVAL,'invalid DHT datagram')) end
+    packet.payload[packet.size] = (@cuchar)(byte)
+    packet.size = packet.size + 1
+    item = e.mem[field + 1]
+  end
+  return send_more(e,work)
+end
+
+local function receive_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  if not prepare(e,args,work,args[3]) then return finish(e,work,io_fail(e,EINVAL,'invalid DHT peer address')) end
+  return receive_more(e,work)
+end
+
+local function register_dht() <cexport,codename 'iroh_register_dht',cattribute 'constructor'>
+  if iroh_dht_dht_bind ~= 0xffffffff then io_eff(iroh_dht_dht_bind,bind_run) end
+  if iroh_dht_dht_ipv6_bytes ~= 0xffffffff then io_eff(iroh_dht_dht_ipv6_bytes,ipv6_run) end
+  if iroh_dht_dht_send ~= 0xffffffff then io_eff(iroh_dht_dht_send,send_run) end
+  if iroh_dht_dht_receive ~= 0xffffffff then io_eff(iroh_dht_dht_receive,receive_run) end
+end

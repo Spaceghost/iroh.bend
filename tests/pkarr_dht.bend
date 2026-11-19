@@ -69,10 +69,23 @@ def tid_ok(reply: Krpc.Reply, unexpected: Krpc.Reply) -> Bool:
 def rpc_fixture(+bytes: List<&2,U32>) -> Bool:
   tid_ok(Krpc.reply(bytes,[0,255]),Krpc.reply(bytes,[255,0]))
 
+def compact_v6(valid: List<&2,Krpc.CompactNode>, truncated: List<&2,Krpc.CompactNode>) -> Bool:
+  match valid truncated:
+    case Con{Krpc.CompactV6{id,[32,1,13,184,0,0,0,0,0,0,0,0,0,0,0,1],6881},Nil{}} Nil{}:
+      Bytes.bytes_eq(id,Bytes.keyword("ABCDEFGHIJKLMNOPQRST"))
+    case _ _:
+      False{}
+
+def nodes6_fixture() -> Bool:
+  id = Bytes.keyword("ABCDEFGHIJKLMNOPQRST")
+  +address : List<&2,U32> = [32,1,13,184,0,0,0,0,0,0,0,0,0,0,0,1]
+  compact_v6(Krpc.nodes6(Some{Krpc.cat(id,Krpc.cat(address,[26,225]))}),Krpc.nodes6(Some{address}))
+
 def fixtures() -> IO(Unit):
   do IO<Unit>:
     report("bencode dictionaries, lists, binary values, and malformed input",parser_fixture())
     report("BEP 44 signed sequence limits",sequence_fixture())
+    report("BEP 32 compact IPv6 referrals and malformed-length rejection",nodes6_fixture())
     report("KRPC reply and transaction matching",
       rpc_fixture(Krpc.cat(Bytes.keyword("d1:rd2:id20:ABCDEFGHIJKLMNOPQRSTe1:t2:"),[0,255,49,58,121,49,58,114,101])))
 
@@ -150,33 +163,35 @@ def publish_old(peer: Dht.Peer) -> IO(Unit):
     signed : List<&2,U32> <- signed_at(41)
     IO.try(Unit,Dht.publish_at(peer,node_id(),Fixture.key(),signed,400))
 
-def against(mode: String, port: Maybe<&2,U32>) -> IO(Unit):
+def against(mode: String, +host: String, port: Maybe<&2,U32>) -> IO(Unit):
   match mode port:
     case "publish" Some{p}:
-      publish(Dht.DhtPeer{"127.0.0.1",p})
+      publish(Dht.DhtPeer{host,p})
     case "resolve" Some{p}:
-      resolve(Dht.DhtPeer{"127.0.0.1",p},False{})
+      resolve(Dht.DhtPeer{host,p},False{})
     case "missing" Some{p}:
-      resolve(Dht.DhtPeer{"127.0.0.1",p},True{})
+      resolve(Dht.DhtPeer{host,p},True{})
     case "publish-old" Some{p}:
-      publish_old(Dht.DhtPeer{"127.0.0.1",p})
+      publish_old(Dht.DhtPeer{host,p})
     case "search-publish" Some{p}:
-      search_publish(Dht.DhtPeer{"127.0.0.1",p})
+      search_publish(Dht.DhtPeer{host,p})
     case "search-resolve" Some{p}:
-      search_resolve(Dht.DhtPeer{"127.0.0.1",p})
+      search_resolve(Dht.DhtPeer{host,p})
     case "search-stale" Some{p}:
-      search_stale(Dht.DhtPeer{"127.0.0.1",p})
+      search_stale(Dht.DhtPeer{host,p})
     case _ _:
-      IO.die(Unit,2,"usage: pkarr-dht-check [mode port]")
+      IO.die(Unit,2,"usage: pkarr-dht-check [mode port [host]]")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Nil{}}:
       fixtures()
     case Con{_,Con{mode,Con{port,Nil{}}}}:
-      against(mode,U32.read(port))
+      against(mode,"127.0.0.1",U32.read(port))
+    case Con{_,Con{mode,Con{port,Con{host,Nil{}}}}}:
+      against(mode,host,U32.read(port))
     case _:
-      IO.die(Unit,2,"usage: pkarr-dht-check [mode port]")
+      IO.die(Unit,2,"usage: pkarr-dht-check [mode port [host]]")
 
 def main() -> IO(Unit):
   do IO<Unit>:

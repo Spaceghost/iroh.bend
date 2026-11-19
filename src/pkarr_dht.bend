@@ -4,6 +4,7 @@ import ./discovery.bend as Bytes
 import ./ed25519.bend as Ed
 import ./krpc.bend as Krpc
 import ./pkarr.bend as Pkarr
+import ./pkarr_dht_socket.bend as Net
 
 type Peer is Data:
   DhtPeer{host: String, port: U32}
@@ -20,31 +21,25 @@ def source(peer: Peer, host: String, port: U32) -> Bool:
   DhtPeer{expected_host,expected_port} = peer
   String.eq(host,expected_host) && U32.is_eq(port,expected_port)
 
-def inspected(reply: Krpc.Reply, same_source: Bool) -> Read:
-  match reply same_source:
-    case Krpc.InvalidKrpcReply{} _:
-      IgnoreKrpc{}
-    case _ True{}:
-      ReceivedKrpc{reply}
-    case _ False{}:
-      IgnoreKrpc{}
-
-def inspect(reply: Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
-    peer: Peer, tx: List<&2,U32>) -> Read:
+def inspected(reply: Krpc.Reply) -> Read:
   match reply:
-    case Ready{Done{(host,port,data)}}:
-      inspected(Krpc.reply(data,tx),source(peer,host,port))
-    case Ready{Fail{(code,message)}}:
-      FailedKrpc{code,message}
-    case Wait{_}:
-      FailedKrpc{1,"DHT query timed out"}
+    case Krpc.InvalidKrpcReply{}:
+      IgnoreKrpc{}
+    case _:
+      ReceivedKrpc{reply}
 
-def continue_read(result: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
-    peer: Peer, tx: List<&2,U32>,
+def inspect(reply: Result<&1,&1,U32 & String,List<&2,U32>>, tx: List<&2,U32>) -> Read:
+  match reply:
+    case Done{data}:
+      inspected(Krpc.reply(data,tx))
+    case Fail{(code,message)}:
+      FailedKrpc{code,message}
+
+def continue_read(result: Socket & Result<&1,&1,U32 & String,List<&2,U32>>, tx: List<&2,U32>,
     next: Socket -> Read -> IO(Socket & Result<&1,&1,U32 & String,Krpc.Reply>))
     -> IO(Socket & Result<&1,&1,U32 & String,Krpc.Reply>):
   (socket,poll) = result
-  next(socket,inspect(poll,peer,tx))
+  next(socket,inspect(poll,tx))
 
 def read_reply(+fuel: Nat, socket: Socket, +query: Query, read: Read)
     -> IO(Socket & Result<&1,&1,U32 & String,Krpc.Reply>):
@@ -53,28 +48,26 @@ def read_reply(+fuel: Nat, socket: Socket, +query: Query, read: Read)
       IO.pure(Socket & Result<&1,&1,U32 & String,Krpc.Reply>,(socket,Done{reply}))
     case _ _ FailedKrpc{code,message}:
       IO.pure(Socket & Result<&1,&1,U32 & String,Krpc.Reply>,(socket,Fail{(code,message)}))
-    case 1n+k DhtQuery{+peer,+tx,_,ms} IgnoreKrpc{}:
+    case 1n+k DhtQuery{DhtPeer{host,port},tx,_,ms} IgnoreKrpc{}:
       do IO<Socket & Result<&1,&1,U32 & String,Krpc.Reply>>:
-        received : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-
-          UDP.try_recv_bytes_from(socket,2049,ms)
-        continue_read(received,peer,tx,next => result => read_reply(k,next,query,result))
+        received : Socket & Result<&1,&1,U32 & String,List<&2,U32>> <- Net.dht_receive(socket,host,port,ms)
+        continue_read(received,tx,next => result => read_reply(k,next,query,result))
     case 0n _ IgnoreKrpc{}:
       IO.pure(Socket & Result<&1,&1,U32 & String,Krpc.Reply>,(socket,Fail{(1,"too many unrelated DHT datagrams")}))
 
-def sent(outcome: Socket & Result<&1,&1,(U32 & String) & List<&2,U32>,Unit>, query: Query)
+def sent(outcome: Socket & Result<&1,&1,U32 & String,Unit>, query: Query)
     -> IO(Socket & Result<&1,&1,U32 & String,Krpc.Reply>):
   match outcome:
     case (socket,Done{_}):
       read_reply(8n,socket,query,IgnoreKrpc{})
-    case (socket,Fail{(error,_)}):
+    case (socket,Fail{error}):
       IO.pure(Socket & Result<&1,&1,U32 & String,Krpc.Reply>,(socket,Fail{error}))
 
 def exchange(socket: Socket, +query: Query)
     -> IO(Socket & Result<&1,&1,U32 & String,Krpc.Reply>):
-  DhtQuery{DhtPeer{host,port},_,payload,_} = query
+  DhtQuery{DhtPeer{host,port},_,payload,ms} = query
   do IO<Socket & Result<&1,&1,U32 & String,Krpc.Reply>>:
-    outcome : Socket & Result<&1,&1,(U32 & String) & List<&2,U32>,Unit> <-
-      UDP.send_bytes_to(socket,host,port,payload)
+    outcome : Socket & Result<&1,&1,U32 & String,Unit> <- Net.dht_send(socket,host,port,payload,ms)
     sent(outcome,query)
 
 def tx(+value: U32) -> List<&2,U32>:
@@ -175,12 +168,12 @@ def resolve_prepared(prepared: Result<&1,&1,U32 & String,List<&2,U32> & U32>,
   match prepared:
     case Done{(target,random)}:
       do IO<Result<&1,&1,U32 & String,Maybe<&2,Pkarr.Verification>>>:
-        bound : Result<&1,&1,U32 & String,Socket> <- UDP.bind("0.0.0.0",0)
+        bound : Result<&1,&1,U32 & String,Socket> <- Net.dht_bind()
         start_resolve(bound,get_query(peer,node_id,tx(random),target,ms),key)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Maybe<&2,Pkarr.Verification>>,Fail{error})
 
-# Query one supplied IPv4 DHT peer. A returned mutable value is signature
+# Query one supplied DHT peer. A returned mutable value is signature
 # checked against the requested endpoint, with its original timestamp.
 def resolve_at(peer: Peer, +node_id: List<&2,U32>, +key: List<&2,U32>, ms: U32)
     -> IO(Result<&1,&1,U32 & String,Maybe<&2,Pkarr.Verification>>):
@@ -278,7 +271,7 @@ def publish_prepared(prepared: Result<&1,&1,U32 & String,List<&2,U32> & U32>,
   match prepared:
     case Done{(target,random)}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
-        bound : Result<&1,&1,U32 & String,Socket> <- UDP.bind("0.0.0.0",0)
+        bound : Result<&1,&1,U32 & String,Socket> <- Net.dht_bind()
         start_publish(bound,peer,node_id,target,random,item,ms)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Unit>,Fail{error})

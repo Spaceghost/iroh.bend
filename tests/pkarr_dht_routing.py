@@ -3,7 +3,7 @@
 from contextlib import ExitStack
 from hashlib import sha1
 from selectors import DefaultSelector, EVENT_READ
-from socket import AF_INET, SOCK_DGRAM, inet_aton, socket
+from socket import AF_INET, AF_INET6, SOCK_DGRAM, inet_pton, socket
 from struct import pack
 from subprocess import PIPE, Popen
 from sys import argv
@@ -12,7 +12,7 @@ from time import monotonic
 KEY = bytes.fromhex("197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61")
 TARGET = sha1(KEY).digest()
 NODE_ID = b"bend-test-node-00001"
-HOST = "127.0.0.1"
+HOSTS = {AF_INET: "127.0.0.1", AF_INET6: "::1"}
 
 
 def encode(value):
@@ -28,23 +28,26 @@ def node_id(distance):
 
 
 class Testnet:
-    def __init__(self, context):
+    def __init__(self, context, families):
         self.poll = context.enter_context(DefaultSelector())
-        self.nodes = [context.enter_context(socket(AF_INET, SOCK_DGRAM)) for _ in range(4)]
+        self.nodes = [context.enter_context(socket(family, SOCK_DGRAM)) for family in families]
+        self.foreign = {family: context.enter_context(socket(family, SOCK_DGRAM)) for family in set(families)}
         self.ids = [node_id(distance) for distance in (255, 20, 5, 1)]
         self.links = [[1, 3, 1], [], [0], [2]]
         self.packet = [None] * len(self.nodes)
         for index, node in enumerate(self.nodes):
-            node.bind((HOST, 0))
+            node.bind((HOSTS[node.family], 0))
             self.poll.register(node, EVENT_READ, index)
 
     def compact(self, index):
-        return self.ids[index] + inet_aton(HOST) + pack("!H", self.nodes[index].getsockname()[1])
+        family = self.nodes[index].family
+        return self.ids[index] + inet_pton(family, HOSTS[family]) + pack("!H", self.nodes[index].getsockname()[1])
 
     def invoke(self, executable, mode, seq):
         get, put, issued = [], [], {}
         port = str(self.nodes[0].getsockname()[1])
-        with Popen([executable, mode, port], stdout=PIPE, stderr=PIPE, text=True) as child:
+        host = HOSTS[self.nodes[0].family]
+        with Popen([executable, mode, port, host], stdout=PIPE, stderr=PIPE, text=True) as child:
             deadline = monotonic() + 6
             try:
                 while child.poll() is None and monotonic() < deadline:
@@ -64,8 +67,14 @@ class Testnet:
                         if message == expected_get:
                             get.append(index)
                             issued[index] = peer
-                            response.update({b"token": token, b"nodes": b"".join(
-                                self.compact(i) for i in self.links[index])})
+                            if len(get) == 1:
+                                wrong_source = {b"id": self.ids[index], b"token": b"wrong-source-token"}
+                                self.foreign[node.family].sendto(encode({b"y": b"r", b"t": tx, b"r": wrong_source}), peer)
+                            response[b"token"] = token
+                            for family, field in ((AF_INET, b"nodes"), (AF_INET6, b"nodes6")):
+                                response[field] = b"".join(
+                                    self.compact(i) for i in self.links[index] if self.nodes[i].family == family
+                                )
                             response.update(self.packet[index] or {})
                         else:
                             assert message[:-16].endswith(b"e1:q3:put2:roi1e"), message
@@ -96,9 +105,9 @@ class Testnet:
         return get, put
 
 
-def check(executable):
+def check(executable, families):
     with ExitStack() as context:
-        network = Testnet(context)
+        network = Testnet(context, families)
         assert network.invoke(executable, "publish-old", 41) == ([0], [0])
         older = network.packet[0]
         assert network.invoke(executable, "search-publish", 42) == ([0, 3, 2, 1], [3, 2, 1, 0])
@@ -107,8 +116,11 @@ def check(executable):
         network.packet[3] = {**network.packet[3], b"seq": 99}
         assert network.invoke(executable, "search-resolve", None) == ([0, 3, 2, 1], [])
         assert network.invoke(executable, "search-stale", None) == ([0, 3, 2, 1], [])
-    print("PASS DHT referral deduplication, nearest-first replication, and verified freshness")
+    versions = "/".join(version for family, version in ((AF_INET, "IPv4"), (AF_INET6, "IPv6")) if family in families)
+    print(f"PASS {versions} DHT referral deduplication, nearest-first replication, and verified freshness")
 
 
 if __name__ == "__main__":
-    check(argv[1])
+    check(argv[1], [AF_INET] * 4)
+    check(argv[1], [AF_INET6] * 4)
+    check(argv[1], [AF_INET, AF_INET6, AF_INET, AF_INET6])

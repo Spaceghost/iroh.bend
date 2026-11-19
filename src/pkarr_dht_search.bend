@@ -4,6 +4,7 @@ import ./discovery.bend as Bytes
 import ./krpc.bend as Krpc
 import ./pkarr.bend as Pkarr
 import ./pkarr_dht.bend as Dht
+import ./pkarr_dht_socket.bend as Net
 
 type Contact is Data:
   Candidate{peer: Dht.Peer, id: Maybe<&2,List<&2,U32>>, distance: List<&2,U32>}
@@ -84,6 +85,39 @@ def ipv4(a: U32, b: U32, c: U32, d: U32) -> String:
   right = String.append(U32.show(c),String.append(".",U32.show(d)))
   String.append(left,String.append(".",right))
 
+def hex_digit(+n: U32, digit: Bool) -> Char:
+  match digit:
+    case True{}:
+      Char.from_u32(U32.add(48,n))
+    case False{}:
+      Char.from_u32(U32.add(87,n))
+
+def hex_char(+n: U32) -> Char:
+  hex_digit(n,U32.is_lt(n,10))
+
+def hex_byte(+byte: U32, rest: List<&2,Char>) -> List<&2,Char>:
+  Con{hex_char(U32.shrn(byte,4n)),Con{hex_char(U32.and(byte,15)),rest}}
+
+def ipv6_chars(bytes: List<&2,U32>) -> List<&2,Char>:
+  match bytes:
+    case [hi,lo]:
+      hex_byte(hi,hex_byte(lo,[]))
+    case Con{hi,Con{lo,tail}}:
+      hex_byte(hi,hex_byte(lo,Con{Char.from_u32(58),ipv6_chars(tail)}))
+    case _:
+      []
+
+def ipv6_usable(bytes: List<&2,U32>) -> Bool:
+  match bytes:
+    case [0,0,0,0,0,0,0,0,0,0,255,255,_,_,_,_]:
+      False{}
+    case Con{255,_}:
+      False{}
+    case Con{254,Con{second,_}}:
+      Bool.not(U32.is_eq(U32.and(second,192),128))
+    case _:
+      Bool.not(Bytes.bytes_eq(bytes,List.replicate(U32,16n,0)))
+
 def usable_node(queue: List<&2,Contact>, seen: List<&2,Dht.Peer>, peer: Dht.Peer,
     id: List<&2,U32>, digest: List<&2,U32>, usable: Bool) -> List<&2,Contact>:
   match usable:
@@ -100,13 +134,26 @@ def referrals(nodes: List<&2,Krpc.CompactNode>, queue: List<&2,Contact>,
     case Con{Krpc.CompactV4{id,+a,b,c,d,+port},tail}:
       referrals(tail,usable_node(queue,seen,Dht.DhtPeer{ipv4(a,b,c,d),port},id,digest,
         U32.is_gt(a,0) && U32.is_lt(a,224) && U32.is_gt(port,0)),seen,digest)
+    case Con{Krpc.CompactV6{id,+address,+port},tail}:
+      peer : Dht.Peer = Dht.DhtPeer{String.from_list(ipv6_chars(address)),port}
+      referrals(tail,usable_node(queue,seen,peer,id,digest,ipv6_usable(address) && U32.is_gt(port,0)),
+        seen,digest)
 
-def seeds(peers: List<&2,Dht.Peer>, queue: List<&2,Contact>) -> List<&2,Contact>:
+def numeric_host(host: String, bytes: List<&2,U32>) -> String:
+  match bytes:
+    case Nil{}:
+      host
+    case _:
+      String.from_list(ipv6_chars(bytes))
+
+def seeds(peers: List<&2,Dht.Peer>, queue: List<&2,Contact>) -> IO(List<&2,Contact>):
   match peers:
     case Nil{}:
-      queue
-    case Con{peer,tail}:
-      seeds(tail,add_contact(queue,[],peer,None{},[]))
+      IO.pure(List<&2,Contact>,queue)
+    case Con{Dht.DhtPeer{+host,port},tail}:
+      do IO<List<&2,Contact>>:
+        bytes : List<&2,U32> <- Net.dht_ipv6_bytes(host)
+        seeds(tail,add_contact(queue,[],Dht.DhtPeer{numeric_host(host,bytes),port},None{},[]))
 
 def prefer(old: Item, fresh: Item, replace: Bool) -> Item:
   match replace:
@@ -174,7 +221,8 @@ def records(state: Search, fresh: Item) -> Search:
 def learn(state: Search, +fields: List<&2,Ben.Value>, peer: Dht.Peer,
     id: List<&2,U32>, key: List<&2,U32>, +digest: List<&2,U32>) -> IO(Search):
   Shortlist{queue,+seen,peers,best,count} = state
-  next = referrals(Krpc.nodes(Krpc.text(Ben.get(fields,"nodes"))),queue,seen,digest)
+  v4 = referrals(Krpc.nodes(Krpc.text(Ben.get(fields,"nodes"))),queue,seen,digest)
+  next = referrals(Krpc.nodes6(Krpc.text(Ben.get(fields,"nodes6"))),v4,seen,digest)
   eligible = write_peer(peers,Krpc.text(Ben.get(fields,"token")),peer,id,digest)
   do IO<Search>:
     fresh : Item <- verify_item(Krpc.item(fields),key)
@@ -273,13 +321,14 @@ def begin(-R: Type, prepared: Result<&1,&1,U32 & String,List<&2,U32> & U32>, boo
   match prepared:
     case Done{(digest,transaction)}:
       do IO<Result<&1,&1,U32 & String,R>>:
-        initial : Result<&1,&1,U32 & String,Socket> <- UDP.bind("0.0.0.0",0)
-        search(R,initial,Shortlist{seeds(bootstrap,[]),[],[],NoItem{},0},
+        queue : List<&2,Contact> <- seeds(bootstrap,[])
+        initial : Result<&1,&1,U32 & String,Socket> <- Net.dht_bind()
+        search(R,initial,Shortlist{queue,[],[],NoItem{},0},
           Target{key,digest,id,ms},transaction,finished)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,R>,Fail{error})
 
-# Follow compact IPv4 referrals in XOR-distance order. Select the greatest
+# Follow compact IPv4 and IPv6 referrals in XOR-distance order. Select the greatest
 # sequence among verified packets, breaking equal-sequence ties by DNS bytes.
 def resolve(bootstrap: List<&2,Dht.Peer>, +id: List<&2,U32>, +key: List<&2,U32>, ms: U32)
     -> IO(Result<&1,&1,U32 & String,Maybe<&2,Pkarr.Verification>>):
