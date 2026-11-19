@@ -107,10 +107,10 @@ RELAY_QUIC_EFFECTS = ed25519 relay_socket direct relay_quic
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic
 	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)"
 
-$(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
+$(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend tests/quic_streams.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/relay-quic-stage/src" "$(BUILD)/relay-quic-stage/tests"
 	cp $(RELAY_QUIC_SOURCES) "$(BUILD)/relay-quic-stage/src/"
-	cp tests/relay_quic.bend tests/direct.bend "$(BUILD)/relay-quic-stage/tests/"
+	cp tests/relay_quic.bend tests/direct.bend tests/quic_streams.bend "$(BUILD)/relay-quic-stage/tests/"
 	for native in $(RELAY_QUIC_EFFECTS); do \
 		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
 			"$(abspath $(BUILD)/relay-quic-stage/src)/$$native.c" || exit; \

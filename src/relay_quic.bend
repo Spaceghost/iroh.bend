@@ -1,6 +1,7 @@
 import Base
 import ./relay.bend as Wire
 import ./relay_client.bend as Client
+import ./direct.bend as Direct
 
 type Bridge is Data:
   RelayPath{shutdown: Chan(Unit), finished: Chan(Result<&1,&1,U32 & String,Unit>)}
@@ -256,3 +257,46 @@ def stop(bridge: Bridge) -> IO(Result<&1,&1,U32 & String,Unit>):
   do IO<Result<&1,&1,U32 & String,Unit>>:
     Chan.close(Unit,shutdown)
     IO.join(Result<&1,&1,U32 & String,Unit>,finished)
+
+def connected_relayed(outcome: Result<&1,&1,U32 & String,Direct.QuicConnection>, bridge: Bridge)
+    -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>):
+  match outcome:
+    case Done{conn}:
+      IO.pure(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>,Done{(conn,Some{bridge})})
+    case Fail{error}:
+      do IO<Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>>:
+        _ : Result<&1,&1,U32 & String,Unit> <- stop(bridge)
+        return Fail{error}
+
+def dial_attached(outcome: Result<&1,&1,U32 & String,Bridge & U32>, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, relay_ms: U32)
+    -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>):
+  match outcome:
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>,Fail{error})
+    case Done{(bridge,port)}:
+      do IO<Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>>:
+        relayed : Result<&1,&1,U32 & String,Direct.QuicConnection> <-
+          Direct.quic_connect_with_timeout("127.0.0.1",port,seed,peer,alpn,relay_ms)
+        connected_relayed(relayed,bridge)
+
+def selected_dial(direct: Result<&1,&1,U32 & String,Direct.QuicConnection>, relay_url: String, relay_ms: U32,
+    +seed: List<&2,U32>, +peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>):
+  match direct:
+    case Done{conn}:
+      IO.pure(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>,Done{(conn,None{})})
+    case Fail{_}:
+      do IO<Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>>:
+        attached : Result<&1,&1,U32 & String,Bridge & U32> <- start(relay_url,seed,peer,0)
+        dial_attached(attached,seed,peer,alpn,relay_ms)
+
+# Select a path before returning a connection to the application. A returned
+# bridge belongs to the connection and can be stopped after closing QUIC.
+def dial_with_fallback(host: String, port: U32, direct_ms: U32, relay_url: String, relay_ms: U32,
+    +seed: List<&2,U32>, +peer: List<&2,U32>, +alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>):
+  do IO<Result<&1,&1,U32 & String,Direct.QuicConnection & Maybe<&1,Bridge>>>:
+    direct : Result<&1,&1,U32 & String,Direct.QuicConnection> <-
+      Direct.quic_connect_with_timeout(host,port,seed,peer,alpn,direct_ms)
+    selected_dial(direct,relay_url,relay_ms,seed,peer,alpn)

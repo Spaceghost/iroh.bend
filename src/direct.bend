@@ -43,6 +43,10 @@ def quic_connect(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U3
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicConnection>):
   import "./direct.c"
 
+def quic_connect_with_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, ms: U32) -> IO(Result<&1,&1,U32 & String,QuicConnection>):
+  import "./direct.c"
+
 # Accept one authenticated connection and transfer ownership of the listener.
 def quic_accept_connection(listener: QuicListener) -> IO(Result<&1,&1,U32 & String,QuicConnection>):
   import "./direct.c"

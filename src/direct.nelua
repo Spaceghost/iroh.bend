@@ -5,11 +5,15 @@
 ## cinclude '<openssl/ssl.h>'
 ## cinclude '<openssl/err.h>'
 ## cinclude '<openssl/x509_vfy.h>'
+## cinclude '<poll.h>'
+## cinclude '<sys/time.h>'
 ## cinclude '<unistd.h>'
 ## cdefine 'iroh_sockaddr_in struct sockaddr_in'
 ## cdefine 'iroh_in_addr struct in_addr'
 ## cdefine 'iroh_sockaddr_in6 struct sockaddr_in6'
 ## cdefine 'iroh_in6_addr struct in6_addr'
+## cdefine 'iroh_dial_pollfd struct pollfd'
+## cdefine 'iroh_dial_timeval struct timeval'
 require 'C.stdlib'
 require 'C.string'
 
@@ -17,7 +21,8 @@ require 'C.string'
 ##[[
 for _, name in ipairs{'bind','accept','respond','close','abort','exchange',
                       'BoundUdp','AcceptedStream','Con','Unit',
-                      'quic_connect','quic_accept_connection','quic_try_accept_connection','quic_open_stream','quic_accept_stream',
+                      'quic_connect','quic_connect_with_timeout','quic_accept_connection','quic_try_accept_connection',
+                      'quic_open_stream','quic_accept_stream',
                       'quic_read','quic_queue_write','quic_flush','quic_finish',
                       'quic_drop_stream','quic_tick','quic_shutdown','quic_drop_connection',
                       'LiveConnection','LiveStream','Ready','Wait',
@@ -39,6 +44,7 @@ local iroh_tag_Con: uint32 <cimport,nodecl>
 local iroh_tag_Unit: uint32 <cimport,nodecl>
 
 local iroh_tag_quic_connect: uint32 <cimport,nodecl>
+local iroh_tag_quic_connect_with_timeout: uint32 <cimport,nodecl>
 local iroh_tag_quic_accept_connection: uint32 <cimport,nodecl>
 local iroh_tag_quic_try_accept_connection: uint32 <cimport,nodecl>
 local iroh_tag_quic_open_stream: uint32 <cimport,nodecl>
@@ -100,6 +106,8 @@ local sockaddr_in6 <cimport,nodecl,codename 'iroh_sockaddr_in6'> = @record{
   sin6_addr: in6_addr, sin6_scope_id: uint32
 }
 local Address = @record{family: cint, v4: sockaddr_in, v6: sockaddr_in6}
+local PollFd <cimport,nodecl,codename 'iroh_dial_pollfd'> = @record{fd: cint, events: cshort, revents: cshort}
+local Timeval <cimport,nodecl,codename 'iroh_dial_timeval'> = @record{tv_sec: clong, tv_usec: clong}
 local socklen_t <cimport,nodecl> = @cuint
 local SSL_STREAM_RESET_ARGS <cimport,nodecl> = @record{quic_error_code: uint64}
 local SSL_CONN_CLOSE_INFO <cimport,nodecl> = @record{
@@ -132,6 +140,11 @@ local X509_V_ERR_APPLICATION_VERIFICATION: cint <cimport,nodecl>
 local EIO: uint32 <cimport,nodecl,cinclude '<errno.h>'>
 local EINVAL: uint32 <cimport,nodecl,cinclude '<errno.h>'>
 local EOVERFLOW: uint32 <cimport,nodecl,cinclude '<errno.h>'>
+local ETIMEDOUT: uint32 <cimport,nodecl,cinclude '<errno.h>'>
+local EINTR: cint <cimport,nodecl,cinclude '<errno.h>'>
+local errno: cint <cimport,nodecl,cinclude '<errno.h>'>
+local POLLIN: cshort <cimport,nodecl>
+local POLLOUT: cshort <cimport,nodecl>
 
 local function socket(domain: cint, kind: cint, protocol: cint): cint <cimport,nodecl> end
 local function bind(fd: cint, addr: pointer, len: socklen_t): cint <cimport,nodecl> end
@@ -140,6 +153,7 @@ local function close(fd: cint): cint <cimport,nodecl> end
 local function htons(port: uint16): uint16 <cimport,nodecl> end
 local function ntohs(port: uint16): uint16 <cimport,nodecl> end
 local function inet_pton(family: cint, addr: cstring, out: pointer): cint <cimport,nodecl> end
+local function poll(fds: *PollFd, count: culong, ms: cint): cint <cimport,nodecl> end
 
 local function OSSL_QUIC_server_method(): *SSL_METHOD <cimport,nodecl> end
 local function OSSL_QUIC_client_method(): *SSL_METHOD <cimport,nodecl> end
@@ -186,6 +200,9 @@ local function SSL_accept(ssl: *SSL): cint <cimport,nodecl> end
 local function SSL_set_blocking_mode(ssl: *SSL, blocking: cint): cint <cimport,nodecl> end
 local function SSL_get_stream_type(ssl: *SSL): cint <cimport,nodecl> end
 local function SSL_handle_events(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_get_event_timeout(ssl: *SSL, tv: *Timeval, infinite: *cint): cint <cimport,nodecl> end
+local function SSL_net_read_desired(ssl: *SSL): cint <cimport,nodecl> end
+local function SSL_net_write_desired(ssl: *SSL): cint <cimport,nodecl> end
 local function SSL_get_conn_close_info(ssl: *SSL, info: *SSL_CONN_CLOSE_INFO, len: csize): cint <cimport,nodecl> end
 local function ERR_clear_error() <cimport,nodecl> end
 local function SSL_connect(ssl: *SSL): cint <cimport,nodecl> end
@@ -418,7 +435,8 @@ end
 
 local Job = @record{
   state: *Direct, addr: Address, send: *cuchar, recv: *cuchar,
-  send_len: csize, recv_len: csize, limit: csize, err: cstring
+  send_len: csize, recv_len: csize, limit: csize, err: cstring,
+  deadline: uint64, timed_out: boolean
 }
 local function make_job(state: *Direct, limit: csize): *Job
   local job = (@*Job)(io_mem(C.calloc(1, #Job)))
@@ -565,7 +583,7 @@ local function abort_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_work(work, abort_call, finish_pack)
 end
 
-local function dial_connection(job: *Job): boolean
+local function prepare_dial(job: *Job): boolean
   local state = job.state
   local peer = BIO_ADDR_new()
   defer BIO_ADDR_free(peer) end
@@ -575,12 +593,18 @@ local function dial_connection(job: *Job): boolean
       not make_peer(peer, &job.addr) or
       SSL_set_fd(state.conn, state.fd) ~= 1 or SSL_set1_initial_peer_addr(state.conn, peer) ~= 1 or
       SSL_set_alpn_protos(state.conn, &state.alpn[0], state.alpn_len) ~= 0 or
-      SSL_set_default_stream_mode(state.conn, SSL_DEFAULT_STREAM_MODE_NONE) ~= 1 or
-      SSL_connect(state.conn) ~= 1 or SSL_get0_peer_rpk(state.conn) == nilptr then
+      SSL_set_default_stream_mode(state.conn, SSL_DEFAULT_STREAM_MODE_NONE) ~= 1 then
     job.err = 'QUIC dial or peer authentication failed'
     return false
   end
   return true
+end
+local function dial_connection(job: *Job): boolean
+  if not prepare_dial(job) then return false end
+  local conn = job.state.conn
+  if SSL_connect(conn) == 1 and SSL_get0_peer_rpk(conn) ~= nilptr then return true end
+  job.err = 'QUIC dial or peer authentication failed'
+  return false
 end
 local function exchange_call(work: *IoWork)
   local job = (@*Job)(work.data)
@@ -689,6 +713,46 @@ local function connect_call(work: *IoWork)
   local job = (@*Job)(work.data)
   if dial_connection(job) then activate(job) end
 end
+local function dial_wait(state: *Direct, remaining: uint64): boolean
+  local next_event: Timeval
+  local infinite: cint
+  if SSL_get_event_timeout(state.conn,&next_event,&infinite) ~= 1 then return false end
+  local ms = (remaining + 999999) // 1000000
+  if infinite == 0 and next_event.tv_sec >= 0 and (@uint64)(next_event.tv_sec) <= ms // 1000 then
+    local event_ms = (@uint64)(next_event.tv_sec) * 1000 + ((@uint64)(next_event.tv_usec) + 999) // 1000
+    if event_ms < ms then ms = event_ms end
+  end
+  if ms > 2147483647 then ms = 2147483647 end
+  local fd: PollFd = {fd = state.fd}
+  if SSL_net_read_desired(state.conn) == 1 then fd.events = fd.events | POLLIN end
+  if SSL_net_write_desired(state.conn) == 1 then fd.events = fd.events | POLLOUT end
+  local result = poll(&fd,1,(@cint)(ms))
+  return result >= 0 or errno == EINTR
+end
+local function connect_with_timeout_call(work: *IoWork)
+  local job = (@*Job)(work.data)
+  if not prepare_dial(job) then return end
+  local state = job.state
+  if SSL_set_blocking_mode(state.conn,0) ~= 1 then
+    job.err = 'cannot set QUIC nonblocking mode'
+    return
+  end
+  while true do
+    if io_tick() >= job.deadline then
+      job.timed_out = true
+      return
+    end
+    local status = SSL_connect(state.conn)
+    if status == 1 and SSL_get0_peer_rpk(state.conn) ~= nilptr then
+      state.active = true
+      return
+    end
+    if not retryable(state.conn,status) then break end
+    local now = io_tick()
+    if now < job.deadline and not dial_wait(state,job.deadline - now) then break end
+  end
+  job.err = 'QUIC dial or peer authentication failed'
+end
 local function accept_connection_call(work: *IoWork)
   local job = (@*Job)(work.data)
   local state = job.state
@@ -703,13 +767,14 @@ end
 local function connection_pack(e: Env, work: *IoWork): Term
   local job = (@*Job)(work.data)
   defer free_job(job) end
+  if job.timed_out then return io_fail(e,ETIMEDOUT,'QUIC handshake timed out') end
   if job.err ~= nilptr then return io_fail(e,EIO,job.err) end
   local id = keep(job.state)
   if id == 0 then return io_fail(e,EOVERFLOW,'QUIC handle space exhausted') end
   job.state = nilptr
   return io_done(e,term_pak(iroh_tag_LiveConnection,id))
 end
-local function connect_run(e: Env, f: *[0]Term, work: *IoWork): Term
+local function connect_job_run(e: Env, f: *[0]Term, work: *IoWork, timeout_ms: uint32): Term
   local addr: Address = {}
   if f[1] == 0 or not address(e,f[0],(@uint32)(f[1]),&addr) then
     return io_fail(e,EINVAL,'invalid QUIC remote address')
@@ -719,7 +784,18 @@ local function connect_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local job = make_job(state,0)
   job.addr = addr
   work.data = (@cstring)(job)
+  if timeout_ms > 0 then
+    job.deadline = io_tick() + (@uint64)(timeout_ms) * 1000000
+    return io_work(work,connect_with_timeout_call,connection_pack)
+  end
   return io_work(work,connect_call,connection_pack)
+end
+local function connect_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  return connect_job_run(e,f,work,0)
+end
+local function connect_with_timeout_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  if f[5] == 0 then return io_fail(e,EINVAL,'QUIC handshake timeout must be positive') end
+  return connect_job_run(e,f,work,(@uint32)(f[5]))
 end
 local function accept_connection_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local state = take(e,f[0],false)
@@ -981,6 +1057,9 @@ local function register() <cexport,codename 'iroh_register_direct',cattribute 'c
   if iroh_tag_abort ~= 0xffffffff then io_eff(iroh_tag_abort, abort_run) end
   if iroh_tag_exchange ~= 0xffffffff then io_eff(iroh_tag_exchange, exchange_run) end
   if iroh_tag_quic_connect ~= 0xffffffff then io_eff(iroh_tag_quic_connect,connect_run) end
+  if iroh_tag_quic_connect_with_timeout ~= 0xffffffff then
+    io_eff(iroh_tag_quic_connect_with_timeout,connect_with_timeout_run)
+  end
   if iroh_tag_quic_accept_connection ~= 0xffffffff then io_eff(iroh_tag_quic_accept_connection,accept_connection_run) end
   if iroh_tag_quic_try_accept_connection ~= 0xffffffff then
     io_eff(iroh_tag_quic_try_accept_connection,try_accept_connection_run)

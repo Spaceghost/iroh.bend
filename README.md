@@ -75,6 +75,9 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   UDP socket and a pinned relay peer. For an incoming connection, pass the
   port from `Direct.bind` to `Path.start`. To dial, pass `0` and connect
   through the port `Path.start` returns. Call `Path.stop` to release the bridge.
+  `Path.dial_with_fallback` tries a supplied direct address within the caller's
+  handshake budget, then tries the supplied relay. Keep the returned bridge
+  until the relayed QUIC connection closes.
 - [Relay server](src/relay_server.bend) accepts v1/v2 WebSocket upgrades,
   authenticates clients with TLS-exporter proofs or fresh Ed25519 challenges,
   and routes datagrams using the authenticated sender identity. It probes
@@ -155,4 +158,4 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons and per-connection disconnect events. Callbacks can inspect standard headers and individual custom headers. Receive limits throttle each connection at the relay message layer, support live updates, and send v2 notices. Full values for repeated custom headers and transport-byte accounting are pending. |
 | Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. Native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
-| Connectivity | Two Bend endpoints exchanged a pinned QUIC stream through the upstream Iroh relay over WS and WSS. NAT traversal, automatic relay fallback, and path migration are pending. |
+| Connectivity | Two Bend endpoints exchanged a pinned QUIC stream through the upstream Iroh relay over WS and WSS. Initial connection setup falls back to a configured relay when a supplied direct address fails or times out. NAT traversal, automatic address and relay selection, and path migration are pending. |
