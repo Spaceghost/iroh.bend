@@ -51,26 +51,128 @@ def test(+url: String, receiver_version: U32, sender_version: U32) -> IO(Unit):
     got : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame, Client.receive(receiver))
     complete(got, sent)
 
-def replacement_notice(frame: Wire.Frame) -> IO(Unit):
+def checked(conn: Client.Connection, ok: Bool) -> IO(Client.Connection):
+  match ok:
+    case True{}:
+      IO.pure(Client.Connection,conn)
+    case False{}:
+      IO.die(Client.Connection,1,"relay delivered an unexpected lifecycle frame")
+
+def matches_frame(frame: Wire.Frame, tag: U32, bytes: List<&2,U32>) -> Bool:
   match frame:
-    case Wire.Message{13,[1]}:
-      IO.print("PASS relay notified the previous connection for the same endpoint")
+    case Wire.Message{kind,payload}:
+      U32.is_eq(kind,tag) && equal(payload,bytes)
     case _:
-      IO.die(Unit,1,"relay did not notify the replaced connection")
+      False{}
 
-def replaced(received: Client.Connection & Wire.Frame, new: Client.Connection) -> IO(Unit):
-  (old,frame) = received
-  do IO<Unit>:
-    Client.close(old)
-    Client.close(new)
-    replacement_notice(frame)
+def check_frame(received: Client.Connection & Wire.Frame, tag: U32, bytes: List<&2,U32>) -> IO(Client.Connection):
+  (next,frame) = received
+  checked(next,matches_frame(frame,tag,bytes))
 
-def duplicate(+url: String) -> IO(Unit):
+def expect(conn: Client.Connection, tag: U32, bytes: List<&2,U32>) -> IO(Client.Connection):
+  do IO<Client.Connection>:
+    response : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(conn))
+    check_frame(response,tag,bytes)
+
+def forward_to(sender: Client.Connection, receiver: Client.Connection, dest: List<&2,U32>,
+    from: List<&2,U32>) -> IO(Client.Connection & Client.Connection):
+  do IO<Client.Connection & Client.Connection>:
+    sent : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(sender,dest,0,0,payload()))
+    got : Client.Connection <- expect(receiver,6,List.append(&2,U32,from,Con{0,payload()}))
+    return (sent,got)
+
+def text_bytes(chars: List<&2,Char>) -> List<&2,U32>:
+  match chars:
+    case Nil{}:
+      []
+    case Con{c,rest}:
+      Con{Char.to_u32(c),text_bytes(rest)}
+
+def final_departure(recovered: Client.Connection & Client.Connection) -> IO(Unit):
+  (recipient,last) = recovered
   do IO<Unit>:
-    old : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
-    new : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
-    received : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(old))
-    replaced(received,new)
+    Client.close(last)
+    notified : Client.Connection <- expect(recipient,8,peer())
+    Client.close(notified)
+    IO.print("PASS relay routes to the active session, promotes a duplicate, and notifies the recipient on final departure")
+
+def recovery(outbound: Client.Connection & Client.Connection, inactive: Client.Connection, status_tag: U32,
+    healthy: List<&2,U32>) -> IO(Unit):
+  (leaving,waiting) = outbound
+  do IO<Unit>:
+    Client.close(leaving)
+    restored : Client.Connection <- expect(inactive,status_tag,healthy)
+    barrier : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(waiting,source(),0,0,payload()))
+    observer : Client.Connection <- expect(barrier,6,List.append(&2,U32,source(),Con{0,payload()}))
+    recovered : Client.Connection & Client.Connection <- forward_to(observer,restored,peer(),source())
+    final_departure(recovered)
+
+def record_delivery(incoming: Client.Connection & Client.Connection, inactive: Client.Connection,
+    status_tag: U32, healthy: List<&2,U32>) -> IO(Unit):
+  (watcher,active) = incoming
+  do IO<Unit>:
+    outbound : Client.Connection & Client.Connection <- forward_to(active,watcher,source(),peer())
+    recovery(outbound,inactive,status_tag,healthy)
+
+def lifecycle(+url: String, +version: U32, +status_tag: U32, standby: List<&2,U32>,
+    healthy: List<&2,U32>) -> IO(Unit):
+  do IO<Unit>:
+    old : Client.Connection <- IO.try(Client.Connection,
+      Client.connect_with_version(url,List.replicate(U32,32n,42),version))
+    recent : Client.Connection <- IO.try(Client.Connection,
+      Client.connect_with_version(url,List.replicate(U32,32n,42),version))
+    observer : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    inactive : Client.Connection <- expect(old,status_tag,standby)
+    incoming : Client.Connection & Client.Connection <- forward_to(observer,recent,peer(),source())
+    record_delivery(incoming,inactive,status_tag,healthy)
+
+def duplicate(url: String) -> IO(Unit):
+  lifecycle(url,2,13,[1],[0])
+
+def duplicate_v1(url: String) -> IO(Unit):
+  lifecycle(url,1,11,
+    text_bytes(String.to_list("Another endpoint connected with the same endpoint id. No more messages will be received.")),
+    text_bytes(String.to_list("The connection is healthy and has recovered from previous problems")))
+
+def require_closed(closed: Result<&1,&1,U32 & String,Client.Connection & Wire.Frame>) -> IO(Unit):
+  match closed:
+    case Fail{_}:
+      IO.pure(Unit,Unit{})
+    case Done{_}:
+      IO.die(Unit,1,"relay kept the connection with an unmatched pong")
+
+def answer_payload(nonce: List<&2,U32>, correct: Bool) -> List<&2,U32>:
+  match nonce correct:
+    case Con{head,tail} False{}:
+      Con{U32.xor(head,1),tail}
+    case _ _:
+      nonce
+
+def answer_ping_frame(conn: Client.Connection, frame: Wire.Frame, correct: Bool) -> IO(Client.Connection):
+  match frame:
+    case Wire.Message{9,nonce}:
+      IO.try(Client.Connection,Client.pong(conn,answer_payload(nonce,correct)))
+    case _:
+      IO.die(Client.Connection,1,"expected relay keepalive ping")
+
+def answer_ping(message: Client.Connection & Wire.Frame, correct: Bool) -> IO(Client.Connection):
+  (conn,frame) = message
+  answer_ping_frame(conn,frame,correct)
+
+def heartbeat(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    live : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    silent : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    live_probe : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(live))
+    replied : Client.Connection <- answer_ping(live_probe,True{})
+    silent_probe : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(silent))
+    mismatched : Client.Connection <- answer_ping(silent_probe,False{})
+    lost : Result<&1,&1,U32 & String,Client.Connection & Wire.Frame> <- Client.receive(mismatched)
+    require_closed(lost)
+    sent : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(replied,peer(),0,0,payload()))
+    kept : Client.Connection <- expect(sent,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    Client.close(kept)
+    IO.print("PASS relay keepalive accepts the matching pong and closes the connection with a mismatched pong")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
@@ -78,6 +180,10 @@ def run(args: List<String>) -> IO(Unit):
       test(url, 2, 2)
     case Con{_,Con{url,Con{"duplicate",Nil{}}}}:
       duplicate(url)
+    case Con{_,Con{url,Con{"duplicate-v1",Nil{}}}}:
+      duplicate_v1(url)
+    case Con{_,Con{url,Con{"heartbeat",Nil{}}}}:
+      heartbeat(url)
     case Con{_,Con{url,Con{"mixed",Nil{}}}}:
       test(url, 1, 2)
     case Con{_,Con{url,Con{_,Nil{}}}}:

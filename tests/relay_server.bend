@@ -15,7 +15,7 @@ def run_server(bound: Relay.Server & U32) -> IO(Unit):
   (server,port) = bound
   do IO<Unit>:
     IO.print(U32.show(port))
-    drive(10000n,server)
+    drive(30000n,server)
 
 def serve(cert: String, key: String) -> IO(Unit):
   do IO<Unit>:

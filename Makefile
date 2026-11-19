@@ -176,7 +176,7 @@ $(BUILD)/iroh-bend-quic-streams: $(BUILD)/quic-streams.c
 
 .PHONY: check-relay-server
 UPSTREAM_RELAY_CLIENT ?=
-RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_exporter.bend src/relay_server.bend src/relay_server_socket.bend
+RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_exporter.bend src/relay_heartbeat.bend src/relay_server.bend src/relay_server_socket.bend
 
 check-relay-server: $(BUILD)/iroh-bend-relay-server $(BUILD)/iroh-bend-relay-live
 	tests/relay_server.sh "$(BUILD)/iroh-bend-relay-server" "$(BUILD)/iroh-bend-relay-live" "$(UPSTREAM_RELAY_CLIENT)"

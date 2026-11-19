@@ -46,11 +46,13 @@ exercise() {
     timeout 8 "$client" "$relay"
     timeout 8 "$client" "$relay" mixed
     timeout 8 "$client" "$relay" duplicate
+    timeout 8 "$client" "$relay" duplicate-v1
 }
 
 start ws
 python3 tests/relay_server_auth.py "$port"
 exercise ws
+timeout 30 "$client" "ws://127.0.0.1:$port/relay" heartbeat
 if [ -n "$upstream" ]; then
     timeout 12 "$upstream" "http://127.0.0.1:$port"
 fi

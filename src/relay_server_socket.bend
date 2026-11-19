@@ -17,6 +17,9 @@ def relay_bind(host: String, port: U32, cert: String, key: String)
 def relay_poll(server: ServerSocket) -> IO(ServerSocket & SocketEvent):
   import "./relay_server_socket.c"
 
+def relay_millis() -> IO(U32):
+  import "./relay_server_socket.c"
+
 def relay_queue(server: ServerSocket, id: U32, bytes: List<&2,U32>)
     -> IO(ServerSocket & Bool):
   import "./relay_server_socket.c"

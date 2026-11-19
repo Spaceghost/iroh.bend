@@ -13,7 +13,7 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'relay_bind','relay_poll','relay_queue','relay_authorized','relay_kick','relay_stop',
+for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material'} do
@@ -43,6 +43,7 @@ local iroh_srv_Some: uint32 <cimport,nodecl>
 local iroh_srv_None: uint32 <cimport,nodecl>
 local iroh_srv_relay_client_auth_header: uint32 <cimport,nodecl>
 local iroh_srv_relay_export_keying_material: uint32 <cimport,nodecl>
+local iroh_srv_relay_millis: uint32 <cimport,nodecl>
 local Env <cimport,nodecl> = @record{mem: *[0]uint64}
 local IoWork <cimport,nodecl> = @record{}
 local Term = @uint64
@@ -494,6 +495,10 @@ local function nonce_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_done(e,io_list(e,(@cstring)(&nonce[0]),16))
 end
 
+local function millis_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  return (@uint32)(io_tick() // 1000000)
+end
+
 local function register() <cexport,codename 'iroh_register_relay_server',cattribute 'constructor'>
   if iroh_srv_relay_client_auth_header ~= 0xffffffff then
     io_eff(iroh_srv_relay_client_auth_header,auth_header_run)
@@ -503,6 +508,7 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   end
   if iroh_srv_relay_bind ~= 0xffffffff then io_eff(iroh_srv_relay_bind,bind_run) end
   if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end
+  if iroh_srv_relay_millis ~= 0xffffffff then io_eff(iroh_srv_relay_millis,millis_run) end
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end
   if iroh_srv_relay_authorized ~= 0xffffffff then io_eff(iroh_srv_relay_authorized,authorized_run) end
   if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end
