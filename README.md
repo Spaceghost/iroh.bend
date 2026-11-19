@@ -70,6 +70,12 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   and notifies datagram recipients when the last session for a sender closes.
   Supply certificate and private key paths for WSS, or two empty strings for
   WS. Drive `step` regularly and release the listener with `stop`.
+- [Relay receive limits](src/relay_rate.bend) are configured at bind time
+  through `Relay.bind_configured`. Set a rate of at least 10 bytes per second
+  and an optional positive burst capacity. The default burst is one 100 ms
+  refill. Bend charges authenticated binary WebSocket message payloads,
+  pauses reads when a connection exhausts its bucket, and sends a single
+  rate-limit notice to v2 clients.
 - [Relay access control](src/relay_access.bend) supplies endpoint allowlists,
   denylists, shared tokens, and custom callbacks through
   `Relay.bind_with_access`. The custom callback gets authenticated endpoint
@@ -121,7 +127,7 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | --- | --- |
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
-| Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons and per-connection disconnect events. Arbitrary request headers for custom policies and per-client receive rate limiting are pending. |
+| Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons and per-connection disconnect events. Bind-time receive limits throttle each connection at the relay message layer and send v2 notices. Arbitrary request headers, transport-byte accounting, and live receive-limit changes are pending. |
 | Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. Native QUIC datagrams, 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish and resolve passed against the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. The upstream Iroh DNS fallback resolves the replicated Bend publication. IPv6 DHT routing and automatic republishing are pending. |
 | Connectivity | NAT traversal, automatic relay fallback, and path migration are pending. |

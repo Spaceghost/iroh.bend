@@ -3,6 +3,7 @@ import ../src/relay_server.bend as Relay
 import ../src/relay_access.bend as Access
 import ../src/relay_server_socket.bend as Net
 import ../src/relay.bend as Wire
+import ../src/relay_rate.bend as Rate
 
 def drive(fuel: Nat, server: Relay.Server) -> IO(Unit):
   match fuel:
@@ -23,6 +24,12 @@ def run_server(bound: Relay.Server & U32) -> IO(Unit):
 def serve(cert: String, key: String, access: Access.Control) -> IO(Unit):
   do IO<Unit>:
     bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,Relay.bind_with_access("127.0.0.1",0,cert,key,access))
+    run_server(bound)
+
+def serve_limited(cert: String, key: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
+      Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{200,Some{20}}))
     run_server(bound)
 
 def relay_path(path: List<&2,U32>) -> Bool:
@@ -95,6 +102,10 @@ def run(args: List<String>) -> IO(Unit):
       serve("","",access_fixture(20n))
     case Con{_,Con{"shared-token",Nil{}}}:
       serve("","",Access.WithPolicy{Access.SharedTokens{[[97,108,108,111,119]]}})
+    case Con{_,Con{"rate",Nil{}}}:
+      serve_limited("","")
+    case Con{_,Con{"rate",Con{cert,Con{key,Nil{}}}}}:
+      serve_limited(cert,key)
     case Con{_,Con{"policy-test",Nil{}}}:
       policy_test()
     case Con{_,Con{"access",Con{cert,Con{key,Nil{}}}}}:

@@ -6,17 +6,18 @@ import ./handshake.bend as Handshake
 import ./relay.bend as Wire
 import ./relay_heartbeat.bend as Health
 import ./relay_access.bend as Access
+import ./relay_rate.bend as Rate
 
 type Client is Data:
   Challenged{id: U32, version: Wire.Version, nonce: List<&2,U32>}
-  Authorized{id: U32, version: Wire.Version, key: List<&2,U32>, heartbeat: Health.Heartbeat}
+  Authorized{id: U32, version: Wire.Version, key: List<&2,U32>, heartbeat: Health.Heartbeat, rate: Rate.Bucket}
 
 # Delivery history belongs to the endpoint and survives session promotion.
 type Deliveries is Data:
   Delivered{sender: List<&2,U32>, recipients: List<&2,List<&2,U32>>}
 
 type Clients is Data:
-  Registry{sessions: List<&2,Client>, deliveries: List<&2,Deliveries>}
+  Registry{sessions: List<&2,Client>, deliveries: List<&2,Deliveries>, limits: Rate.Limits}
 
 type State is Type:
   Serving{socket: Net.ServerSocket, clients: Clients}
@@ -30,7 +31,7 @@ def id_of(client: Client) -> U32:
   match client:
     case Challenged{id,_,_}:
       id
-    case Authorized{id,_,_,_}:
+    case Authorized{id,_,_,_,_}:
       id
 
 def bytes_equal(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
@@ -60,8 +61,8 @@ def by_key(clients: List<&2,Client>, +key: List<&2,U32>) -> Maybe<&2,Client>:
   match clients:
     case Nil{}:
       None{}
-    case Con{Authorized{+id,+version,+public,heartbeat},rest}:
-      select(Authorized{id,version,public,heartbeat},by_key(rest,key),bytes_equal(key,public))
+    case Con{Authorized{+id,+version,+public,heartbeat,rate},rest}:
+      select(Authorized{id,version,public,heartbeat,rate},by_key(rest,key),bytes_equal(key,public))
     case Con{_,rest}:
       by_key(rest,key)
 
@@ -80,20 +81,20 @@ def without(clients: List<&2,Client>, +id: U32) -> List<&2,Client>:
       filter(client,without(rest,id),U32.is_eq(id_of(client),id))
 
 def find_id(clients: Clients, id: U32) -> Maybe<&2,Client>:
-  Registry{sessions,_} = clients
+  Registry{sessions,_,_} = clients
   by_id(sessions,id)
 
 def find_key(clients: Clients, key: List<&2,U32>) -> Maybe<&2,Client>:
-  Registry{sessions,_} = clients
+  Registry{sessions,_,_} = clients
   by_key(sessions,key)
 
 def add_client(clients: Clients, client: Client) -> Clients:
-  Registry{sessions,deliveries} = clients
-  Registry{Con{client,sessions},deliveries}
+  Registry{sessions,deliveries,limits} = clients
+  Registry{Con{client,sessions},deliveries,limits}
 
 def drop_client(clients: Clients, id: U32) -> Clients:
-  Registry{sessions,deliveries} = clients
-  Registry{without(sessions,id),deliveries}
+  Registry{sessions,deliveries,limits} = clients
+  Registry{without(sessions,id),deliveries,limits}
 
 def replace_session(replacement: List<&2,Client>, remainder: Unit -> List<&2,Client>, matched: Bool)
     -> List<&2,Client>:
@@ -111,8 +112,8 @@ def replace_at(sessions: List<&2,Client>, +id: U32, +client: Client) -> List<&2,
       replace_session(Con{client,rest},_ => Con{head,replace_at(rest,id,client)},U32.is_eq(id,id_of(head)))
 
 def update_client(clients: Clients, +client: Client) -> Clients:
-  Registry{sessions,deliveries} = clients
-  Registry{replace_at(sessions,id_of(client),client),deliveries}
+  Registry{sessions,deliveries,limits} = clients
+  Registry{replace_at(sessions,id_of(client),client),deliveries,limits}
 
 def contains_key(keys: List<&2,List<&2,U32>>, +wanted: List<&2,U32>) -> Bool:
   match keys:
@@ -175,30 +176,42 @@ def version(number: U32) -> Wire.Version:
     case _:
       Wire.V2{}
 
-def capture_requests(socket: Net.ServerSocket, port: U32, access: Access.Control)
+def capture_requests(socket: Net.ServerSocket, port: U32, access: Access.Control, limits: Rate.Limits)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):
   match access:
     case Access.AllowAll{}:
       IO.pure(Result<&1,&1,U32 & String,Server & U32>,
-        Done{(Relay{Serving{socket,Registry{[],[]}},Access.AllowAll{}},port)})
+        Done{(Relay{Serving{socket,Registry{[],[],limits}},Access.AllowAll{}},port)})
     case _:
       do IO<Result<&1,&1,U32 & String,Server & U32>>:
         enabled : Net.ServerSocket <- Net.relay_enable_request_details(socket)
-        return Done{(Relay{Serving{enabled,Registry{[],[]}},access},port)}
+        return Done{(Relay{Serving{enabled,Registry{[],[],limits}},access},port)}
 
-def attached(result: Result<&1,&1,U32 & String,Net.ServerSocket & U32>, access: Access.Control)
+def attached(result: Result<&1,&1,U32 & String,Net.ServerSocket & U32>, access: Access.Control, limits: Rate.Limits)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):
   match result:
     case Done{(socket,port)}:
-      capture_requests(socket,port,access)
+      capture_requests(socket,port,access,limits)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Server & U32>,Fail{error})
 
+def bind_checked(host: String, port: U32, cert: String, key: String, access: Access.Control,
+    limits: Rate.Limits, valid: Bool) -> IO(Result<&1,&1,U32 & String,Server & U32>):
+  match valid:
+    case True{}:
+      do IO<Result<&1,&1,U32 & String,Server & U32>>:
+        result : Result<&1,&1,U32 & String,Net.ServerSocket & U32> <- Net.relay_bind(host,port,cert,key)
+        attached(result,access,limits)
+    case False{}:
+      IO.pure(Result<&1,&1,U32 & String,Server & U32>,Fail{(22,"invalid relay receive limit")})
+
+def bind_configured(host: String, port: U32, cert: String, key: String, access: Access.Control,
+    +limits: Rate.Limits) -> IO(Result<&1,&1,U32 & String,Server & U32>):
+  bind_checked(host,port,cert,key,access,limits,Rate.valid(limits))
+
 def bind_with_access(host: String, port: U32, cert: String, key: String, access: Access.Control)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):
-  do IO<Result<&1,&1,U32 & String,Server & U32>>:
-    result : Result<&1,&1,U32 & String,Net.ServerSocket & U32> <- Net.relay_bind(host,port,cert,key)
-    attached(result,access)
+  bind_configured(host,port,cert,key,access,Rate.Unlimited{})
 
 def bind(host: String, port: U32, cert: String, key: String)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):
@@ -212,7 +225,7 @@ def disconnect_all(sessions: List<&2,Client>, access: Access.Control) -> IO(Unit
   match sessions:
     case Nil{}:
       IO.pure(Unit,Unit{})
-    case Con{Authorized{id,_,key,_},rest}:
+    case Con{Authorized{id,_,key,_,_},rest}:
       do IO<Unit>:
         reply : Access.Control & Access.Decision <- Access.process(access,Access.Disconnected{id,key})
         disconnect_all(rest,controller(reply))
@@ -221,11 +234,11 @@ def disconnect_all(sessions: List<&2,Client>, access: Access.Control) -> IO(Unit
 
 def stop_state(state: State, access: Access.Control) -> IO(Unit):
   match state:
-    case Serving{socket,Registry{sessions,_}}:
+    case Serving{socket,Registry{sessions,_,_}}:
       do IO<Unit>:
         Net.relay_stop(socket)
         disconnect_all(sessions,access)
-    case AwaitingAccess{socket,Registry{sessions,_},_,_,_}:
+    case AwaitingAccess{socket,Registry{sessions,_,_},_,_,_}:
       do IO<Unit>:
         Net.relay_stop(socket)
         disconnect_all(sessions,access)
@@ -262,7 +275,7 @@ def notify(socket: Net.ServerSocket, id: U32, protocol: Wire.Version, tag: U32, 
 def notify_recipient(socket: Net.ServerSocket, client: Maybe<&2,Client>, sender: List<&2,U32>)
     -> IO(Net.ServerSocket):
   match client:
-    case Some{Authorized{id,protocol,_,_}}:
+    case Some{Authorized{id,protocol,_,_,_}}:
       notify(socket,id,protocol,8,sender)
     case _:
       IO.pure(Net.ServerSocket,socket)
@@ -287,23 +300,23 @@ def status_text(chars: List<&2,Char>) -> List<&2,U32>:
 def status(socket: Net.ServerSocket, client: Maybe<&2,Client>, +code: U32, text: String)
     -> IO(Net.ServerSocket):
   match client:
-    case Some{Authorized{id,Wire.V1{},_,_}}:
+    case Some{Authorized{id,Wire.V1{},_,_,_}}:
       notify(socket,id,Wire.V1{},11,status_text(String.to_list(text)))
-    case Some{Authorized{id,Wire.V2{},_,_}}:
+    case Some{Authorized{id,Wire.V2{},_,_,_}}:
       notify(socket,id,Wire.V2{},13,[code])
     case _:
       IO.pure(Net.ServerSocket,socket)
 
-def process_departure(socket: Net.ServerSocket, +sessions: List<&2,Client>, sender: List<&2,U32>,
+def process_departure(socket: Net.ServerSocket, +sessions: List<&2,Client>, sender: List<&2,U32>, limits: Rate.Limits,
     delivery: List<&2,Deliveries> & List<&2,List<&2,U32>>) -> IO(State):
   (remaining,recipients) = delivery
   do IO<State>:
     next : Net.ServerSocket <- notify_departure(recipients,socket,sessions,sender)
-    return Serving{next,Registry{sessions,remaining}}
+    return Serving{next,Registry{sessions,remaining,limits}}
 
 def last_departure(socket: Net.ServerSocket, clients: Clients, +sender: List<&2,U32>) -> IO(State):
-  Registry{sessions,deliveries} = clients
-  process_departure(socket,sessions,sender,take_delivery(deliveries,sender))
+  Registry{sessions,deliveries,limits} = clients
+  process_departure(socket,sessions,sender,limits,take_delivery(deliveries,sender))
 
 def promote_or_depart(socket: Net.ServerSocket, clients: Clients, sender: List<&2,U32>,
     +replacement: Maybe<&2,Client>) -> IO(State):
@@ -326,14 +339,14 @@ def remove_active(socket: Net.ServerSocket, +clients: Clients, +sender: List<&2,
 
 def currently_active(previous: Maybe<&2,Client>, id: U32) -> Bool:
   match previous:
-    case Some{Authorized{active,_,_,_}}:
+    case Some{Authorized{active,_,_,_,_}}:
       U32.is_eq(active,id)
     case _:
       False{}
 
 def unregister(socket: Net.ServerSocket, +clients: Clients, +id: U32, gone: Maybe<&2,Client>) -> IO(State):
   match gone:
-    case Some{Authorized{_,_,+key,_}}:
+    case Some{Authorized{_,_,+key,_,_}}:
       do IO<State>:
         next : State <- remove_active(socket,drop_client(clients,id),key,currently_active(find_key(clients,key),id))
         return Ended{next,id,key}
@@ -372,18 +385,26 @@ def send_frame(socket: Net.ServerSocket, clients: Clients, id: U32, wire: Wire.E
     queued : Net.ServerSocket & Bool <- queue_frame(socket,id,wire)
     return after_send(queued,clients)
 
-def confirmed(queued: Net.ServerSocket & Bool, clients: Clients, +id: U32,
+def configured_limits(clients: Clients) -> Rate.Limits:
+  Registry{_,_,limits} = clients
+  limits
+
+def new_client(+clients: Clients, +id: U32, protocol: Wire.Version, key: List<&2,U32>,
+    +now: U32, random: U32) -> Clients:
+  add_client(drop_client(clients,id),
+    Authorized{id,protocol,key,Health.initial(now,random),Rate.initial(configured_limits(clients),now)})
+
+def confirmed(queued: Net.ServerSocket & Bool, +clients: Clients, +id: U32,
     protocol: Wire.Version, +key: List<&2,U32>, +previous: Maybe<&2,Client>) -> IO(State):
   match queued:
     case (socket,True{}):
       do IO<State>:
-        marked : Net.ServerSocket <- Net.relay_authorized(socket,id)
+        marked : Net.ServerSocket <- Net.relay_authorized_with_meter(socket,id,Rate.metered(configured_limits(clients)))
         next : Net.ServerSocket <- status(marked,previous,1,
           "Another endpoint connected with the same endpoint id. No more messages will be received.")
         random : Result<&1,&1,U32 & String,U32> <- IO.random_u32()
         now : U32 <- Net.relay_millis()
-        return Serving{next,add_client(drop_client(clients,id),Authorized{id,protocol,key,
-          Health.initial(now,Result.default(&1,&1,U32 & String,U32,random,id))})}
+        return Serving{next,new_client(clients,id,protocol,key,now,Result.default(&1,&1,U32 & String,U32,random,id))}
     case (socket,False{}):
       do IO<State>:
         next : State <- kick(socket,id,0,clients)
@@ -466,15 +487,15 @@ def forwarded(queued: Net.ServerSocket & Bool, clients: Clients, sender: List<&2
     receiver: List<&2,U32>) -> State:
   match queued:
     case (socket,True{}):
-      Registry{sessions,deliveries} = clients
-      Serving{socket,Registry{sessions,add_delivery(deliveries,sender,receiver)}}
+      Registry{sessions,deliveries,limits} = clients
+      Serving{socket,Registry{sessions,add_delivery(deliveries,sender,receiver),limits}}
     case (socket,False{}):
       Serving{socket,clients}
 
 def forward(socket: Net.ServerSocket, clients: Clients, destination: Maybe<&2,Client>,
     +sender: List<&2,U32>, ecn: U32, segment: U32, data: List<&2,U32>) -> IO(State):
   match destination:
-    case Some{Authorized{id,version,key,_}}:
+    case Some{Authorized{id,version,key,_,_}}:
       do IO<State>:
         queued : Net.ServerSocket & Bool <- queue_frame(socket,id,
           Wire.encode_datagram(Wire.ToClient{},version,sender,ecn,segment,data))
@@ -509,17 +530,49 @@ def received_activity(timer: Health.Heartbeat, now: U32, frame: Wire.Frame) -> H
       Health.touch(timer,now)
 
 def authenticated_frame(socket: Net.ServerSocket, clients: Clients, +id: U32, +version: Wire.Version,
-    +sender: List<&2,U32>, timer: Health.Heartbeat, now: U32, +frame: Wire.Frame) -> IO(State):
-  updated = update_client(clients,Authorized{id,version,sender,received_activity(timer,now,frame)})
+    +sender: List<&2,U32>, timer: Health.Heartbeat, now: U32, +frame: Wire.Frame, bucket: Rate.Bucket) -> IO(State):
+  updated = update_client(clients,Authorized{id,version,sender,received_activity(timer,now,frame),bucket})
   relay_frame(socket,updated,id,version,sender,frame)
+
+def rate_notice(socket: Net.ServerSocket, id: U32, version: Wire.Version, first: Bool)
+    -> IO(Net.ServerSocket):
+  match version first:
+    case Wire.V2{} True{}:
+      notify(socket,id,Wire.V2{},13,[2])
+    case _ _:
+      IO.pure(Net.ServerSocket,socket)
+
+def metered_frame(socket: Net.ServerSocket, clients: Clients, +id: U32, +version: Wire.Version,
+    sender: List<&2,U32>, timer: Health.Heartbeat, now: U32, bytes: List<&2,U32>, charge: Rate.Charge)
+    -> IO(State):
+  match charge:
+    case Rate.KeepReading{bucket}:
+      do IO<State>:
+        opened : Net.ServerSocket <- Net.relay_resume_rx(socket,id)
+        authenticated_frame(opened,clients,id,version,sender,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
+    case Rate.HoldReading{bucket,first}:
+      do IO<State>:
+        notified : Net.ServerSocket <- rate_notice(socket,id,version,first)
+        authenticated_frame(notified,clients,id,version,sender,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
+
+def charge_message(socket: Net.ServerSocket, clients: Clients, id: U32, +version: Wire.Version,
+    sender: List<&2,U32>, timer: Health.Heartbeat, +now: U32, +bytes: List<&2,U32>, bucket: Rate.Bucket)
+    -> IO(State):
+  match bucket:
+    case Rate.Unmetered{}:
+      authenticated_frame(socket,clients,id,version,sender,timer,now,
+        Wire.decode(Wire.ToRelay{},version,bytes),Rate.Unmetered{})
+    case _:
+      metered_frame(socket,clients,id,version,sender,timer,now,bytes,
+        Rate.consume(bucket,now,U32.from_nat(List.length(&2,U32,bytes))))
 
 def handle_bytes(socket: Net.ServerSocket, clients: Clients, match_client: Maybe<&2,Client>,
     bytes: List<&2,U32>, now: U32) -> IO(State):
   match match_client:
     case Some{Challenged{id,version,nonce}}:
       verify(socket,clients,id,version,Handshake.decode(bytes),nonce)
-    case Some{Authorized{id,+version,key,timer}}:
-      authenticated_frame(socket,clients,id,version,key,timer,now,Wire.decode(Wire.ToRelay{},version,bytes))
+    case Some{Authorized{id,version,key,timer,bucket}}:
+      charge_message(socket,clients,id,version,key,timer,now,bytes,bucket)
     case None{}:
       IO.pure(State,Serving{socket,clients})
 
@@ -543,53 +596,62 @@ def step_event(result: Net.ServerSocket & Net.SocketEvent, clients: Clients, now
 type Due is Data:
   NoDeadline{}
   MissedPong{id: U32}
-  NeedPing{id: U32, version: Wire.Version, key: List<&2,U32>, timer: Health.Heartbeat}
+  ResumeInput{client: Client}
+  NeedPing{id: U32, version: Wire.Version, key: List<&2,U32>, timer: Health.Heartbeat, bucket: Rate.Bucket}
 
 def deadline(action: Health.Action, id: U32, version: Wire.Version, key: List<&2,U32>,
-    timer: Health.Heartbeat, rest: Unit -> Due) -> Due:
+    timer: Health.Heartbeat, bucket: Rate.Bucket, rest: Unit -> Due) -> Due:
   match action:
     case Health.WaitForTraffic{}:
       rest(Unit{})
     case Health.ClosePeer{}:
       MissedPong{id}
     case Health.SendProbe{}:
-      NeedPing{id,version,key,timer}
+      NeedPing{id,version,key,timer,bucket}
+
+def rx_deadline(ready: Bool, client: Client, rest: Unit -> Due) -> Due:
+  match ready:
+    case True{}:
+      ResumeInput{client}
+    case False{}:
+      rest(Unit{})
 
 def due(sessions: List<&2,Client>, +now: U32) -> Due:
   match sessions:
     case Nil{}:
       NoDeadline{}
-    case Con{Authorized{id,version,key,+timer},rest}:
-      deadline(Health.action(timer,now),id,version,key,timer,_ => due(rest,now))
+    case Con{Authorized{+id,+version,+key,+timer,+bucket},rest}:
+      rx_deadline(Rate.ready(now,bucket),Authorized{id,version,key,timer,Rate.resume(bucket)},
+        _ => deadline(Health.action(timer,now),id,version,key,timer,bucket,_ => due(rest,now)))
     case Con{_,rest}:
       due(rest,now)
 
 def ping_queued(queued: Net.ServerSocket & Bool, clients: Clients, +id: U32, version: Wire.Version,
-    key: List<&2,U32>, next: Health.Heartbeat) -> IO(State):
+    key: List<&2,U32>, next: Health.Heartbeat, bucket: Rate.Bucket) -> IO(State):
   match queued:
     case (socket,True{}):
-      IO.pure(State,Serving{socket,update_client(clients,Authorized{id,version,key,next})})
+      IO.pure(State,Serving{socket,update_client(clients,Authorized{id,version,key,next,bucket})})
     case (socket,False{}):
       kick(socket,id,0,clients)
 
 def ping_bytes(socket: Net.ServerSocket, clients: Clients, +id: U32, +protocol: Wire.Version,
-    key: List<&2,U32>, timer: Health.Heartbeat, now: U32, random: U32, parts: Wire.Split) -> IO(State):
+    key: List<&2,U32>, timer: Health.Heartbeat, bucket: Rate.Bucket, now: U32, random: U32, parts: Wire.Split) -> IO(State):
   match parts:
     case Wire.Prefix{+nonce,_}:
       do IO<State>:
         queued : Net.ServerSocket & Bool <- queue_frame(socket,id,Wire.encode(Wire.ToClient{},protocol,9,nonce))
-        ping_queued(queued,clients,id,protocol,key,Health.start(timer,now,random,nonce))
+        ping_queued(queued,clients,id,protocol,key,Health.start(timer,now,random,nonce),bucket)
     case _:
       kick(socket,id,0,clients)
 
 def emit_ping(socket: Net.ServerSocket, clients: Clients, +id: U32, protocol: Wire.Version,
-    key: List<&2,U32>, timer: Health.Heartbeat, now: U32,
+    key: List<&2,U32>, timer: Health.Heartbeat, bucket: Rate.Bucket, now: U32,
     random: Result<&1,&1,U32 & String,List<&2,U32>>) -> IO(State):
   match random:
     case Done{bytes}:
       do IO<State>:
         jitter : Result<&1,&1,U32 & String,U32> <- IO.random_u32()
-        ping_bytes(socket,clients,id,protocol,key,timer,now,Result.default(&1,&1,U32 & String,U32,jitter,id),
+        ping_bytes(socket,clients,id,protocol,key,timer,bucket,now,Result.default(&1,&1,U32 & String,U32,jitter,id),
           Wire.split_peer(8n,bytes,[]))
     case Fail{_}:
       kick(socket,id,0,clients)
@@ -600,15 +662,19 @@ def timers(socket: Net.ServerSocket, clients: Clients, now: U32, action: Due) ->
       IO.pure(State,Serving{socket,clients})
     case MissedPong{id}:
       kick(socket,id,0,clients)
-    case NeedPing{id,protocol,key,timer}:
+    case ResumeInput{+client}:
+      do IO<State>:
+        resumed : Net.ServerSocket <- Net.relay_resume_rx(socket,id_of(client))
+        return Serving{resumed,update_client(clients,client)}
+    case NeedPing{id,protocol,key,timer,bucket}:
       do IO<State>:
         nonce : Result<&1,&1,U32 & String,List<&2,U32>> <- Net.relay_nonce()
-        emit_ping(socket,clients,id,protocol,key,timer,now,nonce)
+        emit_ping(socket,clients,id,protocol,key,timer,bucket,now,nonce)
 
 def check_timers(state: State, +now: U32) -> IO(State):
   match state:
     case Serving{socket,+clients}:
-      Registry{sessions,_} = clients
+      Registry{sessions,_,_} = clients
       timers(socket,clients,now,due(sessions,now))
     case _:
       IO.pure(State,state)

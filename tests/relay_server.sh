@@ -129,3 +129,13 @@ stop
 
 start wss-access access "$scratch/cert.pem" "$scratch/key.pem"
 exercise_access wss
+stop
+
+start rate-ws rate
+timeout 8 "$client" "ws://127.0.0.1:$port/relay" rate
+timeout 8 "$client" "ws://127.0.0.1:$port/relay" rate-v1
+stop
+
+start rate-wss rate "$scratch/cert.pem" "$scratch/key.pem"
+timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate
+timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate-paced

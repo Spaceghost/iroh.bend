@@ -13,7 +13,7 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized','relay_kick','relay_stop',
+for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter','relay_resume_rx','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayLeft',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material',
@@ -26,7 +26,8 @@ end
 local iroh_srv_relay_bind: uint32 <cimport,nodecl>
 local iroh_srv_relay_poll: uint32 <cimport,nodecl>
 local iroh_srv_relay_queue: uint32 <cimport,nodecl>
-local iroh_srv_relay_authorized: uint32 <cimport,nodecl>
+local iroh_srv_relay_authorized_with_meter: uint32 <cimport,nodecl>
+local iroh_srv_relay_resume_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_kick: uint32 <cimport,nodecl>
 local iroh_srv_relay_stop: uint32 <cimport,nodecl>
 local iroh_srv_relay_nonce: uint32 <cimport,nodecl>
@@ -120,6 +121,8 @@ local function lws_hdr_copy(wsi: *lws, text: cstring, max: cint, token: cint): c
 local function lws_hdr_copy_fragment(wsi: *lws, text: cstring, max: cint, token: cint, index: cint): cint <cimport,nodecl> end
 local function lws_frame_is_binary(wsi: *lws): cint <cimport,nodecl> end
 local function lws_is_final_fragment(wsi: *lws): cint <cimport,nodecl> end
+local function lws_rx_flow_control(wsi: *lws, enable: cint): cint <cimport,nodecl> end
+local LWS_RXFLOW_REASON_FLAG_PROCESS_NOW: cint <cimport,nodecl>
 local function lws_remaining_packet_payload(wsi: *lws): csize <cimport,nodecl> end
 local function lws_callback_on_writable(wsi: *lws): cint <cimport,nodecl> end
 local function lws_write(wsi: *lws, bytes: *cuchar, size: csize, kind: cint): cint <cimport,nodecl> end
@@ -138,6 +141,7 @@ local Frame = @record{next: pointer, data: *cuchar, size: csize}
 local Field = @record{next: pointer, value: cstring, size: csize}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
+  metered: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
@@ -253,6 +257,7 @@ local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize)
   peer.body = nilptr
   peer.length = 0
   peer.capacity = 0
+  if peer.metered then return lws_rx_flow_control(peer.ws,0) end
   return 0
 end
 local function send(peer: *Peer): cint
@@ -553,7 +558,15 @@ local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
   if peer ~= nilptr then
     peer.authorized = true
+    peer.metered = term_aux(f[2]) == iroh_srv_True
     clear_request(peer)
+  end
+  return f[0]
+end
+local function resume_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer ~= nilptr and peer.metered and not peer.closing then
+    if lws_rx_flow_control(peer.ws,1 | LWS_RXFLOW_REASON_FLAG_PROCESS_NOW) < 0 then kick(peer) end
   end
   return f[0]
 end
@@ -605,7 +618,8 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end
   if iroh_srv_relay_millis ~= 0xffffffff then io_eff(iroh_srv_relay_millis,millis_run) end
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end
-  if iroh_srv_relay_authorized ~= 0xffffffff then io_eff(iroh_srv_relay_authorized,authorized_run) end
+  if iroh_srv_relay_authorized_with_meter ~= 0xffffffff then io_eff(iroh_srv_relay_authorized_with_meter,authorized_run) end
+  if iroh_srv_relay_resume_rx ~= 0xffffffff then io_eff(iroh_srv_relay_resume_rx,resume_rx_run) end
   if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end
   if iroh_srv_relay_stop ~= 0xffffffff then io_eff(iroh_srv_relay_stop,stop_run) end
   if iroh_srv_relay_nonce ~= 0xffffffff then io_eff(iroh_srv_relay_nonce,nonce_run) end

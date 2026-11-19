@@ -179,6 +179,77 @@ def heartbeat(+url: String) -> IO(Unit):
     Client.close(kept)
     IO.print("PASS relay keepalive accepts the matching pong and closes the connection with a mismatched pong")
 
+def rate_payload() -> List<&2,U32>:
+  List.replicate(U32,80n,42)
+
+def rate_notice(sender: Client.Connection, version: U32) -> IO(Client.Connection):
+  match version:
+    case 1:
+      IO.pure(Client.Connection,sender)
+    case _:
+      expect(sender,13,[2])
+
+def elapsed_limit(elapsed: Bool) -> IO(Unit):
+  match elapsed:
+    case True{}:
+      IO.pure(Unit,Unit{})
+    case False{}:
+      IO.die(Unit,1,"rate-limited datagrams arrived before the next refill")
+
+def send_rate_frame(sender: Client.Connection) -> IO(Client.Connection):
+  IO.try(Client.Connection,Client.send_datagram(sender,peer(),0,0,rate_payload()))
+
+def finish_rate(sender: Client.Connection, receiver: Client.Connection, started: Nat) -> IO(Unit):
+  do IO<Unit>:
+    finished : Nat <- IO.now()
+    elapsed_limit(Nat.is_ge(finished,Nat.add(750n,started)))
+    returning : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(receiver,source(),0,0,payload()))
+    confirmed : Client.Connection <- expect(sender,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    Client.close(returning)
+    Client.close(confirmed)
+    IO.print("PASS relay throttled and resumed datagrams with the expected rate-limit notice")
+
+def rate_exchange(sender: Client.Connection, receiver: Client.Connection, version: U32) -> IO(Unit):
+  +frame = List.append(&2,U32,source(),Con{0,rate_payload()})
+  do IO<Unit>:
+    started : Nat <- IO.now()
+    first : Client.Connection <- send_rate_frame(sender)
+    second : Client.Connection <- send_rate_frame(first)
+    third : Client.Connection <- send_rate_frame(second)
+    noticed : Client.Connection <- rate_notice(third,version)
+    arrived : Client.Connection <- expect(receiver,6,frame)
+    received : Client.Connection <- expect(arrived,6,frame)
+    drained : Client.Connection <- expect(received,6,frame)
+    finish_rate(noticed,drained,started)
+
+# Wait for each delivery before writing again so an upstream transport read
+# cannot coalesce the three writes into a single charge.
+def paced_rate_exchange(sender: Client.Connection, receiver: Client.Connection) -> IO(Unit):
+  +frame = List.append(&2,U32,source(),Con{0,rate_payload()})
+  do IO<Unit>:
+    started : Nat <- IO.now()
+    first : Client.Connection <- send_rate_frame(sender)
+    noticed : Client.Connection <- rate_notice(first,2)
+    arrived : Client.Connection <- expect(receiver,6,frame)
+    second : Client.Connection <- send_rate_frame(noticed)
+    received : Client.Connection <- expect(arrived,6,frame)
+    last : Client.Connection <- send_rate_frame(second)
+    drained : Client.Connection <- expect(received,6,frame)
+    finish_rate(last,drained,started)
+
+def test_paced_rate(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    paced_rate_exchange(sender,receiver)
+
+def test_rate(+url: String, +version: U32) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    sender : Client.Connection <- IO.try(Client.Connection,
+      Client.connect_with_version(url,List.replicate(U32,32n,73),version))
+    rate_exchange(sender,receiver,version)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{url,Nil{}}}:
@@ -189,6 +260,12 @@ def run(args: List<String>) -> IO(Unit):
       duplicate_v1(url)
     case Con{_,Con{url,Con{"heartbeat",Nil{}}}}:
       heartbeat(url)
+    case Con{_,Con{url,Con{"rate",Nil{}}}}:
+      test_rate(url,2)
+    case Con{_,Con{url,Con{"rate-v1",Nil{}}}}:
+      test_rate(url,1)
+    case Con{_,Con{url,Con{"rate-paced",Nil{}}}}:
+      test_paced_rate(url)
     case Con{_,Con{url,Con{"bearer",Nil{}}}}:
       test_token(url,2,2,Some{"allow"})
     case Con{_,Con{url,Con{"bearer-denied",Nil{}}}}:

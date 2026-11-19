@@ -3,10 +3,11 @@ BUILD ?= build
 
 .PHONY: check check-gpu check-dns-tcp
 
-check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate
 	$(BUILD)/iroh-bend-check
 	$(BUILD)/iroh-bend-handshake
 	$(BUILD)/iroh-bend-discovery
+	$(BUILD)/iroh-bend-rate
 
 $(BUILD)/iroh-bend-check: tests/check.bend src/relay.bend src/base32.bend
 	mkdir -p $(BUILD)
@@ -19,6 +20,10 @@ $(BUILD)/iroh-bend-handshake: tests/handshake.bend src/handshake.bend src/relay_
 $(BUILD)/iroh-bend-discovery: tests/discovery.bend src/discovery.bend src/relay.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/discovery.bend -o $@
+
+$(BUILD)/iroh-bend-rate: tests/relay_rate.bend src/relay_rate.bend src/relay_heartbeat.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_rate.bend -o $@
 
 check-dns-tcp: $(BUILD)/iroh-bend-discovery
 	python3 tests/discovery_tcp.py $(BUILD)/iroh-bend-discovery
@@ -176,7 +181,7 @@ $(BUILD)/iroh-bend-quic-streams: $(BUILD)/quic-streams.c
 
 .PHONY: check-relay-server
 UPSTREAM_RELAY_CLIENT ?=
-RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_exporter.bend src/relay_heartbeat.bend src/relay_access.bend src/relay_server.bend src/relay_server_socket.bend
+RELAY_SERVER_SOURCES = $(AUTH_SOURCES) src/relay_exporter.bend src/relay_heartbeat.bend src/relay_rate.bend src/relay_access.bend src/relay_server.bend src/relay_server_socket.bend
 
 check-relay-server: $(BUILD)/iroh-bend-relay-server $(BUILD)/iroh-bend-relay-live
 	tests/relay_server.sh "$(BUILD)/iroh-bend-relay-server" "$(BUILD)/iroh-bend-relay-live" "$(UPSTREAM_RELAY_CLIENT)"
