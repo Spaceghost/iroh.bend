@@ -99,6 +99,11 @@ CASES = [
     ("https://www.🍕.example", "https://www.xn--vi8h.example/"),
     ("http://a\u0341\u0327", "http://xn--1ca87i/"),
     ("http://𝟏𝟐𝟕.𝟏", "http://127.0.0.1/"),
+    ("http://" + "a" * 1200, "http://" + "a" * 1200 + "/"),
+    ("http://" + "é" * 1000, "http://xn--" + ("é" * 1000).encode("punycode").decode() + "/"),
+    ("http://" + "é" * 1001, None),
+    ("http://" + "a" * 1000 + "é", None),
+    ("http://xn--" + "a" * 2001, None),
     (b"https://\xff.invalid/", None),
 ]
 

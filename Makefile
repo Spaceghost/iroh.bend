@@ -52,7 +52,7 @@ check-dns-tcp: $(BUILD)/iroh-bend-discovery
 check-gpu: $(BUILD)/iroh-bend-gpu
 	BENDRTS= $(BUILD)/iroh-bend-gpu +RTS --gpu 1GB
 
-$(BUILD)/iroh-bend-gpu: tests/gpu.bend src/relay.bend
+$(BUILD)/iroh-bend-gpu: tests/gpu.bend tests/punycode.bend src/punycode.bend src/url_text.bend src/relay.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/gpu.bend -o $@
 

@@ -322,7 +322,8 @@ client requires a libcurl build with WebSocket support.
    `PASS Iroh reached the same Bend listener over the restored relay`.
    It holds the connections until it reads `FINISH`.
 5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
-   and run `make check-gpu` to decode 16,384 relay ping frames on the device.
+   and run `make check-gpu` to decode 16,384 relay ping frames and check four
+   Punycode encoding and decoding vectors on the device.
 
 Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 
