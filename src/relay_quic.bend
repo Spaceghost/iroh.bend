@@ -16,6 +16,9 @@ type Segment is Data:
 def relay_loopback_port(socket: Socket) -> IO(Socket & Result<&1,&1,U32 & String,U32>):
   import "./relay_quic.c"
 
+def relay_millis() -> IO(U32):
+  import "./relay_quic.c"
+
 def equal(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
   match a b:
     case Nil{} Nil{}:

@@ -379,8 +379,128 @@ def bridge_endpoint(url: String, port: Maybe<&2,U32>) -> IO(Unit):
     case None{}:
       IO.die(Unit,2,"expected a UDP port")
 
+def inbound_status(pair: Endpoint.RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Endpoint.Connection()>>,
+    retry: Endpoint.RelayedListener -> IO(Endpoint.RelayedListener & Endpoint.Connection()))
+    -> IO(Endpoint.RelayedListener & Endpoint.Connection()):
+  match pair:
+    case (listener,Done{Some{conn}}):
+      IO.pure(Endpoint.RelayedListener & Endpoint.Connection(),(listener,conn))
+    case (listener,Done{None{}}):
+      do IO<Endpoint.RelayedListener & Endpoint.Connection()>:
+        IO.sleep(1)
+        retry(listener)
+    case (listener,Fail{(code,message)}):
+      do IO<Endpoint.RelayedListener & Endpoint.Connection()>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.close_relay_identity(listener)
+        IO.die(Endpoint.RelayedListener & Endpoint.Connection(),code,message)
+
+def accept_inbound(fuel: Nat, owner: Endpoint.RelayedListener) -> IO(Endpoint.RelayedListener & Endpoint.Connection()):
+  match fuel:
+    case 0n:
+      do IO<Endpoint.RelayedListener & Endpoint.Connection()>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.close_relay_identity(owner)
+        IO.die(Endpoint.RelayedListener & Endpoint.Connection(),1,"relayed QUIC accept timed out")
+    case 1n+left:
+      do IO<Endpoint.RelayedListener & Endpoint.Connection()>:
+        result : Endpoint.RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Endpoint.Connection()>> <-
+          Endpoint.try_accept_relay_identity(owner)
+        inbound_status(result,next => accept_inbound(left,next))
+
+def inbound_stream(pair: Quic.DatagramConnection & U32, +label: U32) -> IO(Quic.DatagramConnection):
+  (conn,+id) = pair
+  do IO<Quic.DatagramConnection>:
+    request : Quic.DatagramConnection <- TransportFixture.receive_stream(3000n,conn,id,[label,1,255])
+    TransportFixture.server_stream_reply((request,id),[255,1,label])
+
+def inbound_exchange(conn: Quic.DatagramConnection, +label: U32) -> IO(Quic.DatagramConnection & Unit):
+  do IO<Quic.DatagramConnection & Unit>:
+    request : Quic.DatagramConnection <- TransportFixture.receive_reply(4000n,conn,[label,0,255])
+    reply : Quic.DatagramConnection <- TransportFixture.send_datagram(4000n,request,[255,0,label])
+    stream : Quic.DatagramConnection & U32 <- TransportFixture.poll_stream(4000n,reply,TransportFixture.AcceptStream{0})
+    sent : Quic.DatagramConnection <- inbound_stream(stream,label)
+    acknowledged : Quic.DatagramConnection <- TransportFixture.receive_reply(4000n,sent,[label,2,255])
+    return (acknowledged,Unit{})
+
+def inbound_served(pair: Endpoint.Connection() & Unit, label: U32) -> IO(U32):
+  (conn,_) = pair
+  do IO<U32>:
+    IO.try(Unit,Endpoint.disconnect(conn))
+    return label
+
+def inbound_label(conn: Endpoint.Connection(), +label: U32) -> IO(U32):
+  match label:
+    case 0:
+      do IO<U32>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.disconnect(conn)
+        IO.die(U32,1,"unexpected authenticated relay peer")
+    case +known:
+      do IO<U32>:
+        finished : Endpoint.Connection() & Unit <- Endpoint.use_connection(Unit,conn,c => inbound_exchange(c,known))
+        inbound_served(finished,known)
+
+def second_peer(matches: Bool) -> U32:
+  match matches:
+    case True{}:
+      74
+    case False{}:
+      0
+
+def identify_peer(key: List<&2,U32>, first: Bool) -> U32:
+  match first:
+    case True{}:
+      73
+    case False{}:
+      second_peer(TransportFixture.same_bytes(key,
+        [53,60,138,127,238,202,56,178,196,83,110,11,210,88,111,219,
+         24,208,112,229,14,5,159,29,67,248,191,239,185,122,124,225]))
+
+def inbound_identity(pair: Endpoint.Connection() & Result<&1,&1,U32 & String,List<&2,U32>>) -> IO(U32):
+  match pair:
+    case (conn,Done{+key}):
+      inbound_label(conn,identify_peer(key,TransportFixture.same_bytes(key,Fixture.dialer_public())))
+    case (conn,Fail{(code,message)}):
+      do IO<U32>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.disconnect(conn)
+        IO.die(U32,code,message)
+
+def serve_inbound_peer(conn: Endpoint.Connection()) -> IO(U32):
+  do IO<U32>:
+    report : Endpoint.Connection() & Result<&1,&1,U32 & String,List<&2,U32>> <- Endpoint.remote_id(conn)
+    inbound_identity(report)
+
+def inbound_total(total: U32) -> IO(Unit):
+  match total:
+    case 147:
+      IO.print("PASS Bend accepted two authenticated identities over one relay registration")
+    case _:
+      IO.die(Unit,1,"relayed peers did not have distinct identities")
+
+def finish_inbound(pair: Endpoint.RelayedListener & Endpoint.Connection(), first: Endpoint.Connection()) -> IO(Unit):
+  (listener,second) = pair
+  do IO<Unit>:
+    a : U32 <- serve_inbound_peer(first)
+    b : U32 <- serve_inbound_peer(second)
+    IO.try(Unit,Endpoint.close_relay_identity(listener))
+    inbound_total(U32.add(a,b))
+
+def wait_inbound_pair(pair: Endpoint.RelayedListener & Endpoint.Connection()) -> IO(Unit):
+  (listener,first) = pair
+  do IO<Unit>:
+    second : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    finish_inbound(second,first)
+
+def listen_inbound(url: String) -> IO(Unit):
+  do IO<Unit>:
+    listener : Endpoint.RelayedListener <- IO.try(Endpoint.RelayedListener,
+      Endpoint.bind_relay_identity(url,List.replicate(U32,32n,42),Fixture.alpn(),0))
+    IO.print("relay identity listener ready")
+    inbound : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    wait_inbound_pair(inbound)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_, "listen-relay-identity", url]:
+      listen_inbound(url)
     case Con{_,Con{"listen",Con{url,Nil{}}}}:
       listen(url)
     case Con{_,Con{"dial",Con{url,Nil{}}}}:

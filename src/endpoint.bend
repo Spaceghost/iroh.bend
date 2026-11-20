@@ -3,6 +3,7 @@ import ./direct.bend as Direct
 import ./discovery.bend as Dns
 import ./pkarr.bend as Pkarr
 import ./relay_quic.bend as Path
+import ./relay_quic_inbound.bend as Inbound
 import ./quic_datagram.bend as Quic
 
 type Address is Data:
@@ -713,6 +714,55 @@ def try_accept(listener: Quic.QuicDatagramListener)
     outcome : Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>> <-
       Quic.try_accept_shared_quic(listener)
     return accepted(outcome)
+
+type RelayedListener is Type:
+  RelayListener{listener: Quic.QuicDatagramListener, bridge: Path.Bridge}
+
+def attached_listener(result: Result<&1,&1,U32 & String,Path.Bridge>, listener: Quic.QuicDatagramListener)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  match result:
+    case Done{bridge}:
+      IO.pure(Result<&1,&1,U32 & String,RelayedListener>,Done{RelayListener{listener,bridge}})
+    case Fail{error}:
+      do IO<Result<&1,&1,U32 & String,RelayedListener>>:
+        Quic.close_shared_quic(listener)
+        return Fail{error}
+
+def attach_inbound(result: Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>,
+    url: String, seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  match result:
+    case Done{(listener,port)}:
+      do IO<Result<&1,&1,U32 & String,RelayedListener>>:
+        bridge : Result<&1,&1,U32 & String,Path.Bridge> <- Inbound.start(url,seed,port)
+        attached_listener(bridge,listener)
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,RelayedListener>,Fail{error})
+
+# Keep the listener alive while its accepted relay connections are in use.
+def bind_relay_identity(url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  do IO<Result<&1,&1,U32 & String,RelayedListener>>:
+    bound : Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32> <-
+      bind_identity(IpAddress{"127.0.0.1",0},seed,alpn,early_data)
+    attach_inbound(bound,url,seed)
+
+def accepted_relay(pair: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>,
+    bridge: Path.Bridge) -> RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>:
+  (listener,result) = pair
+  (RelayListener{listener,bridge},result)
+
+def try_accept_relay_identity(owner: RelayedListener)
+    -> IO(RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>):
+  RelayListener{listener,bridge} = owner
+  do IO<RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>>:
+    outcome : Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>> <- try_accept(listener)
+    return accepted_relay(outcome,bridge)
+
+def close_relay_identity(owner: RelayedListener) -> IO(Result<&1,&1,U32 & String,Unit>):
+  RelayListener{listener,bridge} = owner
+  do IO<Result<&1,&1,U32 & String,Unit>>:
+    Quic.close_shared_quic(listener)
+    Path.stop(bridge)
 
 def close_listener(listener: Quic.QuicDatagramListener) -> IO(Unit):
   Quic.close_shared_quic(listener)
