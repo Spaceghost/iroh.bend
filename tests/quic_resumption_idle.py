@@ -15,13 +15,21 @@ def words(value):
     return str(value >> 32), str(value & 0xffffffff)
 
 
-async def output(process):
-    lines = (await process.stdout.read()).decode().splitlines()
+async def output(process, early_client=None):
+    lines = []
+    async for raw in process.stdout:
+        line = raw.decode().rstrip("\r\n")
+        lines.append(line)
+        if early_client is not None and line == "EARLY received":
+            early_client.stdin.write(b"+")
+            await early_client.stdin.drain()
+    if early_client is not None:
+        early_client.stdin.close()
     return await process.wait(), lines
 
 
-async def verify(processes, warm, resumed, quiet=False, relayed=False):
-    results = await asyncio.gather(*(output(proc) for proc in processes))
+async def verify(processes, warm, resumed, quiet=False, relayed=False, early_client=None):
+    results = await asyncio.gather(output(processes[0], early_client), *(output(proc) for proc in processes[1:]))
     for status, lines in results:
         if status:
             raise RuntimeError(f"resumption fixture exited {status}: {lines}")
@@ -49,7 +57,8 @@ async def client_case(bend, reference, host, mode, resumed):
             raise RuntimeError(f"Iroh did not announce its warm and resumed addresses: {endpoints}")
         ports = [str(int(addr.rsplit(":", 1)[1])) for addr in endpoints]
         async with child(bend, "client", host, *ports, mode, *words(resumed)) as conn:
-            elapsed = await verify([peer, conn], DEFAULT, resumed, mode == "quiet")
+            elapsed = await verify([peer, conn], DEFAULT, resumed, quiet=mode == "quiet",
+                                   early_client=conn if mode == "accept" else None)
     timing = f", expired after {elapsed} ms" if elapsed is not None else ""
     print(f"PASS Bend client {host} {mode} negotiated {DEFAULT} -> {resumed} ms{timing}", flush=True)
 

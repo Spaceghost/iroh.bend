@@ -944,7 +944,9 @@ set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and
 IPv4 and IPv6, listeners pinned to one peer, listeners that accept any
 authenticated identity, dual-stack listeners, accepted and rejected early
 streams and datagrams, and a resumption without early data that both peers
-report as `TimedOut`.
+report as `TimedOut`. For accepted early data, the Iroh listener emits
+`EARLY received` after reading the stream and datagram. Only then does
+the driver let the Bend client complete the handshake.
 
 Run `make check-quic-resumption-idle-relay` with the same fixture.
 Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and

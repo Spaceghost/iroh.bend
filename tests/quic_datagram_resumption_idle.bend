@@ -9,6 +9,7 @@ import ./quic_relay_close.bend as RelayTest
 import ./quic_datagram_cancel.bend as Datagram
 import ./quic_connection_close.bend as CloseTest
 import ./quic_idle_timeout.bend as Idle
+import ./quic_stream_cancel.bend as Gate
 
 def session_only(status: Q.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>>)
     -> IO(Q.DatagramConnection):
@@ -32,12 +33,33 @@ def quiet(started: Result<&1,&1,U32 & String,Q.DatagramConnection>) -> IO(Unit):
     Q.drop_quic_datagram(done)
     IO.print("PASS resumed without early data and reported TimedOut")
 
+# Wait until Iroh has read both early payloads before driving the rest of the handshake.
+def resume_received(receipt: (Q.DatagramConnection & U32) & Gate.State) -> IO(Unit):
+  match receipt:
+    case (early,Gate.Complete{}):
+      Peer.await_resumed(early,Peer.AcceptEarly{})
+    case ((conn,_),_):
+      do IO<Unit>:
+        Q.drop_quic_datagram(conn)
+        IO.die(Unit,1,"Iroh did not acknowledge the early stream and datagram")
+
+def accept_early(started: Result<&1,&1,U32 & String,Q.DatagramConnection>) -> IO(Unit):
+  match started:
+    case Fail{(code,message)}:
+      IO.die(Unit,code,message)
+    case Done{conn}:
+      do IO<Unit>:
+        early : Q.DatagramConnection & U32 <- Peer.write_early_request(conn)
+        receipt : (Q.DatagramConnection & U32) & Gate.State <-
+          Gate.gate(Q.DatagramConnection & U32,early,"EARLY sent")
+        resume_received(receipt)
+
 def verify(mode: String, result: Result<&1,&1,U32 & String,Q.DatagramConnection>) -> IO(Unit):
   match mode:
     case "quiet":
       quiet(result)
     case "accept":
-      Peer.check_resumed(result,Peer.AcceptEarly{},False{})
+      accept_early(result)
     case "reject":
       Peer.check_resumed(result,Peer.RejectEarly{},False{})
     case _:

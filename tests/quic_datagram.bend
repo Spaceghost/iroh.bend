@@ -676,6 +676,13 @@ def await_resumed(early: Quic.DatagramConnection & U32, mode: RttMode) -> IO(Uni
       Quic.quic_resumption_status(active)
     verify_early_status(status,mode,stream)
 
+def write_early_request(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection & U32):
+  do IO<Quic.DatagramConnection & U32>:
+    sent : Quic.DatagramConnection <- send_early(100n,conn)
+    opened : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.open_early_quic_stream(sent,0)
+    checked : Quic.DatagramConnection & U32 <- check_progress(opened)
+    queue_early_stream(checked)
+
 def check_resumed(outcome: Result<&1,&1,U32 & String,Quic.DatagramConnection>, mode: RttMode, mismatch: Bool)
     -> IO(Unit):
   match outcome mismatch:
@@ -689,10 +696,7 @@ def check_resumed(outcome: Result<&1,&1,U32 & String,Quic.DatagramConnection>, m
         IO.die(Unit,1,"session for a mismatched key or ALPN was accepted")
     case Done{conn} _:
       do IO<Unit>:
-        sent : Quic.DatagramConnection <- send_early(100n,conn)
-        opened : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.open_early_quic_stream(sent,0)
-        checked : Quic.DatagramConnection & U32 <- check_progress(opened)
-        written : Quic.DatagramConnection & U32 <- queue_early_stream(checked)
+        written : Quic.DatagramConnection & U32 <- write_early_request(conn)
         await_resumed(written,mode)
 
 def early_seed(mode: RttMode) -> U32:

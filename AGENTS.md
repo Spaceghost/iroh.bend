@@ -25,7 +25,7 @@ Continue the first open item below and update the checkpoint after each verified
 
 Picoquic expires a silent path independently of the connection. The suite against Iroh's pinned Noq 1.5.0 and raw-key TLS code covers both address families, failed validation in both loss directions, validated paths in both Bend roles, the three-PTO floor, the last local path and base QUIC expiry. The original path exchanges a fresh stream after the alternate expires. The heartbeat cases also verify PINGs on a reachable standby during an idle period longer than its configured path timeout. The existing 21 Picoquic connection-idle checks and the CUDA suite passed the path-expiry checkpoint.
 
-The ngtcp2 resumption and identity listener APIs now carry the configured connection idle timeout on direct and relayed connections. The Iroh 1.5.0 checks for these APIs run with `make check-quic-resumption-idle` and `make check-quic-resumption-idle-relay`. The Fedora reference source, build script and WS/WSS test runner are in `~/workspaces/2026-11-20-iroh-conformance/artifacts/resumption-idle/`.
+The ngtcp2 resumption and identity listener APIs now carry the configured connection idle timeout on direct and relayed connections. The Iroh 1.5.0 checks for these APIs run with `make check-quic-resumption-idle` and `make check-quic-resumption-idle-relay`. On Fedora, `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/resumption-idle/make.sh` runs the direct checks. Add `relays` to run both WS and WSS with a fresh local test CA. Set `NGTCP2_VERSION=1.25` to check the older library. The Iroh reference and its build script are in `oracle/` beside the runner.
 
 Run the path checks on Fedora with the build and reference scripts in the evidence directory.
 
