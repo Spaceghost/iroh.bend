@@ -949,8 +949,8 @@ Run `make check-quic-path-idle-relay-profiles` with the same fixture to check
 the 30-second relay deadline in both Bend roles and the 15-second deadline
 on a direct loopback path. Existing WS and WSS tests also exercise the
 combined listener and carry an open stream across relay and direct outages.
-Connection idle settings on the specialized Picoquic resumption and NAT
-constructors remain open.
+Connection idle settings on the specialized Picoquic NAT constructors remain
+open.
 
 Run `make check-quic-resumption-idle` with `UPSTREAM_QUIC_RESUMPTION_IDLE`
 set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and
@@ -962,10 +962,13 @@ report as `TimedOut`. For accepted early data, the Iroh listener emits
 `EARLY received` after reading the stream and datagram. Only then does
 the driver let the Bend client complete the handshake.
 
-Run `make check-quic-multipath-resumption-idle-listener` with the same
-fixture to check Picoquic’s pinned, identity and dual-stack listeners. Iroh
-compares the limits on an accepted resumption and on a full handshake after
-a fresh listener rejects the ticket.
+With Picoquic, `start_multipath_resume_with_idle_timeout` sets the idle limit
+for the new connection. Pass `1` for 0-RTT or `0` for handshake-only resumption.
+Run `make check-quic-multipath-resumption-idle` with the same fixture to
+verify the advertised limit and early-data behavior when Iroh accepts or
+rejects the ticket, and expiry after handshake-only resumption. Run
+`make check-quic-multipath-resumption-idle-listener` for Picoquic’s pinned,
+identity and dual-stack listeners.
 
 Run `make check-quic-resumption-idle-relay` with the same fixture.
 Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and

@@ -17,7 +17,7 @@ Continue the first open item below and update the checkpoint after each verified
 
 ## Current checkpoint
 
-1. Carry the configured connection idle timeout through the Picoquic resumption and early-data dialers and the NAT constructors. Reuse `tests/quic_resumption_idle.py` and the Fedora Iroh reference from the passing ngtcp2 resumption checkpoint.
+1. Carry the configured connection idle timeout through the Picoquic NAT dialers and listeners. Verify the advertised idle limit and NAT transport parameters against the Iroh 1.5.0 peer.
 2. Check Picoquic's handling of a peer abandoning the last local path against Noq 1.5.0. Its upstream tests exercise both opening a replacement within the three-PTO grace period and closing when that period expires.
 3. Keep live **listener** NAT mapping refresh parked until the owner asks to resume it. The outbound connection's mapping-refresh tests are a separate, passing case.
 
@@ -30,6 +30,8 @@ Relay paths use a 30-second timer. The relay socket and plain direct socket on a
 The ngtcp2 resumption and identity listener APIs now carry the configured connection idle timeout on direct and relayed connections. The Iroh 1.5.0 checks for these APIs run with `make check-quic-resumption-idle` and `make check-quic-resumption-idle-relay`. On Fedora, `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/resumption-idle/make.sh` runs the direct checks. Add `relays` to run both WS and WSS with a fresh local test CA. Set `NGTCP2_VERSION=1.25` to check the older library. The Iroh reference and its build script are in `oracle/` beside the runner.
 
 Picoquic’s pinned, identity and dual-stack listeners accept a configured idle timeout for full and resumed handshakes. Run `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/pico-resumption-idle/make.sh` on Fedora for the IPv4/IPv6 listener checks against Iroh 1.5.0. Add `relays` to run the relay-only and combined listener checks over WS and WSS. Iroh checks the connection limit and receipt of application datagrams over the relay on both handshakes.
+
+Pass `check-quic-multipath-resumption-idle` to the same runner to check the Picoquic dialer. On both IP families, Iroh observed the caller’s limit on accepted early data, a full handshake after ticket rejection, and a resumed connection that expired while quiet.
 
 Run the path checks on Fedora with the build and reference scripts in the evidence directory.
 

@@ -629,7 +629,8 @@ $(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.ben
 	cd "$(BUILD)/quic-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_bend.bend -o "$(abspath $@)"
 
 $(BUILD)/quic-multipath-path-idle.c: tests/quic_multipath_path_idle.bend
-$(BUILD)/quic-multipath-listener.c $(BUILD)/quic-multipath-path-idle.c: $(BUILD)/%.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_stream.bend $(QUIC_CLOSE_SOURCES) src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-resumption-idle.c: tests/quic_multipath_resumption_idle.bend tests/quic_multipath_session.bend tests/quic_idle_timeout.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend
+$(BUILD)/quic-multipath-listener.c $(BUILD)/quic-multipath-path-idle.c $(BUILD)/quic-multipath-resumption-idle.c: $(BUILD)/%.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_stream.bend $(QUIC_CLOSE_SOURCES) src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
 	cp $(filter tests/%.bend,$^) "$(@:.c=-stage)/tests/"
@@ -646,6 +647,11 @@ check-quic-multipath-resumption-idle-relay: $(BUILD)/iroh-bend-quic-multipath-re
 check-quic-multipath-resumption-idle-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
 	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE to the Iroh resumption timeout fixture.' >&2; exit 2; }
 	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" --role listener
+
+.PHONY: check-quic-multipath-resumption-idle
+check-quic-multipath-resumption-idle: $(BUILD)/iroh-bend-quic-multipath-resumption-idle
+	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE to the Iroh resumption timeout fixture.' >&2; exit 2; }
+	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" --role client
 
 .PHONY: check-quic-multipath-early-listener
 check-quic-multipath-early-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
@@ -685,6 +691,7 @@ $(BUILD)/iroh-bend-relay-qad: $(BUILD)/relay-qad.c
 $(BUILD)/iroh-bend-quic-multipath: $(BUILD)/quic-multipath.c
 $(BUILD)/iroh-bend-quic-multipath-listener: $(BUILD)/quic-multipath-listener.c
 $(BUILD)/iroh-bend-quic-multipath-path-idle: $(BUILD)/quic-multipath-path-idle.c
+$(BUILD)/iroh-bend-quic-multipath-resumption-idle: $(BUILD)/quic-multipath-resumption-idle.c
 $(BUILD)/iroh-bend-quic-multipath-session: $(BUILD)/quic-multipath-session.c
 
 $(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_multipath.bend src/quic_stream.bend $(QUIC_CLOSE_SOURCES) src/quic_multipath.nelua tools/nelua-effect.sh
@@ -695,7 +702,7 @@ $(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_mu
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_session.bend -o "$(abspath $@)"
 
-$(BUILD)/iroh-bend-quic-multipath-cancel $(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-path-idle $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-quic-multipath-early-listener $(BUILD)/iroh-bend-relay-qad:
+$(BUILD)/iroh-bend-quic-multipath-cancel $(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-path-idle $(BUILD)/iroh-bend-quic-multipath-resumption-idle $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-quic-multipath-early-listener $(BUILD)/iroh-bend-relay-qad:
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }

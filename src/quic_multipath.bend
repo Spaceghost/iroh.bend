@@ -256,16 +256,22 @@ def take_multipath_session(conn: MultipathConnection)
 def drop_multipath_session(session: MultipathSession) -> IO(Unit):
   import "./quic_multipath.c"
 
+# Pass one to enable 0-RTT. The new connection advertises idle_ms even on full TLS fallback.
+def start_multipath_resume_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, session: MultipathSession, early_data: U32, idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
 # Consume a session for the same local identity, peer key, and ALPN bytes.
 # If the peer rejects it, Picoquic attempts the pinned full handshake.
 def start_multipath_resume(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
-  import "./quic_multipath.c"
+  start_multipath_resume_with_idle_timeout(host,port,seed,peer,alpn,session,0,Close.default_idle_timeout())
 
 # Opt in to sending replay-safe application data before the handshake completes.
 def start_multipath_early(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
-  import "./quic_multipath.c"
+  start_multipath_resume_with_idle_timeout(host,port,seed,peer,alpn,session,1,Close.default_idle_timeout())
 
 # None while handshaking. After authentication, 1 means TLS accepted early data.
 def multipath_early_status(conn: MultipathConnection)
