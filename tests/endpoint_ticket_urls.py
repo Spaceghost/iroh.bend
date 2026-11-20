@@ -71,8 +71,8 @@ def varint(value):
     return result
 
 
-def ticket(urls):
-    data = bytearray(b"\x00" + KEY + varint(len(urls)))
+def ticket(urls, key=KEY):
+    data = bytearray(b"\x00" + key + varint(len(urls)))
     for url in map(octets, urls):
         data.extend(b"\x00" + varint(len(url)) + url)
     return "endpoint" + base64.b32encode(data).decode("ascii").rstrip("=").lower()

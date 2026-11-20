@@ -8,6 +8,8 @@ pkarr_url=${4:-}
 dns_port=${5:-}
 shared=${6:-}
 shared_dial=${7:-}
+# Discovery records carry the relay base URL. The WebSocket dials use its /relay endpoint.
+relay_base=${8:-${url%/relay}/}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/iroh-bend-relay-quic.XXXXXXXX")
 listener=
 bridge=
@@ -109,7 +111,7 @@ endpoint_listen() {
 "$native" endpoint-plan
 check "$native" "$native" bend-to-bend
 check "$native" "$native" fallback dial-fallback
-check "$native" "$native" pkarr dial-pkarr
+check "$native" "$native" pkarr dial-pkarr "$relay_base"
 timeout 20 "$native" listen-direct > "$scratch/direct.port" 2> "$scratch/direct.listener" &
 listener=$!
 for _ in $(seq 1 100); do
@@ -130,14 +132,14 @@ if [ -n "$upstream" ]; then
     check "$native" "$upstream" iroh-to-bend
 fi
 if [ -n "$pkarr_url" ] && [ -n "$dns_port" ]; then
-    timeout 10 "$native" publish-route "$pkarr_url" "$url"
+    timeout 10 "$native" publish-route "$pkarr_url" "$relay_base"
     check "$native" "$native" dns dial-dns "$dns_port"
 fi
 if [ -n "$shared" ]; then
     endpoint_direct listen 127.0.0.1
     endpoint_direct listen6 ::1
     endpoint_relay dial-endpoint-fallback "$url"
-    endpoint_relay dial-endpoint-pkarr "$url"
+    endpoint_relay dial-endpoint-pkarr "$relay_base"
     if [ -n "$pkarr_url" ] && [ -n "$dns_port" ]; then
         endpoint_relay dial-endpoint-dns "$dns_port"
     fi

@@ -184,7 +184,7 @@ RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_
 
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic
 	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)" \
-		"$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)" "$(UPSTREAM_QUIC_SHARED)" "$(UPSTREAM_QUIC_SHARED_DIAL)"
+		"$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)" "$(UPSTREAM_QUIC_SHARED)" "$(UPSTREAM_QUIC_SHARED_DIAL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 .PHONY: check-endpoint-connect-options check-multipath-connect-options
 UPSTREAM_CONNECT_OPTIONS ?=

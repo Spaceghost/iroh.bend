@@ -171,10 +171,10 @@ def route_fixture_result(correct: Bool) -> IO(Unit):
 
 def route_plan(plan: Endpoint.Routes) -> IO(Unit):
   match plan:
-    case Endpoint.DialRoutes{[Endpoint.IpAddress{ip4,9000},Endpoint.IpAddress{ip6,7777}],[base,prefix,replaced]}:
+    case Endpoint.DialRoutes{[Endpoint.IpAddress{ip4,9000},Endpoint.IpAddress{ip6,7777}],[base,prefix,nested]}:
       route_fixture_result(String.eq(ip4,"192.0.2.8") && String.eq(ip6,"2001:db8::42") &&
         String.eq(base,"wss://example.com/relay") && String.eq(prefix,"wss://example.com/prefix/relay") &&
-        String.eq(replaced,"ws://[::1]:8000/a/relay"))
+        String.eq(nested,"ws://[::1]:8000/a/previous/relay"))
     case _:
       route_fixture_result(False{})
 
@@ -185,7 +185,7 @@ def plan_routes() -> IO(Unit):
     Dns.Address{Dns.keyword("127.0.0.1:65536")},
     Dns.Address{Dns.keyword("2001:db8::1:7755")},
     Dns.RelayUrl{Dns.keyword("https://example.com")},
-    Dns.RelayUrl{Dns.keyword("https://example.com/prefix/")},
+    Dns.RelayUrl{Dns.keyword("HTTPS://EXAMPLE.COM:443/ignore/../prefix")},
     Dns.RelayUrl{Dns.keyword("http://[::1]:8000/a/previous?discard=1#fragment")},
     Dns.RelayUrl{Dns.keyword("ftp://example.com/")},
     Dns.UserData{Dns.keyword("app metadata")}

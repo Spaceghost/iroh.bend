@@ -1,9 +1,13 @@
 """Drive the Bend endpoint with tickets printed by an upstream Iroh listener."""
 
+import base64
 import selectors
 import subprocess
 import sys
 
+from urllib.parse import urlsplit, urlunsplit
+
+from endpoint_ticket_urls import ticket as encode_relays
 from quic_rebind import process
 
 
@@ -24,12 +28,27 @@ def reject(client, ticket, expected):
         raise RuntimeError(f"Expected {expected!r}, got exit {result.returncode} and {result.stderr!r}")
 
 
-def check(client, fixture, family, mode, relay_url=None, error=None):
+def relay_alias(ticket, relay_url):
+    body = ticket.removeprefix("endpoint").upper()
+    raw = base64.b32decode(body + "=" * (-len(body) % 8))
+    key = raw[1:33]
+    parts = urlsplit(relay_url)
+    path = parts.path.rstrip("/") + "/"
+    canonical = urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+    if ticket != encode_relays([canonical], key):
+        raise ValueError("Expected one relay URL in the Iroh fixture's ticket")
+    alias = urlunsplit((parts.scheme.upper(), parts.netloc, path + "%2e/unused/..", "x=1", "fragment"))
+    return encode_relays([alias], key)
+
+
+def check(client, fixture, family, mode, relay_url=None, error=None, alternate_spelling=False):
     args = (fixture, family, mode)
     if relay_url:
         args += (relay_url,)
     with process(*args) as server:
         ticket = read_ticket(server)
+        if alternate_spelling:
+            ticket = relay_alias(ticket, relay_url)
         if error:
             reject(client, ticket, error)
         else:
@@ -39,7 +58,8 @@ def check(client, fixture, family, mode, relay_url=None, error=None):
             print(transcript.decode(), end="", flush=True)
             if server.returncode:
                 raise RuntimeError(f"Iroh rejected the {family} {mode} ticket exchange")
-    print(f"PASS {family} {mode} ticket", flush=True)
+    label = "noncanonical relay" if alternate_spelling else mode
+    print(f"PASS {family} {label} ticket", flush=True)
 
 
 def main(client, fixture, relay_url):
@@ -53,6 +73,7 @@ def main(client, fixture, relay_url):
         if relay_url:
             for mode in ("mixed", "relay", "fallback"):
                 check(client, fixture, family, mode, relay_url)
+            check(client, fixture, family, "relay", relay_url, alternate_spelling=True)
 
 
 if __name__ == "__main__":
