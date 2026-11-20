@@ -1,16 +1,21 @@
 import os
 import selectors
 import socket
+import struct
 import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from http.server import HTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 
 from endpoint_candidate_lookup import (check_supplied_addresses, direct_ticket, initial_ids,
                                        ip_ticket, require_exchange, silent_socket, supplied_route)
-from endpoint_lookup_race import dns_proxy
+from endpoint_lookup_race import dns_proxy, serve
 from endpoint_ticket_urls import ticket
+from pkarr_http import LABEL, Relay as PkarrRelay
 
 from quic_rebind import bind, process, read_address
 
@@ -48,8 +53,51 @@ def check_ticket_paths(client, fixture, host, mode, both_live):
         check_supplied_addresses(client, direct, mode, server, both_live, (host, str(port)))
 
 
-def check_ticket_discovery(client, fixture, host, mode, relay="", peer_relay=""):
-    # Release the DNS reply only after the original socket emits its Initial.
+def check_ticket_identity(client, fixture, host, mode):
+    other_key = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    with process(fixture, mode) as server:
+        port = read_address(server)
+        wrong = ip_ticket(ticket([], other_key), mode, [port])
+        result = subprocess.run((client, "dial-ticket", wrong, "direct", host, str(port)), capture_output=True, timeout=6)
+        if not result.returncode or b"peer endpoint key mismatch" not in result.stderr:
+            raise AssertionError(f"Multipath did not reject the wrong ticket identity: {result.stderr!r}")
+        server.communicate(timeout=4)
+        if not server.returncode:
+            raise AssertionError("Iroh accepted the exchange with a mismatched ticket key")
+    print(f"PASS {mode} rejected the wrong ticket identity and notified Iroh", flush=True)
+
+
+def signed_address(address):
+    # Pkarr signs the BEP 44 sequence and DNS wire message, excluding the key.
+    name = b"\x05_iroh" + bytes([len(LABEL)]) + LABEL.encode() + b"\x00"
+    txt = ("addr=" + address).encode("ascii")
+    dns = struct.pack("!6H", 0, 0x8000, 0, 1, 0, 0)
+    dns += name + struct.pack("!HHIH", 16, 1, 30, len(txt) + 1) + bytes([len(txt)]) + txt
+    stamp = time.time_ns() // 1000
+    with TemporaryDirectory() as tmp:
+        key = Path(tmp, "fixture-key.der")
+        key.write_bytes(bytes.fromhex("302e020100300506032b657004220420") + bytes([42]) * 32)
+        message = Path(tmp, "signed-data")
+        message.write_bytes(f"3:seqi{stamp}e1:v{len(dns)}:".encode() + dns)
+        signature = subprocess.check_output(("openssl", "pkeyutl", "-sign", "-rawin", "-keyform", "DER",
+                                             "-inkey", key, "-in", message))
+    return signature + struct.pack("!Q", stamp) + dns
+
+
+def pkarr_source(stack, address, gate):
+    class HeldPacket(PkarrRelay):
+        def do_GET(self):
+            gate()
+            super().do_GET()
+
+    server = HTTPServer(("127.0.0.1", 0), HeldPacket)
+    server.packet = signed_address(address)
+    port = stack.enter_context(serve(server))
+    return f"http://127.0.0.1:{port}/pkarr?token=test"
+
+
+def check_ticket_discovery(client, fixture, host, mode, relay="", peer_relay="", pkarr=False):
+    # Release the discovery reply only after the original socket emits its Initial.
     command = (fixture, mode, peer_relay) if relay else (fixture, mode)
     supplied = "listen" if mode == "listen6" else "listen6"
     with process(*command) as server, ExitStack() as stack:
@@ -64,20 +112,24 @@ def check_ticket_discovery(client, fixture, host, mode, relay="", peer_relay="")
             return True
 
         if relay:
-            _, dns = dns_proxy(stack, 0, after_initial, relay_url=peer_relay)
+            _, source = dns_proxy(stack, 0, after_initial, relay_url=peer_relay)
         else:
             release = Event()
             release.set()
             forwarded, _ = stack.enter_context(supplied_route(real, mode, release, discovered))
             _, (_, proxy_port) = direct_ticket(forwarded, mode, 1)
             address = f"[{host}]:{proxy_port}" if mode == "listen6" else f"{host}:{proxy_port}"
-            _, dns = dns_proxy(stack, 0, after_initial, address=address)
+            if pkarr:
+                source = pkarr_source(stack, address, after_initial)
+            else:
+                _, source = dns_proxy(stack, 0, after_initial, address=address)
         route = "relay" if relay else "direct"
-        subprocess.run((client, "lookup-ticket", changed, route, host, str(port), dns), timeout=10, check=True)
+        subprocess.run((client, "lookup-ticket", changed, route, host, str(port), source), timeout=10, check=True)
         require_exchange(server)
         if not first or (not relay and (not discovered or initial_ids(discovered[0]) != first[0])):
             raise AssertionError("The discovered multipath route did not continue the original handshake")
-        print(f"PASS {supplied} ticket adopted DNS {route} for {mode} and used two paths", flush=True)
+        protocol = "signed Pkarr" if pkarr else "DNS"
+        print(f"PASS {supplied} ticket adopted {protocol} {route} for {mode} and used two paths", flush=True)
 
 
 def check_relay_nat(client, fixture, host, mode, relay, peer_relay):
@@ -259,9 +311,11 @@ if __name__ == "__main__":
             check_recovery(client, fixture, host, mode, family, relay, peer_relay, restore)
             continue
         if tickets:
+            check_ticket_identity(client, fixture, host, mode)
             check_ticket_paths(client, fixture, host, mode, both_live=False)
             check_ticket_paths(client, fixture, host, mode, both_live=True)
             check_ticket_discovery(client, fixture, host, mode)
+            check_ticket_discovery(client, fixture, host, mode, pkarr=True)
             if relay:
                 check_ticket_discovery(client, fixture, host, mode, relay, peer_relay)
             continue

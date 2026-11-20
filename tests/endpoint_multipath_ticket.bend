@@ -19,19 +19,25 @@ def check_route(owner: Multipath.Connection(), relay: Bool, host: String, port: 
         _ : Result<&1,&1,U32 & String,Unit> <- Multipath.disconnect(route)
         IO.die(Unit,1,"endpoint chose the wrong initial route")
 
-def ticket_lookup(text: String, dns: Maybe<&2,U32>) -> IO(Multipath.ConnectResult()):
-  match dns:
+def lookup_source(text: String, port: Maybe<&2,U32>) -> Endpoint.AddressLookup:
+  match port:
+    case Some{p}:
+      Endpoint.DnsLookup{Endpoint.DnsResolver{"dns.iroh.link.","127.0.0.1",p,12000}}
     case None{}:
-      Multipath.connect_ticket(text,List.replicate(U32,32n,73),alpn(),Endpoint.HandshakeTimeouts{12000,12000})
-    case Some{port}:
-      Multipath.connect_ticket_with_lookup(text,List.replicate(U32,32n,73),alpn(),Endpoint.HandshakeTimeouts{12000,12000},
-        [Endpoint.DnsLookup{Endpoint.DnsResolver{"dns.iroh.link.","127.0.0.1",port,12000}}])
+      Endpoint.PkarrLookup{text,12000}
 
-def ticket_exchange(text: String, host: String, port: Maybe<&2,U32>, dns: Maybe<&2,U32>, relay: Bool) -> IO(Unit):
+def ticket_lookup(text: String, sources: List<&2,Endpoint.AddressLookup>) -> IO(Multipath.ConnectResult()):
+  match sources:
+    case Nil{}:
+      Multipath.connect_ticket(text,List.replicate(U32,32n,73),alpn(),Endpoint.HandshakeTimeouts{12000,12000})
+    case Con{source,rest}:
+      Multipath.connect_ticket_with_lookup(text,List.replicate(U32,32n,73),alpn(),Endpoint.HandshakeTimeouts{12000,12000},Con{source,rest})
+
+def ticket_exchange(text: String, host: String, port: Maybe<&2,U32>, sources: List<&2,Endpoint.AddressLookup>, relay: Bool) -> IO(Unit):
   match port:
     case Some{n}:
       do IO<Unit>:
-        owner : Multipath.Connection() <- IO.try(Multipath.Connection(),ticket_lookup(text,dns))
+        owner : Multipath.Connection() <- IO.try(Multipath.Connection(),ticket_lookup(text,sources))
         check_route(owner,relay,host,n)
     case None{}:
       IO.die(Unit,2,"expected the Iroh direct port")
@@ -39,11 +45,11 @@ def ticket_exchange(text: String, host: String, port: Maybe<&2,U32>, dns: Maybe<
 def ticket_args(args: List<String>, lookup: Bool) -> IO(Unit):
   match args lookup:
     case [text,_,host,port] False{}:
-      ticket_exchange(text,host,U32.read(port),None{},False{})
-    case [text,route,host,port,dns] True{}:
-      ticket_exchange(text,host,U32.read(port),U32.read(dns),String.eq(route,"relay"))
+      ticket_exchange(text,host,U32.read(port),[],False{})
+    case [text,route,host,port,+source] True{}:
+      ticket_exchange(text,host,U32.read(port),[lookup_source(source,U32.read(source))],String.eq(route,"relay"))
     case _ _:
-      IO.die(Unit,2,"expected a ticket, route, peer address and optional DNS port")
+      IO.die(Unit,2,"expected a ticket, route, peer address and optional lookup source")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
