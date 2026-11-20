@@ -175,7 +175,10 @@ def PathIdleSample() -> Type:
 def PathTimers() -> Type:
   List<&1,PathIdleSample()> & List<&1,U32 & U32>
 
-def read_multipath_step(conn: MultipathConnection, default_path_idle_ms: U32)
+def relay_path_idle_timeout() -> U32:
+  30000
+
+def read_multipath_step(conn: MultipathConnection, direct_idle_ms: U32, relay_idle_ms: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,PathTimers()>):
   import "./quic_multipath.c"
 
@@ -232,12 +235,16 @@ def finish_multipath_step(progress: MultipathConnection & Result<&1,&1,U32 & Str
 def step_multipath(conn: MultipathConnection) -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   do IO<MultipathConnection & Result<&1,&1,U32 & String,U32>>:
     progress : MultipathConnection & Result<&1,&1,U32 & String,PathTimers()> <-
-      read_multipath_step(conn,15000)
+      read_multipath_step(conn,15000,relay_path_idle_timeout())
     finish_multipath_step(progress)
 
 # Override one path's local timer and rearm it. Zero disables the path timer.
 def set_multipath_path_idle_timeout(conn: MultipathConnection, path: U32, idle_ms: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+# The endpoint marks the path selected through its local relay bridge.
+def mark_multipath_relay_path(conn: MultipathConnection, path: U32) -> IO(MultipathConnection):
   import "./quic_multipath.c"
 
 # Step the authenticated client connection until its peer sends a ticket.
@@ -523,6 +530,11 @@ def bind_multipath_alpns_nat_offer(host: String, port: U32, seed: List<&2,U32>, 
 # Replace the preference list for new handshakes. An empty list pauses admission.
 def set_multipath_alpns(listener: MultipathListener, alpns: List<&2,List<&2,U32>>)
     -> IO(MultipathListener & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+# Feed the relay bridge into a private loopback socket on the same QUIC listener.
+def bind_multipath_relay_socket(listener: MultipathListener)
+    -> IO(MultipathListener & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
 # Drive the listener and poll for an authenticated connection.

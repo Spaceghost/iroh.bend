@@ -28,14 +28,27 @@ def attached_listener(bridge: Result<&1,&1,U32 & String,Relay.Bridge>, listener:
         Quic.close_multipath_listener(listener)
         return Fail{error}
 
+def start_inbound_bridge(socket: Quic.MultipathListener & Result<&1,&1,U32 & String,U32>, url: String,
+    seed: List<&2,U32>, port: U32, start: String -> List<&2,U32> -> U32 -> IO(Result<&1,&1,U32 & String,Relay.Bridge>))
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  match socket:
+    case (listener,Done{relay_port}):
+      do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
+        bridge : Result<&1,&1,U32 & String,Relay.Bridge> <- start(url,seed,relay_port)
+        attached_listener(bridge,listener,port)
+    case (listener,Fail{error}):
+      do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
+        Quic.close_multipath_listener(listener)
+        return Fail{error}
+
 def attach_inbound(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, url: String, seed: List<&2,U32>,
     start: String -> List<&2,U32> -> U32 -> IO(Result<&1,&1,U32 & String,Relay.Bridge>))
     -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   match bound:
-    case Done{(listener,+port)}:
+    case Done{(listener,port)}:
       do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
-        bridge : Result<&1,&1,U32 & String,Relay.Bridge> <- start(url,seed,port)
-        attached_listener(bridge,listener,port)
+        socket : Quic.MultipathListener & Result<&1,&1,U32 & String,U32> <- Quic.bind_multipath_relay_socket(listener)
+        start_inbound_bridge(socket,url,seed,port,start)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,RelayedListener & U32>,Fail{error})
 
@@ -248,6 +261,16 @@ def observe_nat_relay(outcome: Nat.ConnectResult(), relay: Relay.Bridge, discove
     case result _:
       Endpoint.attach_connection(Nat.Connection(),result,relay)
 
+def mark_nat_relay(outcome: Nat.ConnectResult(), relay: Relay.Bridge, discovery: Maybe<&2,Nat.DiscoveryOptions>)
+    -> IO(NatRelayResult()):
+  match outcome:
+    case Done{(conn,state)}:
+      do IO<NatRelayResult()>:
+        marked : Quic.MultipathConnection <- Quic.mark_multipath_relay_path(conn,0)
+        observe_nat_relay(Done{(marked,state)},relay,discovery)
+    case Fail{error}:
+      Endpoint.attach_connection(Nat.Connection(),Fail{error},relay)
+
 def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, identity: Endpoint.Identity,
     source: Endpoint.Address, limit: U32, timeout: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
   match result:
@@ -257,7 +280,7 @@ def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, iden
       do IO<NatRelayResult()>:
         connected : Nat.ConnectResult() <-
           Nat.connect_from("127.0.0.1",port,seed,peer,alpn,local_ip,local_port,limit,U32.to_nat(timeout))
-        observe_nat_relay(connected,bridge,discovery)
+        mark_nat_relay(connected,bridge,discovery)
     case Fail{error}:
       IO.pure(NatRelayResult(),Fail{error})
 
@@ -295,10 +318,31 @@ def shared_handshake() -> Race.Backend<Quic.MultipathConnection>:
     Quic.read_multipath_handshake_socket,Quic.multipath_handshake_output,Quic.adopt_multipath_handshake_socket,
     Quic.close_multipath,"QUIC multipath handshake timed out"}
 
+def mark_relay(owner: Connection(), path: U32) -> IO(Connection()):
+  (conn,bridge) = owner
+  do IO<Connection()>:
+    marked : Quic.MultipathConnection <- Quic.mark_multipath_relay_path(conn,path)
+    return (marked,bridge)
+
+def mark_winning_relay(outcome: ConnectResult()) -> IO(ConnectResult()):
+  match outcome:
+    case Done{(conn,Some{bridge})}:
+      do IO<ConnectResult()>:
+        marked : Connection() <- mark_relay((conn,Some{bridge}),0)
+        return Done{marked}
+    case result:
+      IO.pure(ConnectResult(),result)
+
+def start_route(plan: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
+    sources: List<&2,Endpoint.AddressLookup>, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    connected : ConnectResult() <- Endpoint.start_dial_using(~Quic.MultipathConnection,~shared_handshake(),
+      ~Quic.start_multipath_route_handshake_with_idle_timeout,idle_ms,plan,identity,timeouts,sources)
+    mark_winning_relay(connected)
+
 def connect_with_lookup_and_idle_timeout(plan: Endpoint.Routes, +identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
     sources: List<&2,Endpoint.AddressLookup>, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
-  Endpoint.before_connect(Connection(),identity,u => Endpoint.start_dial_using(~Quic.MultipathConnection,~shared_handshake(),
-    ~Quic.start_multipath_route_handshake_with_idle_timeout,idle_ms,plan,identity,timeouts,sources))
+  Endpoint.before_connect(Connection(),identity,u => start_route(plan,identity,timeouts,sources,idle_ms))
 
 def connect_routes_with_idle_timeout(plan: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
     idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
@@ -329,8 +373,7 @@ def dial_verified(result: Result<&1,&1,U32 & String,Endpoint.Routes>, identity: 
     timeouts: Endpoint.Timeouts) -> IO(ConnectResult()):
   match result:
     case Done{plan}:
-      Endpoint.start_dial_using(~Quic.MultipathConnection,~shared_handshake(),~Quic.start_multipath_route_handshake_with_idle_timeout,
-        Close.default_idle_timeout(),plan,identity,timeouts,[])
+      start_route(plan,identity,timeouts,[],Close.default_idle_timeout())
     case Fail{error}:
       IO.pure(ConnectResult(),Fail{error})
 
@@ -472,7 +515,8 @@ def setup_routed(result: ConnectResult(), candidates: List<&2,Endpoint.Address>,
   match result:
     case Done{(conn,Some{+bridge})}:
       do IO<RoutedResult()>:
-        configured : Quic.MultipathConnection <- configure_relay_qad(conn,Relay.bridge_url(bridge))
+        marked : Quic.MultipathConnection <- Quic.mark_multipath_relay_path(conn,0)
+        configured : Quic.MultipathConnection <- configure_relay_qad(marked,Relay.bridge_url(bridge))
         driver : Quic.MultipathConnection & Nat.DialerResult() <- Nat.initialize_relay(configured,routed_nat_limit())
         return relay_route_ready(driver,bridge,candidates,now)
     case Done{owner}:
@@ -687,13 +731,14 @@ def finish_backup_probe(outcome: Connection() & Result<&1,&1,U32 & String,Maybe<
     case (conn,_) _:
       stop_backup(conn,rest,now)
 
-def arm_backup(outcome: Connection() & Result<&1,&1,U32 & String,Unit>, path: U32,
+def arm_backup(outcome: Connection() & Result<&1,&1,U32 & String,Unit>, +path: U32,
     rest: List<&2,String>, now: U32) -> IO(BackupProgress()):
   match outcome:
     case (conn,Done{_}):
       do IO<BackupProgress()>:
+        marked : Connection() <- mark_relay(conn,path)
         watched : Connection() & Result<&1,&1,U32 & String,Unit> <-
-          use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.set_multipath_keepalive(c,1000))
+          use_connection(Result<&1,&1,U32 & String,Unit>,marked,c => Quic.set_multipath_keepalive(c,1000))
         return (without_status(watched),StandbyBackup{path})
     case (conn,Fail{_}):
       do IO<BackupProgress()>:

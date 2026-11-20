@@ -503,10 +503,14 @@ check-quic-multipath: $(BUILD)/iroh-bend-quic-multipath
 	@test -x "$(UPSTREAM_QUIC_MULTIPATH)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH to the Iroh multipath fixture.' >&2; exit 2; }
 	sh tests/quic_multipath.sh "$(BUILD)/iroh-bend-quic-multipath" "$(UPSTREAM_QUIC_MULTIPATH)"
 
-.PHONY: check-quic-path-idle
+.PHONY: check-quic-path-idle check-quic-path-idle-relay-profiles
 check-quic-path-idle: $(BUILD)/iroh-bend-quic-multipath-path-idle
 	@test -x "$(UPSTREAM_QUIC_PATH_IDLE)" || { echo 'Set UPSTREAM_QUIC_PATH_IDLE to the Iroh 1.5.0 path idle fixture.' >&2; exit 2; }
 	python3 -B tests/quic_multipath_path_idle.py "$<" "$(UPSTREAM_QUIC_PATH_IDLE)"
+
+check-quic-path-idle-relay-profiles: $(BUILD)/iroh-bend-quic-multipath-path-idle
+	@test -x "$(UPSTREAM_QUIC_PATH_IDLE)" || { echo 'Set UPSTREAM_QUIC_PATH_IDLE to the Iroh 1.5.0 path idle fixture.' >&2; exit 2; }
+	python3 -B tests/quic_multipath_path_idle.py "$<" "$(UPSTREAM_QUIC_PATH_IDLE)" --relay-profiles
 
 check-quic-multipath-listener: $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath
 	@test -x "$(UPSTREAM_QUIC_MULTIPATH_DIAL)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH_DIAL to the Iroh multipath dialer.' >&2; exit 2; }

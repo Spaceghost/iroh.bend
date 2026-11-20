@@ -108,16 +108,15 @@ def remote_abandoned(lines):
     )
 
 
-def dial(bend, reference, host, traffic, limit_ms, earliest, latest, validated=False):
+def dial(bend, reference, host, traffic, limit_ms, earliest, latest, mode="pending"):
     with Peer(reference, "listen", host) as upstream:
         port = upstream.port()
         with AlternateRoute(host, port, traffic) as alternate:
-            with Peer(bend, host, str(port), str(alternate.port), str(limit_ms),
-                      "validated" if validated else "pending") as local:
+            with Peer(bend, host, str(port), str(alternate.port), str(limit_ms), mode) as local:
                 start = local.expect("CANDIDATE 1")
-                if validated:
+                if mode != "pending":
                     alternate.traffic = "none"
-                elapsed = local.expect("EXPIRED 1") - start
+                elapsed = local.expect("EXPIRED 1", max(12, latest + 1)) - start
                 assert earliest <= elapsed <= latest, (elapsed, earliest, latest, local.lines)
                 _, result = upstream.match(lambda line: line.startswith("SURVIVOR "))
                 local.expect("SURVIVOR 0")
@@ -135,22 +134,27 @@ def dial(bend, reference, host, traffic, limit_ms, earliest, latest, validated=F
           f"Noq saw {view}, fresh data on path 0")
 
 
-def listen(bend, reference, host):
-    with Peer(bend, host, "1500") as local:
+def listen(bend, reference, host, profile=None):
+    with Peer(bend, host, "0" if profile else "1500") as local:
+        if profile:
+            _, relay = local.match(lambda line: line.startswith("RELAY PORT "))
+            relay_port = int(relay.split()[-1])
         port = local.port()
-        with AlternateRoute(host, port, "both") as alternate:
+        target = relay_port if profile == "relay" else port
+        with AlternateRoute(host, target, "both") as alternate:
             with Peer(reference, "dial", address(host, port), address(host, alternate.port), "0", "validated") as upstream:
                 start = local.expect("CANDIDATE 1")
                 upstream.expect("CANDIDATE 1")
                 alternate.traffic = "none"
-                elapsed = local.expect("EXPIRED 1") - start
-                assert 1.4 <= elapsed <= 2.5, (elapsed, local.lines)
+                elapsed = local.expect("EXPIRED 1", 37 if profile else 12) - start
+                earliest, latest = {"direct": (14.7, 19), "relay": (29.7, 35)}.get(profile, (1.4, 2.5))
+                assert earliest <= elapsed <= latest, (elapsed, local.lines)
                 upstream.match(lambda line: line.startswith("SURVIVOR "))
                 local.expect("SURVIVOR 0")
                 assert remote_abandoned(upstream.lines), upstream.lines
                 local.done()
                 upstream.done()
-    print(f"PASS {host} Bend listener, path 1 expired at {elapsed:.3f}s, "
+    print(f"PASS {host} Bend {profile or 'configured'} listener, path 1 expired at {elapsed:.3f}s, "
           "Noq saw RemoteAbandoned(15990), fresh data on path 0")
 
 
@@ -193,14 +197,24 @@ def single_path(bend, reference, host):
 
 
 def main():
-    bend, reference = map(os.path.abspath, sys.argv[1:])
+    bend, reference = map(os.path.abspath, sys.argv[1:3])
+    if sys.argv[3:] == ["--relay-profiles"]:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            cases = (
+                pool.submit(dial, bend, reference, "127.0.0.1", "both", 30000, 29.7, 35, "relay"),
+                pool.submit(listen, bend, reference, "127.0.0.1", "relay"),
+                pool.submit(listen, bend, reference, "127.0.0.1", "direct"),
+            )
+            for case in cases:
+                case.result()
+        return
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         cases = []
         for host in ("127.0.0.1", "::1"):
             cases.extend((
                 pool.submit(dial, bend, reference, host, "none", 8000, 7.9, 9.5),
                 pool.submit(dial, bend, reference, host, "out", 8000, 7.9, 9.5),
-                pool.submit(dial, bend, reference, host, "both", 1500, 1.4, 2.5, True),
+                pool.submit(dial, bend, reference, host, "both", 1500, 1.4, 2.5, "validated"),
                 pool.submit(dial, bend, reference, host, "none", 25, 0.70, 1.50),
                 pool.submit(listen, bend, reference, host),
                 pool.submit(last_path, bend, reference, host),

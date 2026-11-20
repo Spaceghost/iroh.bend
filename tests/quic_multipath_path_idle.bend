@@ -27,6 +27,12 @@ def set_idle(conn: Q.MultipathConnection, path: U32, idle_ms: U32) -> IO(Q.Multi
     ready : Q.MultipathConnection & Unit <- Peer.ok(Unit,result)
     return Peer.released(ready)
 
+def without_heartbeats(conn: Q.MultipathConnection) -> IO(Q.MultipathConnection):
+  do IO<Q.MultipathConnection>:
+    result : Q.MultipathConnection & Result<&1,&1,U32 & String,Unit> <- Q.set_multipath_keepalive(conn,0)
+    ready : Q.MultipathConnection & Unit <- Peer.ok(Unit,result)
+    return Peer.released(ready)
+
 def announce(label: String, path: U32) -> IO(Unit):
   IO.print(String.append(label,U32.show(path)))
 
@@ -130,14 +136,23 @@ def candidate_test(conn: Q.MultipathConnection, +path: U32, heartbeat: Bool) -> 
     case False{}:
       do IO<Unit>:
         announce("CANDIDATE ",path)
-        await_expiry(1200n,conn,path,True{})
+        await_expiry(1800n,conn,path,True{})
+
+def candidate_limit(conn: Q.MultipathConnection, path: U32, idle_ms: U32, mode: U32) -> IO(Q.MultipathConnection):
+  match mode:
+    case 3:
+      do IO<Q.MultipathConnection>:
+        quiet : Q.MultipathConnection <- without_heartbeats(conn)
+        Q.mark_multipath_relay_path(quiet,path)
+    case _:
+      set_idle(conn,path,idle_ms)
 
 def dial_candidate(opened: Q.MultipathConnection & U32, idle_ms: U32, +mode: U32) -> IO(Unit):
   (conn,+path) = opened
   do IO<Unit>:
     ready : Q.MultipathConnection <- validated(conn,path,U32.is_ne(mode,0))
     original : Q.MultipathConnection <- set_idle(ready,0,1200)
-    configured : Q.MultipathConnection <- set_idle(original,path,idle_ms)
+    configured : Q.MultipathConnection <- candidate_limit(original,path,idle_ms,mode)
     candidate_test(configured,path,U32.is_eq(mode,2))
 
 def dial(+host: String, port: U32, secondary: U32, idle_ms: U32, mode: U32) -> IO(Unit):
@@ -148,14 +163,21 @@ def dial(+host: String, port: U32, secondary: U32, idle_ms: U32, mode: U32) -> I
     opened : Q.MultipathConnection & U32 <- Peer.probe(2000n,primed,host,secondary)
     dial_candidate(opened,idle_ms,mode)
 
+def listener_limit(conn: Q.MultipathConnection, path: U32, idle_ms: U32) -> IO(Q.MultipathConnection):
+  match idle_ms:
+    case 0:
+      without_heartbeats(conn)
+    case _:
+      set_idle(conn,path,idle_ms)
+
 def listen_candidate(ready: Q.MultipathConnection & U32, idle_ms: U32) -> IO(Unit):
   (conn,+path) = ready
   do IO<Unit>:
     used : Q.MultipathConnection <- echo(conn,22,path)
     original : Q.MultipathConnection <- set_idle(used,0,1200)
-    configured : Q.MultipathConnection <- set_idle(original,path,idle_ms)
+    configured : Q.MultipathConnection <- listener_limit(original,path,idle_ms)
     announce("CANDIDATE ",path)
-    await_expiry(1200n,configured,path,False{})
+    await_expiry(1800n,configured,path,False{})
 
 def serve(pair: Q.MultipathListener & Q.MultipathConnection, idle_ms: U32) -> IO(Unit):
   (listener,conn) = pair
@@ -172,11 +194,32 @@ def wait_for_accept(bound: Q.MultipathListener & U32, idle_ms: U32) -> IO(Unit):
     accepted : Q.MultipathListener & Q.MultipathConnection <- Listener.accept(4000n,listener)
     serve(accepted,idle_ms)
 
+def announce_relay_socket(bound: Q.MultipathListener & Result<&1,&1,U32 & String,U32>, direct: U32) -> IO(Unit):
+  match bound:
+    case (listener,Done{relay}):
+      do IO<Unit>:
+        announce("RELAY PORT ",relay)
+        wait_for_accept((listener,direct),0)
+    case (listener,Fail{(code,message)}):
+      do IO<Unit>:
+        Q.close_multipath_listener(listener)
+        IO.die(Unit,code,message)
+
+def listen_bound(bound: Q.MultipathListener & U32, idle_ms: U32) -> IO(Unit):
+  (listener,port) = bound
+  match idle_ms:
+    case 0:
+      do IO<Unit>:
+        socket : Q.MultipathListener & Result<&1,&1,U32 & String,U32> <- Q.bind_multipath_relay_socket(listener)
+        announce_relay_socket(socket,port)
+    case _:
+      wait_for_accept((listener,port),idle_ms)
+
 def listen(host: String, idle_ms: U32) -> IO(Unit):
   do IO<Unit>:
     bound : Q.MultipathListener & U32 <- IO.try(Q.MultipathListener & U32,
       Q.bind_multipath(host,0,List.replicate(U32,32n,73),Peer.fixture_key(0),"iroh-bend/compat/1"))
-    wait_for_accept(bound,idle_ms)
+    listen_bound(bound,idle_ms)
 
 def dial_options(host: String, port: Maybe<&2,U32>, secondary: Maybe<&2,U32>, idle: Maybe<&2,U32>, mode: U32) -> IO(Unit):
   match port secondary idle:
@@ -253,6 +296,8 @@ def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,host,port,secondary,idle,"heartbeat"]:
       dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),2)
+    case [_,host,port,secondary,idle,"relay"]:
+      dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),3)
     case [_,host,port,secondary,idle,"validated"]:
       dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),1)
     case [_,host,port,secondary,idle,"pending"]:
