@@ -615,7 +615,7 @@ $(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endp
 # Build the endpoint integration fixture without compiler optimizations.
 $(BUILD)/iroh-bend-quic-multipath-idle-routes: $(BUILD)/quic-multipath-idle-routes.c
 $(BUILD)/iroh-bend-quic-multipath-idle-listeners: $(BUILD)/quic-multipath-idle-listeners.c
-$(BUILD)/iroh-bend-quic-multipath-relay-close $(BUILD)/iroh-bend-quic-multipath-idle-routes $(BUILD)/iroh-bend-quic-multipath-idle-listeners $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
+$(BUILD)/iroh-bend-quic-multipath-relay-close $(BUILD)/iroh-bend-quic-multipath-resumption-relay $(BUILD)/iroh-bend-quic-multipath-idle-routes $(BUILD)/iroh-bend-quic-multipath-idle-listeners $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
 	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
@@ -636,6 +636,11 @@ $(BUILD)/quic-multipath-listener.c $(BUILD)/quic-multipath-path-idle.c: $(BUILD)
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/$(subst -,_,$*).bend -o "$(abspath $@)"
+
+.PHONY: check-quic-multipath-resumption-idle-relay
+check-quic-multipath-resumption-idle-relay: $(BUILD)/iroh-bend-quic-multipath-resumption-relay
+	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" && test -n "$(RELAY_URL)" && test -n "$(UPSTREAM_IROH_RELAY_URL)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE, RELAY_URL, and UPSTREAM_IROH_RELAY_URL.' >&2; exit 2; }
+	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" --relay "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 .PHONY: check-quic-multipath-resumption-idle-listener
 check-quic-multipath-resumption-idle-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
@@ -816,7 +821,7 @@ check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
 	"$<" seal
 	@set -e; for role in outbound inbound; do for version in 1 2; do "$<" "$(RELAY_URL)" "$$role" "$$version"; done; done
 
-MULTIPATH_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-multipath-,$(addsuffix .c,relay-close idle-routes idle-listeners))
+MULTIPATH_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-multipath-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-relay))
 DATAGRAM_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-datagram-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-idle))
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
 $(BUILD)/quic-datagram-idle-routes.c: tests/quic_datagram_idle_routes.bend tests/quic_idle_routes.bend
@@ -824,6 +829,7 @@ $(BUILD)/quic-datagram-idle-listeners.c: tests/quic_datagram_idle_listeners.bend
 $(BUILD)/quic-datagram-resumption-idle.c: tests/quic_datagram_resumption_idle.bend tests/quic_early_listener.bend
 $(DATAGRAM_CLOSE_TEST_C): tests/quic_datagram_relay_close.bend tests/quic_datagram_cancel.bend tests/quic_datagram.bend
 $(BUILD)/quic-multipath-idle-routes.c: tests/quic_multipath_idle_routes.bend tests/quic_idle_routes.bend
+$(BUILD)/quic-multipath-resumption-relay.c: tests/quic_multipath_resumption_relay.bend tests/quic_multipath_early_listener.bend
 $(BUILD)/quic-multipath-idle-listeners.c: tests/quic_multipath_idle_listeners.bend tests/quic_idle_listeners.bend
 $(MULTIPATH_CLOSE_TEST_C): tests/quic_multipath_relay_close.bend tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(DATAGRAM_CLOSE_TEST_C) $(MULTIPATH_CLOSE_TEST_C): tests/quic_relay_close.bend tests/quic_idle_timeout.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))

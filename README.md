@@ -611,6 +611,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   opt-in early-data flag. Poll with `EndpointMultipath.accept_listener`
   to get normal Picoquic connection handles. Keep the listener open while
   its relay connections are in use, then call `EndpointMultipath.close_listener`.
+  `EndpointMultipath.bind_relay_identity_with_idle_timeout` and
+  `EndpointMultipath.bind_direct_relay_identity_with_idle_timeout` take a
+  final QUIC VarInt in milliseconds. The same connection limit applies to
+  warm and resumed sessions over the relay and either direct IP family.
 - `EndpointMultipath.bind_nat_listener` offers a NAT traversal limit on
   the shared Picoquic listener. `EndpointMultipath.accept_nat_listener`
   returns a connection and its NAT driver. The listener discovers public
@@ -968,7 +972,9 @@ Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and
 `UPSTREAM_IROH_RELAY_URL` to its HTTP or HTTPS base URL. In
 `dial-relay` mode the Iroh peer has only a relay address and checks that it
 received application datagrams on that path during both connections. The
-suite also dials the combined listener directly over IPv4 and IPv6.
+suite also dials the combined listener directly over IPv4 and IPv6. The
+same checks run against the Picoquic endpoint with
+`make check-quic-multipath-resumption-idle-relay`.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

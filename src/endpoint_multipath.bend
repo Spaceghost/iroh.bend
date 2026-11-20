@@ -71,22 +71,32 @@ def bind_with_idle_timeout(address: Endpoint.Address, identity: Endpoint.Identit
 
 # Register before returning the relay-only listener. The bridge owns the route
 # from this relay to the local QUIC socket for all accepted peer connections.
-def bind_relay_identity(url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+def bind_relay_identity_with_idle_timeout(url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,RelayedListener>):
   do IO<Result<&1,&1,U32 & String,RelayedListener>>:
     bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
-      Quic.bind_multipath_identity("127.0.0.1",0,seed,alpns,early_data)
+      Quic.bind_multipath_identity_with_idle_timeout("127.0.0.1",0,seed,alpns,early_data,idle_ms)
     attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_inbound(bound,url,seed,address => secret => port => Inbound.start(address,secret,port))
     return relay_only(attached)
 
+def bind_relay_identity(url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  bind_relay_identity_with_idle_timeout(url,seed,alpns,early_data,Close.default_idle_timeout())
+
 # Both IP families and the relay feed a single Picoquic context. The
 # listener owns relay registration for the lifetime of its connections.
-def bind_direct_relay_identity(port: U32, url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+def bind_direct_relay_identity_with_idle_timeout(port: U32, url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
     bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
-      Quic.bind_dual_multipath_identity("::",port,seed,alpns,early_data)
+      Quic.bind_dual_multipath_identity_with_idle_timeout("::",port,seed,alpns,early_data,idle_ms)
     attach_listener(bound,url,seed)
+
+def bind_direct_relay_identity(port: U32, url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  bind_direct_relay_identity_with_idle_timeout(port,url,seed,alpns,early_data,Close.default_idle_timeout())
 
 def listener_result(result: Quic.MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>,
     bridge: Relay.Bridge) -> RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>:
