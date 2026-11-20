@@ -526,9 +526,12 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   discards the oldest message so it can accept the newest one.
 - The optional [multipath endpoint](src/endpoint_multipath.bend) uses
   Picoquic with the endpoint route planner. Call `connect_routes` with
-  explicit routes, `lookup_and_connect` with a DNS source, or
-  `verify_and_connect` with a signed Pkarr packet. Route dialing passes
-  the endpoint's ALPN bytes unchanged. Use `probe_direct` to add a
+  explicit routes or `connect_ticket` with an Iroh endpoint ticket. To add
+  DNS or Pkarr sources while dialing, use `connect_with_lookup` or
+  `connect_ticket_with_lookup`. The first authenticated route carries the
+  connection. `lookup_and_connect` also accepts a DNS source, and
+  `verify_and_connect` accepts a signed Pkarr packet. These calls preserve
+  the endpoint's ALPN bytes. Use `probe_direct` to add a
   direct path while keeping an existing relay path. Pass stream and
   datagram operations through `use_connection` to keep relay ownership
   with the QUIC connection. Call `disconnect` to close both.
@@ -710,15 +713,10 @@ at `ea3bbb6ab41fa23816d7f9e3220ab77d444435b2`. The reference implementations
 for the wire tests are the upstream [relay message codec](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/relay.rs)
 and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/handshake.rs).
 
-Full drop-in compatibility remains open. Known differences include the following.
-
-- A listener can advertise its initial observed UDP address. Refreshing that
-  advertisement after a live listener's NAT mapping changes is parked. The
-  outbound routed connection has a separate passing address-refresh test below.
-- The shared-stream/datagram endpoint races initial paths. The separate
-  Picoquic multipath endpoint still tries its supplied bootstrap paths in
-  sequence. Its established-connection path promotion and recovery tests are
-  listed below.
+Full drop-in compatibility remains open. A listener can advertise its initial
+observed UDP address. Refreshing that advertisement after a live listener’s
+NAT mapping changes is parked. The outbound routed connection has a separate
+passing address-refresh test below.
 
 Ticket lookup passes two complementary tests against Iroh 1.5.0 on IPv4 and
 IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.
@@ -736,6 +734,20 @@ working direct path, and holds a direct path silent until discovery yields a
 working relay.
 Run `make check-endpoint-ticket-lookup` with the upstream lookup fixtures.
 [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
+
+The Picoquic multipath endpoint also sends one pinned handshake over the
+available direct and relay routes. Its ticket tests capture matching QUIC
+Initial connection IDs on two supplied addresses, with one silent and with both
+working. Other cases start on a silent IPv4 or IPv6 address and release a direct
+address in the other family through DNS or signed Pkarr. A DNS record can also
+supply the working WS or WSS relay. Iroh verifies application datagrams and
+receives streams on two paths of the same connection. A ticket with the wrong
+endpoint key produces a TLS alert visible to Iroh. Run
+`make check-endpoint-multipath` with the Iroh multipath listener in
+`UPSTREAM_ENDPOINT_MULTIPATH` and the OpenSSL CLI available for signing test
+records. Set `RELAY_URL` and `UPSTREAM_IROH_RELAY_URL` for the relay cases.
+Run `make check-multipath-negotiation` to exercise the close sent to an
+authenticated peer that supports only single-path QUIC.
 
 Ticket construction and decoding normalize relay URLs before ordering and
 deduplicating addresses. Discovery uses the same parser when it joins the
