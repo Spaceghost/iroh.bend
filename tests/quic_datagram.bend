@@ -4,6 +4,7 @@ import ../src/quic_datagram.bend as Quic
 type Mode is Type:
   PacketAck{}
   ApplicationEcho{}
+  SharedConnection{}
   WrongKey{}
 
 def public_key(wrong: Bool) -> List<&2,U32>:
@@ -131,18 +132,186 @@ def receive_reply(fuel: Nat, conn: Quic.DatagramConnection, +expected: List<&2,U
           Quic.read_quic_datagram(ready)
         received_reply(outcome,expected,waiting => receive_reply(left,waiting,expected))
 
-def receive_burst(count: Nat, conn: Quic.DatagramConnection) -> IO(Unit):
+type StreamAction is Data:
+  OpenStream{direction: U32}
+  AcceptStream{direction: U32}
+  QueueStream{id: U32, bytes: List<&2,U32>, finish: U32}
+  FlushStream{id: U32}
+
+def stream_action(conn: Quic.DatagramConnection, action: StreamAction)
+    -> IO(Quic.DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  match action:
+    case OpenStream{direction}:
+      Quic.open_quic_stream(conn,direction)
+    case AcceptStream{direction}:
+      Quic.accept_quic_stream(conn,direction)
+    case QueueStream{id,bytes,finish}:
+      Quic.queue_quic_stream(conn,id,bytes,finish)
+    case FlushStream{id}:
+      Quic.flush_quic_stream(conn,id)
+
+def poll_stream_value(outcome: Quic.DatagramConnection & U32,
+    retry: Quic.DatagramConnection -> IO(Quic.DatagramConnection & U32))
+    -> IO(Quic.DatagramConnection & U32):
+  match outcome:
+    case (conn,0):
+      do IO<Quic.DatagramConnection & U32>:
+        IO.sleep(1)
+        retry(conn)
+    case value:
+      IO.pure(Quic.DatagramConnection & U32,value)
+
+def poll_stream(fuel: Nat, conn: Quic.DatagramConnection, +action: StreamAction)
+    -> IO(Quic.DatagramConnection & U32):
+  match fuel:
+    case 0n:
+      do IO<Quic.DatagramConnection & U32>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.DatagramConnection & U32,1,"shared QUIC stream operation timed out")
+    case 1n+left:
+      do IO<Quic.DatagramConnection & U32>:
+        ready : Quic.DatagramConnection <- step(conn)
+        result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- stream_action(ready,action)
+        outcome : Quic.DatagramConnection & U32 <- check_progress(result)
+        poll_stream_value(outcome,next => poll_stream(left,next,action))
+
+def stream_submit(conn: Quic.DatagramConnection, action: StreamAction) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    outcome : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,action)
+    next_connection(outcome)
+
+def valid_prefix(equal: Bool, remaining: Maybe<&1,List<&2,U32>>) -> Maybe<&1,List<&2,U32>>:
+  match equal:
+    case True{}:
+      remaining
+    case False{}:
+      None{}
+
+def stream_prefix(actual: List<&2,U32>, expected: List<&2,U32>) -> Maybe<&1,List<&2,U32>>:
+  match actual expected:
+    case Nil{} tail:
+      Some{tail}
+    case Con{byte,rest} Con{value,tail}:
+      valid_prefix(U32.is_eq(byte,value),stream_prefix(rest,tail))
+    case _ _:
+      None{}
+
+def incomplete_stream(conn: Quic.DatagramConnection, message: String) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    Quic.drop_quic_datagram(conn)
+    IO.die(Quic.DatagramConnection,1,message)
+
+def consume_prefix(conn: Quic.DatagramConnection, remaining: Maybe<&1,List<&2,U32>>,
+    next: Quic.DatagramConnection -> List<&2,U32> -> IO(Quic.DatagramConnection))
+    -> IO(Quic.DatagramConnection):
+  match remaining:
+    case Some{tail}:
+      next(conn,tail)
+    case None{}:
+      incomplete_stream(conn,"upstream Iroh stream sent unexpected bytes")
+
+def consume_stream(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,Quic.QuicStreamRead>,
+    expected: List<&2,U32>, next: Quic.DatagramConnection -> List<&2,U32> -> IO(Quic.DatagramConnection))
+    -> IO(Quic.DatagramConnection):
+  match outcome expected:
+    case (conn,Done{Quic.QuicStreamBytes{actual}}) tail:
+      consume_prefix(conn,stream_prefix(actual,tail),next)
+    case (conn,Done{Quic.QuicStreamFin{}}) Nil{}:
+      IO.pure(Quic.DatagramConnection,conn)
+    case (conn,Done{Quic.QuicStreamFin{}}) _:
+      incomplete_stream(conn,"upstream Iroh stream ended before the expected bytes")
+    case (conn,Done{Quic.QuicStreamPending{}}) tail:
+      do IO<Quic.DatagramConnection>:
+        IO.sleep(1)
+        next(conn,tail)
+    case (conn,Fail{(code,message)}) _:
+      do IO<Quic.DatagramConnection>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.DatagramConnection,code,message)
+
+def receive_stream(fuel: Nat, conn: Quic.DatagramConnection, +id: U32, expected: List<&2,U32>)
+    -> IO(Quic.DatagramConnection):
+  match fuel:
+    case 0n:
+      incomplete_stream(conn,"upstream Iroh stream read timed out")
+    case 1n+left:
+      do IO<Quic.DatagramConnection>:
+        ready : Quic.DatagramConnection <- step(conn)
+        outcome : Quic.DatagramConnection & Result<&1,&1,U32 & String,Quic.QuicStreamRead> <-
+          Quic.read_quic_stream(ready,id,4096)
+        consume_stream(outcome,expected,next => tail => receive_stream(left,next,id,tail))
+
+def released(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,Unit>) -> IO(Quic.DatagramConnection):
+  match outcome:
+    case (conn,Done{_}):
+      IO.pure(Quic.DatagramConnection,conn)
+    case (conn,Fail{(code,message)}):
+      do IO<Quic.DatagramConnection>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.DatagramConnection,code,message)
+
+def release_stream(conn: Quic.DatagramConnection, id: U32) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    outcome : Quic.DatagramConnection & Result<&1,&1,U32 & String,Unit> <- Quic.drop_quic_stream(conn,id)
+    released(outcome)
+
+def finish_shared(incoming: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Unit):
+  (reading,+incoming_id) = incoming
+  do IO<Unit>:
+    read : Quic.DatagramConnection <- receive_stream(2500n,reading,incoming_id,[7,0,255])
+    bidi_only : Quic.DatagramConnection <- release_stream(read,incoming_id)
+    bidi_flushed : Quic.DatagramConnection <- stream_submit(bidi_only,FlushStream{bidi_id})
+    queued_tail : Quic.DatagramConnection <- stream_submit(bidi_flushed,QueueStream{bidi_id,[0,255],0})
+    tail_sent : Quic.DatagramConnection <- stream_submit(queued_tail,FlushStream{bidi_id})
+    queued_fin : Quic.DatagramConnection <- stream_submit(tail_sent,QueueStream{bidi_id,[],1})
+    fin_sent : Quic.DatagramConnection <- stream_submit(queued_fin,FlushStream{bidi_id})
+    bidi_read : Quic.DatagramConnection <- receive_stream(2500n,fin_sent,bidi_id,List.replicate(U32,70000n,18))
+    complete : Quic.DatagramConnection <- release_stream(bidi_read,bidi_id)
+    Quic.drop_quic_datagram(complete)
+    IO.print("PASS binary, empty, and burst datagrams shared one Iroh connection with bidi and uni streams")
+
+def start_shared(outgoing: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Unit):
+  (both,+uni_id) = outgoing
+  do IO<Unit>:
+    queued : Quic.DatagramConnection <- stream_submit(both,QueueStream{bidi_id,List.replicate(U32,16384n,17),0})
+    first : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.flush_quic_stream(queued,bidi_id)
+    partial : Quic.DatagramConnection & U32 <- check_progress(first)
+    partial_conn : Quic.DatagramConnection <- next_connection(partial)
+    uni_queued : Quic.DatagramConnection <- stream_submit(partial_conn,QueueStream{uni_id,[12,0,255],1})
+    uni_flushed : Quic.DatagramConnection <- stream_submit(uni_queued,FlushStream{uni_id})
+    sending : Quic.DatagramConnection <- release_stream(uni_flushed,uni_id)
+    datagram : Quic.DatagramConnection <- send_datagram(1500n,sending,[2])
+    reply : Quic.DatagramConnection <- receive_reply(1500n,datagram,[3])
+    incoming : Quic.DatagramConnection & U32 <- poll_stream(2500n,reply,AcceptStream{1})
+    finish_shared(incoming,bidi_id)
+
+def shared_exchange(bidi: Quic.DatagramConnection & U32) -> IO(Unit):
+  (conn,bidi_id) = bidi
+  do IO<Unit>:
+    outgoing : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,OpenStream{1})
+    start_shared(outgoing,bidi_id)
+
+def receive_burst(count: Nat, conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection):
   match count:
     case 0n:
-      do IO<Unit>:
-        Quic.drop_quic_datagram(conn)
-        IO.print("PASS exchanged binary, empty, and burst QUIC datagrams with the upstream Iroh application")
+      IO.pure(Quic.DatagramConnection,conn)
     case 1n+left:
-      do IO<Unit>:
+      do IO<Quic.DatagramConnection>:
         next : Quic.DatagramConnection <- receive_reply(1500n,conn,[14,255])
         receive_burst(left,next)
 
-def exchange_result(conn: Quic.DatagramConnection, echo: Bool) -> IO(Unit):
+def after_burst(conn: Quic.DatagramConnection, shared: Bool) -> IO(Unit):
+  match shared:
+    case True{}:
+      do IO<Unit>:
+        bidi : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,OpenStream{0})
+        shared_exchange(bidi)
+    case False{}:
+      do IO<Unit>:
+        Quic.drop_quic_datagram(conn)
+        IO.print("PASS binary, empty, and burst datagrams exchanged with the upstream Iroh application")
+
+def exchange_result(conn: Quic.DatagramConnection, echo: Bool, shared: Bool) -> IO(Unit):
   match echo:
     case True{}:
       do IO<Unit>:
@@ -150,50 +319,53 @@ def exchange_result(conn: Quic.DatagramConnection, echo: Bool) -> IO(Unit):
         sent : Quic.DatagramConnection <- send_datagram(1500n,received,[])
         empty : Quic.DatagramConnection <- receive_reply(1500n,sent,[])
         burst : Quic.DatagramConnection <- send_datagram(1500n,empty,[1])
-        receive_burst(24n,burst)
+        burst_done : Quic.DatagramConnection <- receive_burst(24n,burst)
+        after_burst(burst_done,shared)
     case False{}:
       wait_ack(1500n,conn)
 
-def exchange(conn: Quic.DatagramConnection, echo: Bool) -> IO(Unit):
+def exchange(conn: Quic.DatagramConnection, echo: Bool, shared: Bool) -> IO(Unit):
   do IO<Unit>:
     sent : Quic.DatagramConnection <- send_datagram(1500n,conn,[0,98,101,110,100,255])
-    exchange_result(sent,echo)
+    exchange_result(sent,echo,shared)
 
-def check_size(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,U32>, echo: Bool) -> IO(Unit):
+def check_size(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,U32>, echo: Bool, shared: Bool) -> IO(Unit):
   match outcome:
     case (conn,Fail{(90,_)}):
-      exchange(conn,echo)
+      exchange(conn,echo,shared)
     case (conn,_):
       do IO<Unit>:
         Quic.drop_quic_datagram(conn)
         IO.die(Unit,1,"an oversized QUIC datagram did not return EMSGSIZE")
 
 def no_unsolicited_datagram(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>,
-    echo: Bool)
+    echo: Bool, shared: Bool)
     -> IO(Unit):
   match outcome:
     case (conn,Done{None{}}):
       do IO<Unit>:
         result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <-
           Quic.write_quic_datagram(conn,List.replicate(U32,1501n,0))
-        check_size(result,echo)
+        check_size(result,echo,shared)
     case (conn,_):
       do IO<Unit>:
         Quic.drop_quic_datagram(conn)
         IO.die(Unit,1,"expected an empty QUIC datagram inbox")
 
-def check_empty(conn: Quic.DatagramConnection, echo: Bool) -> IO(Unit):
+def check_empty(conn: Quic.DatagramConnection, echo: Bool, shared: Bool) -> IO(Unit):
   do IO<Unit>:
     outcome : Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
       Quic.read_quic_datagram(conn)
-    no_unsolicited_datagram(outcome,echo)
+    no_unsolicited_datagram(outcome,echo,shared)
 
 def check_dial(mode: Mode, result: Result<&1,&1,U32 & String,Quic.DatagramConnection>) -> IO(Unit):
   match mode result:
     case PacketAck{} Done{conn}:
-      check_empty(conn,False{})
+      check_empty(conn,False{},False{})
     case ApplicationEcho{} Done{conn}:
-      check_empty(conn,True{})
+      check_empty(conn,True{},False{})
+    case SharedConnection{} Done{conn}:
+      check_empty(conn,True{},True{})
     case WrongKey{} Fail{(13,_)}:
       IO.print("PASS Bend TLS rejected the wrong pin for upstream Iroh")
     case _ Fail{(code,message)}:
@@ -215,23 +387,25 @@ def dial(host: String, port: Maybe<&2,U32>, mode: Mode, wrong: Bool) -> IO(Unit)
       IO.die(Unit,2,"expected a UDP port")
 
 def usage() -> IO(Unit):
-  IO.die(Unit,2,"usage: quic-datagram HOST PORT valid|echo|wrong-key")
+  IO.die(Unit,2,"usage: quic-datagram HOST PORT valid|echo|shared|wrong-key")
 
-def choose(host: String, port: Maybe<&2,U32>, valid: Bool, echo: Bool, rejected: Bool) -> IO(Unit):
-  match valid echo rejected:
-    case True{} _ _:
+def choose(host: String, port: Maybe<&2,U32>, valid: Bool, echo: Bool, shared: Bool, rejected: Bool) -> IO(Unit):
+  match valid echo shared rejected:
+    case True{} _ _ _:
       dial(host,port,PacketAck{},False{})
-    case _ True{} _:
+    case _ True{} _ _:
       dial(host,port,ApplicationEcho{},False{})
-    case _ _ True{}:
+    case _ _ True{} _:
+      dial(host,port,SharedConnection{},False{})
+    case _ _ _ True{}:
       dial(host,port,WrongKey{},True{})
-    case _ _ _:
+    case _ _ _ _:
       usage()
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{host,Con{port,Con{+mode,Nil{}}}}}:
-      choose(host,U32.read(port),String.eq(mode,"valid"),String.eq(mode,"echo"),String.eq(mode,"wrong-key"))
+      choose(host,U32.read(port),String.eq(mode,"valid"),String.eq(mode,"echo"),String.eq(mode,"shared"),String.eq(mode,"wrong-key"))
     case _:
       usage()
 

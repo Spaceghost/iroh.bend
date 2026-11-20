@@ -5,12 +5,17 @@ client=$1
 ipv4=$2
 ipv6=$3
 echo_peer=${4:-}
+shared_peer=${5:-}
 if [ ! -x "$ipv4" ] || [ ! -x "$ipv6" ]; then
     printf '%s\n' 'Set UPSTREAM_DATAGRAM_V4 and UPSTREAM_DATAGRAM_V6 to the Iroh 1.5.0 listen fixtures.' >&2
     exit 2
 fi
 if [ -n "$echo_peer" ] && [ ! -x "$echo_peer" ]; then
     printf '%s\n' 'UPSTREAM_DATAGRAM_ECHO must name an executable Iroh fixture.' >&2
+    exit 2
+fi
+if [ -n "$shared_peer" ] && [ ! -x "$shared_peer" ]; then
+    printf '%s\n' 'UPSTREAM_QUIC_SHARED must name an executable Iroh fixture.' >&2
     exit 2
 fi
 work=$(mktemp -d)
@@ -36,11 +41,12 @@ check_peer() {
     mode=$3
     command=$4
     : >"$work/address"
-    timeout 20s "$peer" "$command" >"$work/address" 2>"$work/error" &
+    timeout 30s "$peer" "$command" >"$work/address" 2>"$work/error" &
     pid=$!
     tries=0
     while ! IFS= read -r address <"$work/address"; do
-        if ! kill -0 "$pid" 2>/dev/null || [ "$tries" -ge 100 ]; then
+        if ! kill -0 "$pid" 2>/dev/null || [ "$tries" -ge 300 ]; then
+            printf '%s\n' "Iroh fixture did not print an address for $host ($mode)." >&2
             cat "$work/error" >&2
             exit 1
         fi
@@ -51,7 +57,7 @@ check_peer() {
         cat "$work/error" >&2
         exit 1
     fi
-    if [ "$mode" = echo ]; then
+    if [ "$mode" = echo ] || [ "$mode" = shared ]; then
         if ! wait "$pid"; then
             cat "$work/error" >&2
             exit 1
@@ -69,4 +75,8 @@ done
 if [ -n "$echo_peer" ]; then
     check_peer "$echo_peer" 127.0.0.1 echo listen
     check_peer "$echo_peer" ::1 echo listen6
+fi
+if [ -n "$shared_peer" ]; then
+    check_peer "$shared_peer" 127.0.0.1 shared listen
+    check_peer "$shared_peer" ::1 shared listen6
 fi

@@ -4,7 +4,7 @@ A Rust-free implementation targeting the Iroh 1.5.0 wire protocol. Bend
 implements relay framing, authentication transcripts, client state, and DNS
 and Pkarr discovery packets.
 Nelua binds OpenSSL for direct QUIC and Ed25519, ngtcp2 for client QUIC
-datagrams, and libcurl for WebSocket
+streams and datagrams, and libcurl for WebSocket
 transport and Pkarr HTTP. The relay server binds libwebsockets for HTTP upgrades,
 WebSocket framing, and TLS. The build generates native C from Bend and Nelua. Upstream Iroh
 runs separately as a compatibility reference.
@@ -50,6 +50,12 @@ client requires a libcurl build with WebSocket support.
    `00 62 65 6e 64 ff` and replies with `ff 00 11 80 01`. It reads and replies
    with an empty datagram, then reads `01` and replies with 24 datagrams
    containing `0e ff`. It exits successfully when the client closes QUIC.
+   Set `UPSTREAM_QUIC_SHARED` to an Iroh 1.5.0 fixture that performs the same
+   datagram exchange and keeps the connection open. It reads the incoming
+   unidirectional stream `0c 00 ff` to FIN, replies to datagram `02` with
+   `03`, then opens a unidirectional stream carrying `07 00 ff` and FIN.
+   It reads 16,384 bytes of `11` followed by `00 ff` to FIN on the incoming
+   bidirectional stream and sends 70,000 bytes of `12` with FIN in reply.
 4. Run `make check-relay-live RELAY_URL=ws://127.0.0.1:3340/relay` against
    an upstream `iroh-relay` in development mode on the loopback interface.
    Both relay protocol versions are exercised. For a local TLS relay, use a
@@ -77,7 +83,7 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
-- [Direct QUIC datagram client](src/quic_datagram.bend) connects to a
+- [Direct QUIC client with datagrams](src/quic_datagram.bend) connects to a
   numeric IPv4 or IPv6 address with a pinned Ed25519 peer key and one ALPN.
   Call `step_quic_datagram` regularly to process incoming packets and
   timers. Retry a write that returns zero after stepping. Use
@@ -87,6 +93,12 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   The peer's QUIC
   acknowledgments report packet receipt. Application delivery requires
   an application-level response.
+- The same connection can open and accept unidirectional and bidirectional
+  streams. Pass the connection and returned stream ID to the stream methods.
+  Queue up to 64 KiB per write, flush until the stack accepts it, and
+  keep stepping until the next write is ready. A write can carry FIN,
+  including an empty write. Stream reads report data, FIN, or that more
+  packets are needed.
 - [Relay client](src/relay_client.bend) upgrades a `ws://` or `wss://`
   connection and negotiates v1/v2. It uses TLS-exporter authentication on
   WSS when libcurl uses the linked OpenSSL major version. It answers a fresh
@@ -189,6 +201,6 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits throttle each connection at the relay message layer, support live updates, and send v2 notices. Full values for repeated custom headers and transport-byte accounting are pending. |
-| Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. The separate Bend client exchanges RFC 9221 datagrams with the Iroh application on both address families. Server support, shared stream and datagram handles, 0-RTT, multipath, and stream affinity are pending. |
+| Public endpoint lifecycle and QUIC features | Persistent connections support concurrent streams. One reusable listener accepted overlapping Bend and Iroh connections over IPv4 and IPv6. The ngtcp2 client exchanges RFC 9221 application datagrams alongside bidirectional and unidirectional streams on the same authenticated Iroh connection on both address families. Server-side datagrams, integration into the main endpoint interface, 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
 | Connectivity | Bend endpoints exchanged pinned QUIC streams through the upstream Iroh relay over WS and WSS. Bend and Iroh QUIC engines also exchanged streams in both directions using the Bend relay bridge. Initial connection setup tries direct addresses from DNS or verified Pkarr records and falls back to a published relay. A local upstream Iroh DNS server supplied the published address data for a live relayed exchange. NAT traversal, adaptive path selection, and path migration are pending. |

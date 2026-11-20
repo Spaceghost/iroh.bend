@@ -90,3 +90,39 @@ def connect(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     started : Result<&1,&1,U32 & String,DatagramConnection> <-
       start_quic_datagram(host,port,secret,peer,alpn)
     begin_handshake(started,timeout_ms)
+
+type QuicStreamRead is Data:
+  QuicStreamPending{}
+  QuicStreamFin{}
+  QuicStreamBytes{bytes: List<&2,U32>}
+
+# Direction 0 is bidirectional. Direction 1 is unidirectional.
+# Both functions return zero when no stream is available.
+def open_quic_stream(conn: DatagramConnection, direction: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+def accept_quic_stream(conn: DatagramConnection, direction: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+# Queue up to 64 KiB. Pass 1 to finish the send half after these bytes.
+# Zero means the previous write is awaiting acknowledgment.
+def queue_quic_stream(conn: DatagramConnection, stream: U32, data: List<&2,U32>, finish: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+# Process one outbound packet. 1 means the write was submitted, including FIN
+# when requested. Use step_quic_datagram to drive ACKs, retries, and timers.
+def flush_quic_stream(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+def read_quic_stream(conn: DatagramConnection, stream: U32, limit: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,QuicStreamRead>):
+  import "./quic_datagram.c"
+
+# Release a completed stream. Dropping a live stream aborts its open halves.
+def drop_quic_stream(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_datagram.c"

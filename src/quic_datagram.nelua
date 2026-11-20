@@ -51,7 +51,9 @@ local ngtcp2_addr <cimport,nodecl> = @record{addr: pointer, addrlen: cuint}
 local ngtcp2_path <cimport,nodecl> = @record{iroh_datagram_local_path: ngtcp2_addr, remote: ngtcp2_addr}
 local ngtcp2_settings <cimport,nodecl> = @record{initial_ts: uint64}
 local ngtcp2_transport_params <cimport,nodecl> = @record{
-  max_datagram_frame_size: uint64
+  max_datagram_frame_size: uint64, initial_max_data: uint64,
+  initial_max_stream_data_bidi_local: uint64, initial_max_stream_data_bidi_remote: uint64,
+  initial_max_stream_data_uni: uint64, initial_max_streams_bidi: uint64, initial_max_streams_uni: uint64
 }
 local ngtcp2_pkt_info <cimport,nodecl> = @record{ecn: uint32}
 local ngtcp2_ccerr <cimport,nodecl> = @record{}
@@ -60,7 +62,9 @@ local ngtcp2_callbacks <cimport,nodecl> = @record{
   client_initial: pointer, recv_crypto_data: pointer, encrypt: pointer, decrypt: pointer, hp_mask: pointer,
   recv_retry: pointer, rand: pointer, update_key: pointer, delete_crypto_aead_ctx: pointer,
   delete_crypto_cipher_ctx: pointer, version_negotiation: pointer, get_new_connection_id2: pointer,
-  get_path_challenge_data2: pointer, recv_datagram: pointer, ack_datagram: pointer
+  get_path_challenge_data2: pointer, recv_datagram: pointer, ack_datagram: pointer,
+  stream_open: pointer, recv_stream_data: pointer, acked_stream_data_offset: pointer,
+  stream_reset: pointer, stream_close: pointer
 }
 local ngtcp2_crypto_conn_ref <cimport,nodecl> = @record{get_conn: pointer, user_data: pointer}
 local X509_STORE_CTX <cimport,nodecl> = @record{}
@@ -113,6 +117,17 @@ local function ngtcp2_conn_get_dcid2(conn: *ngtcp2_conn): *ngtcp2_cid <cimport,n
 local function ngtcp2_conn_writev_datagram(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
   data: *cuchar, n: csize, accepted: *cint, flags: uint32, id: uint64,
   vec: *ngtcp2_vec, count: csize, time: uint64): isize <cimport,nodecl> end
+local function ngtcp2_conn_open_bidi_stream(conn: *ngtcp2_conn, id: *int64, user: pointer): cint <cimport,nodecl> end
+local function ngtcp2_conn_open_uni_stream(conn: *ngtcp2_conn, id: *int64, user: pointer): cint <cimport,nodecl> end
+local function ngtcp2_conn_writev_stream(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
+  data: *cuchar, size: csize, consumed: *isize, flags: uint32, id: int64,
+  vec: *ngtcp2_vec, count: csize, time: uint64): isize <cimport,nodecl> end
+local function ngtcp2_conn_extend_max_stream_offset(conn: *ngtcp2_conn, id: int64, size: uint64): cint <cimport,nodecl> end
+local function ngtcp2_conn_extend_max_offset(conn: *ngtcp2_conn, size: uint64) <cimport,nodecl> end
+local function ngtcp2_conn_extend_max_streams_bidi(conn: *ngtcp2_conn, count: csize) <cimport,nodecl> end
+local function ngtcp2_conn_extend_max_streams_uni(conn: *ngtcp2_conn, count: csize) <cimport,nodecl> end
+local function ngtcp2_conn_shutdown_stream(conn: *ngtcp2_conn, flags: uint32,
+  id: int64, code: uint64): cint <cimport,nodecl> end
 local function ngtcp2_ccerr_default(err: *ngtcp2_ccerr) <cimport,nodecl> end
 local function ngtcp2_conn_write_connection_close(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
   data: *cuchar, n: csize, err: *ngtcp2_ccerr, time: uint64): isize <cimport,nodecl> end
@@ -132,7 +147,8 @@ local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 ##[[
 for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
-    'Con','Nil','Unit','Some','None'} do
+    'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
+    'drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -144,6 +160,15 @@ local iroh_dgram_write_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_read_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_datagram_acks: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_open_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_accept_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_queue_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_flush_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_read_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_drop_quic_stream: uint32 <cimport,nodecl>
+local iroh_dgram_QuicStreamPending: uint32 <cimport,nodecl>
+local iroh_dgram_QuicStreamFin: uint32 <cimport,nodecl>
+local iroh_dgram_QuicStreamBytes: uint32 <cimport,nodecl>
 local iroh_dgram_DatagramConnection: uint32 <cimport,nodecl>
 local iroh_dgram_Con: uint32 <cimport,nodecl>
 local iroh_dgram_Nil: uint32 <cimport,nodecl>
@@ -186,12 +211,31 @@ local SOCK_CLOEXEC: cint <cimport,nodecl>
 local NGTCP2_ERR_DISCARD_PKT: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_ARGUMENT: cint <cimport,nodecl>
 
+local EPIPE: uint32 <cimport,nodecl>
+local ECONNRESET: uint32 <cimport,nodecl>
+local NGTCP2_STREAM_DATA_FLAG_FIN: uint32 <cimport,nodecl>
+local NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET: uint32 <cimport,nodecl>
+local NGTCP2_WRITE_STREAM_FLAG_FIN: uint32 <cimport,nodecl>
+local NGTCP2_ERR_STREAM_ID_BLOCKED: cint <cimport,nodecl>
+local NGTCP2_ERR_STREAM_DATA_BLOCKED: cint <cimport,nodecl>
+local NGTCP2_ERR_STREAM_SHUT_WR: cint <cimport,nodecl>
+local NGTCP2_ERR_STREAM_NOT_FOUND: cint <cimport,nodecl>
+
 local PACKET_CAPACITY <comptime> = 1500
 local DATAGRAM_FRAME_LIMIT <comptime> = 65535
 -- Iroh's default receive budget includes metadata, even for empty payloads.
 local INBOX_BUDGET <comptime> = 1250000
 local DATAGRAM_OVERHEAD <comptime> = 32
 local Datagram = @record{next: pointer, size: csize}
+local STREAM_WINDOW <comptime> = 65536
+local STREAM_COUNT <comptime> = 16
+local Stream = @record{
+  next: pointer, id: int64, handle: uint32,
+  rx: *[0]cuchar, rx_head: csize, rx_end: csize, rx_total: uint64,
+  tx: *[0]cuchar, tx_size: csize, tx_sent: csize, tx_offset: uint64,
+  announced: boolean, had_open_callback: boolean, rx_fin: boolean, rx_reset: boolean,
+  tx_fin: boolean, tx_fin_sent: boolean, closed: boolean, aborted: boolean, discarded: boolean
+}
 local Connection = @record{
   next: pointer,
   id: uint32,
@@ -212,11 +256,13 @@ local Connection = @record{
   inbox_size: csize,
   acknowledgments: uint32,
   datagram_id: uint64,
+  streams: *Stream,
   pin_status: cint,
   failed: boolean
 }
 local connections: *Connection
 local next_id: uint32 = 1
+local next_stream_handle: uint32 = 1
 
 local function quic_from_ref(ref: *ngtcp2_crypto_conn_ref): *ngtcp2_conn
   return ((@*Connection)(ref.user_data)).engine
@@ -288,6 +334,132 @@ local function ack_datagram(engine: *ngtcp2_conn, id: uint64, user: pointer): ci
   return 0
 end
 
+local function stream_by_id(conn: *Connection, id: int64): *Stream
+  local stream = conn.streams
+  while stream ~= nilptr and stream.id ~= id do stream = (@*Stream)(stream.next) end
+  return stream
+end
+
+local function stream_by_handle(conn: *Connection, handle: Term): *Stream
+  local stream = conn.streams
+  while stream ~= nilptr do
+    if stream.handle == handle and not stream.discarded then return stream end
+    stream = (@*Stream)(stream.next)
+  end
+  return nilptr
+end
+
+local function add_stream(conn: *Connection, id: int64): *Stream
+  if next_stream_handle == 0 then return nilptr end
+  local stream = (@*Stream)(C.calloc(1,#Stream))
+  if stream == nilptr then return nilptr end
+  stream.id = id
+  stream.handle = next_stream_handle
+  next_stream_handle = next_stream_handle + 1
+  stream.next = conn.streams
+  conn.streams = stream
+  return stream
+end
+
+local function remove_stream(conn: *Connection, stream: *Stream)
+  if conn.streams == stream then
+    conn.streams = (@*Stream)(stream.next)
+  else
+    local prior = conn.streams
+    while prior.next ~= stream do prior = (@*Stream)(prior.next) end
+    prior.next = stream.next
+  end
+  C.free(stream.rx)
+  C.free(stream.tx)
+  C.free(stream)
+end
+
+local function peer_stream(conn: *Connection, id: int64): *Stream
+  local stream = stream_by_id(conn,id)
+  if stream == nilptr and id & 1 ~= 0 then stream = add_stream(conn,id) end
+  return stream
+end
+
+local function stream_opened(engine: *ngtcp2_conn, id: int64, user: pointer): cint
+  local stream = peer_stream((@*Connection)(user),id)
+  if stream == nilptr then return NGTCP2_ERR_CALLBACK_FAILURE end
+  stream.had_open_callback = true
+  return 0
+end
+
+local function return_stream_credit(conn: *Connection, stream: *Stream)
+  -- ngtcp2 already returns credit for implicitly opened streams.
+  if stream.had_open_callback then
+    if (stream.id & 2) ~= 0 then
+      ngtcp2_conn_extend_max_streams_uni(conn.engine,1)
+    else
+      ngtcp2_conn_extend_max_streams_bidi(conn.engine,1)
+    end
+  end
+end
+
+local function stream_received(engine: *ngtcp2_conn, flags: uint32, id: int64, offset: uint64,
+    data: *cuchar, size: csize, user: pointer, stream_user: pointer): cint
+  local stream = peer_stream((@*Connection)(user),id)
+  if stream == nilptr then return NGTCP2_ERR_CALLBACK_FAILURE end
+  if stream.discarded then return 0 end
+  local buffered = stream.rx_end - stream.rx_head
+  if offset ~= stream.rx_total or size > STREAM_WINDOW - buffered then return NGTCP2_ERR_CALLBACK_FAILURE end
+  if size > 0 then
+    if stream.rx == nilptr then
+      stream.rx = (@*[0]cuchar)(C.malloc(STREAM_WINDOW))
+      if stream.rx == nilptr then return NGTCP2_ERR_CALLBACK_FAILURE end
+    end
+    if stream.rx_end + size > STREAM_WINDOW then
+      C.memmove(&stream.rx[0],&stream.rx[stream.rx_head],buffered)
+      stream.rx_head = 0
+      stream.rx_end = buffered
+    end
+    C.memcpy(&stream.rx[stream.rx_end],data,size)
+    stream.rx_end = stream.rx_end + size
+    stream.rx_total = stream.rx_total + size
+  end
+  stream.rx_fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ~= 0
+  return 0
+end
+
+local function stream_acknowledged(engine: *ngtcp2_conn, id: int64, offset: uint64, size: uint64,
+    user: pointer, stream_user: pointer): cint
+  local stream = stream_by_id((@*Connection)(user),id)
+  if stream ~= nilptr and stream.tx ~= nilptr and stream.tx_sent == stream.tx_size and
+      offset + size >= stream.tx_offset + stream.tx_size and
+      (stream.tx_size ~= 0 or (stream.tx_fin_sent and size == 0)) then
+    stream.tx_offset = stream.tx_offset + stream.tx_size
+    C.free(stream.tx)
+    stream.tx = nilptr
+  end
+  return 0
+end
+
+local function stream_reset(engine: *ngtcp2_conn, id: int64, final_size: uint64, app_code: uint64,
+    user: pointer, stream_user: pointer): cint
+  local stream = peer_stream((@*Connection)(user),id)
+  if stream ~= nilptr then stream.rx_reset = true end
+  return 0
+end
+
+local function stream_closed(engine: *ngtcp2_conn, flags: uint32, id: int64, app_code: uint64,
+    user: pointer, stream_user: pointer): cint
+  local conn = (@*Connection)(user)
+  local stream = stream_by_id(conn,id)
+  if stream ~= nilptr then
+    stream.closed = true
+    stream.aborted = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) ~= 0
+    C.free(stream.tx)
+    stream.tx = nilptr
+    if stream.discarded then
+      return_stream_credit(conn,stream)
+      remove_stream(conn,stream)
+    end
+  end
+  return 0
+end
+
 local function connection_path(conn: *Connection): ngtcp2_path
   return {
     iroh_datagram_local_path = {addr = &conn.local_addr, addrlen = conn.local_size},
@@ -352,7 +524,10 @@ local function open_engine(conn: *Connection): cint
     delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
     version_negotiation = ngtcp2_crypto_version_negotiation_cb, get_new_connection_id2 = (@pointer)(new_connection_id),
     get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb,
-    recv_datagram = (@pointer)(receive_datagram), ack_datagram = (@pointer)(ack_datagram)
+    recv_datagram = (@pointer)(receive_datagram), ack_datagram = (@pointer)(ack_datagram),
+    stream_open = (@pointer)(stream_opened), recv_stream_data = (@pointer)(stream_received),
+    acked_stream_data_offset = (@pointer)(stream_acknowledged), stream_reset = (@pointer)(stream_reset),
+    stream_close = (@pointer)(stream_closed)
   }
   local dcid: ngtcp2_cid = {datalen = 8}
   local scid: ngtcp2_cid = {datalen = 8}
@@ -365,6 +540,12 @@ local function open_engine(conn: *Connection): cint
   local params: ngtcp2_transport_params
   ngtcp2_transport_params_default(&params)
   params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
+  params.initial_max_data = STREAM_WINDOW * STREAM_COUNT
+  params.initial_max_stream_data_bidi_local = STREAM_WINDOW
+  params.initial_max_stream_data_bidi_remote = STREAM_WINDOW
+  params.initial_max_stream_data_uni = STREAM_WINDOW
+  params.initial_max_streams_bidi = STREAM_COUNT
+  params.initial_max_streams_uni = STREAM_COUNT
   local path = connection_path(conn)
   local status = ngtcp2_conn_client_new(&conn.engine,&dcid,&scid,&path,NGTCP2_PROTO_VER_V1,
     &callbacks,&settings,&params,nilptr,conn)
@@ -380,6 +561,7 @@ local function destroy(conn: *Connection)
   EVP_PKEY_free(conn.expected_key)
   if conn.fd >= 0 then close(conn.fd) end
   while conn.inbox_first ~= nilptr do pop_datagram(conn) end
+  while conn.streams ~= nilptr do remove_stream(conn,conn.streams) end
   C.free(conn)
 end
 
@@ -580,6 +762,181 @@ local function acks_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],result)
 end
 
+local function authenticated(conn: *Connection): boolean
+  return conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0
+end
+
+local function open_stream(e: Env, conn: *Connection, direction: Term): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
+  if not authenticated(conn) then return io_done(e,0) end
+  local stream = add_stream(conn,-1)
+  if stream == nilptr then return io_fail(e,ENOMEM,'could not allocate QUIC stream') end
+  local status: cint
+  if direction == 0 then
+    status = ngtcp2_conn_open_bidi_stream(conn.engine,&stream.id,nilptr)
+  else
+    status = ngtcp2_conn_open_uni_stream(conn.engine,&stream.id,nilptr)
+  end
+  if status ~= 0 then
+    remove_stream(conn,stream)
+    if status == NGTCP2_ERR_STREAM_ID_BLOCKED then return io_done(e,0) end
+    return engine_error(e,conn,status)
+  end
+  stream.announced = true
+  return io_done(e,stream.handle)
+end
+
+local function open_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],open_stream(e,find(e,args[0]),args[1]))
+end
+
+local function accept_stream(e: Env, conn: *Connection, direction: Term): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
+  if not authenticated(conn) then return io_done(e,0) end
+  local next: *Stream
+  local stream = conn.streams
+  while stream ~= nilptr do
+    if not stream.announced and ((stream.id >> 1) & 1) == direction and
+        (next == nilptr or stream.handle < next.handle) then
+      next = stream
+    end
+    stream = (@*Stream)(stream.next)
+  end
+  if next == nilptr then return io_done(e,0) end
+  next.announced = true
+  return io_done(e,next.handle)
+end
+
+local function accept_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],accept_stream(e,find(e,args[0]),args[1]))
+end
+
+local function queue_stream(e: Env, conn: *Connection, handle: Term, data: Term, fin: Term): Term
+  local bytes: [STREAM_WINDOW]cuchar
+  local size = unpack(e,data,&bytes[0],STREAM_WINDOW)
+  if size == -2 then return io_fail(e,EMSGSIZE,'QUIC stream write exceeds 64 KiB') end
+  if size < 0 or fin > 1 then return io_fail(e,EINVAL,'invalid QUIC stream write') end
+  if conn == nilptr or conn.failed then return closed(e) end
+  local stream = stream_by_handle(conn,handle)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if (stream.id & 3) == 3 or stream.tx_fin or stream.closed then
+    return io_fail(e,EPIPE,'QUIC stream does not have an open send half')
+  end
+  if stream.tx ~= nilptr then return io_done(e,0) end
+  if size == 0 and fin == 0 then return io_done(e,1) end
+  stream.tx = (@*[0]cuchar)(C.malloc(size > 0 and (@csize)(size) or 1))
+  if stream.tx == nilptr then return io_fail(e,ENOMEM,'could not allocate QUIC stream write') end
+  if size > 0 then C.memcpy(&stream.tx[0],&bytes[0],(@csize)(size)) end
+  stream.tx_size = (@csize)(size)
+  stream.tx_sent = 0
+  stream.tx_fin = fin ~= 0
+  return io_done(e,1)
+end
+
+local function queue_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],queue_stream(e,find(e,args[0]),args[1],args[2],args[3]))
+end
+
+local function stream_flushed(stream: *Stream): boolean
+  return stream.tx == nilptr or (stream.tx_sent == stream.tx_size and (not stream.tx_fin or stream.tx_fin_sent))
+end
+
+local function flush_stream(e: Env, conn: *Connection, handle: Term): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  local stream = stream_by_handle(conn,handle)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if stream.aborted then return io_fail(e,EPIPE,'QUIC stream closed with an error') end
+  local now = io_tick()
+  local status = send_pending(conn,now)
+  if status ~= 0 then return socket_error(e,conn,status) end
+  if conn.output_size ~= 0 then return io_done(e,0) end
+  if stream_flushed(stream) then return io_done(e,1) end
+  local vec: ngtcp2_vec = {base = &stream.tx[stream.tx_sent], len = stream.tx_size - stream.tx_sent}
+  local flags = stream.tx_fin and NGTCP2_WRITE_STREAM_FLAG_FIN or 0
+  local consumed: isize = -1
+  local written = ngtcp2_conn_writev_stream(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,
+    &consumed,flags,stream.id,&vec,1,now)
+  if written == NGTCP2_ERR_STREAM_DATA_BLOCKED then return io_done(e,0) end
+  if written == NGTCP2_ERR_STREAM_SHUT_WR or written == NGTCP2_ERR_STREAM_NOT_FOUND then
+    return io_fail(e,EPIPE,'QUIC stream send half was closed by the peer')
+  end
+  if written < 0 then return engine_error(e,conn,(@cint)(written)) end
+  if consumed >= 0 then
+    stream.tx_sent = stream.tx_sent + (@csize)(consumed)
+    if stream.tx_fin and stream.tx_sent == stream.tx_size then stream.tx_fin_sent = true end
+  end
+  conn.output_size = (@csize)(written)
+  status = send_pending(conn,now)
+  if status ~= 0 then return socket_error(e,conn,status) end
+  return io_done(e,conn.output_size == 0 and stream_flushed(stream) and 1 or 0)
+end
+
+local function flush_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],flush_stream(e,find(e,args[0]),args[1]))
+end
+
+local function read_stream(e: Env, conn: *Connection, handle: Term, limit: Term): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  if limit == 0 then return io_fail(e,EINVAL,'QUIC stream read limit must be positive') end
+  local stream = stream_by_handle(conn,handle)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if (stream.id & 3) == 2 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
+  local size = stream.rx_end - stream.rx_head
+  if size > 0 then
+    if size > limit then size = (@csize)(limit) end
+    local status = ngtcp2_conn_extend_max_stream_offset(conn.engine,stream.id,size)
+    if status ~= 0 then return engine_error(e,conn,status) end
+    ngtcp2_conn_extend_max_offset(conn.engine,size)
+    local value = io_list(e,(@cstring)(&stream.rx[stream.rx_head]),size)
+    stream.rx_head = stream.rx_head + size
+    if stream.rx_head == stream.rx_end then
+      stream.rx_head = 0
+      stream.rx_end = 0
+      if stream.rx_fin or stream.rx_reset then
+        C.free(stream.rx)
+        stream.rx = nilptr
+      end
+    end
+    return io_done(e,io_box(e,iroh_dgram_QuicStreamBytes,value))
+  end
+  if stream.rx_reset or (stream.closed and stream.aborted and not stream.rx_fin) then
+    return io_fail(e,ECONNRESET,'QUIC stream was reset by the peer')
+  end
+  return io_done(e,term_pak(stream.rx_fin and iroh_dgram_QuicStreamFin or iroh_dgram_QuicStreamPending,0))
+end
+
+local function read_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],read_stream(e,find(e,args[0]),args[1],args[2]))
+end
+
+local function release_stream(e: Env, conn: *Connection, handle: Term): Term
+  if conn == nilptr or conn.failed then return closed(e) end
+  local stream = stream_by_handle(conn,handle)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  ngtcp2_conn_extend_max_offset(conn.engine,stream.rx_end - stream.rx_head)
+  if stream.closed then
+    return_stream_credit(conn,stream)
+    remove_stream(conn,stream)
+  else
+    stream.discarded = true
+    C.free(stream.rx)
+    stream.rx = nilptr
+    local received_fin = stream.rx_fin or stream.rx_reset or (stream.id & 3) == 2
+    local sent_fin = stream.tx_fin_sent or (stream.id & 3) == 3
+    if not received_fin or not sent_fin then
+      local status = ngtcp2_conn_shutdown_stream(conn.engine,0,stream.id,0)
+      if status ~= 0 then return engine_error(e,conn,status) end
+    end
+  end
+  return io_done(e,term_pak(iroh_dgram_Unit,0))
+end
+
+local function drop_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],release_stream(e,find(e,args[0]),args[1]))
+end
+
 local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn ~= nilptr then
@@ -608,5 +965,11 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_write_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_quic_datagram,write_run) end
   if iroh_dgram_read_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_read_quic_datagram,read_run) end
   if iroh_dgram_quic_datagram_acks ~= 0xffffffff then io_eff(iroh_dgram_quic_datagram_acks,acks_run) end
+  if iroh_dgram_open_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_open_quic_stream,open_stream_run) end
+  if iroh_dgram_accept_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_accept_quic_stream,accept_stream_run) end
+  if iroh_dgram_queue_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_queue_quic_stream,queue_stream_run) end
+  if iroh_dgram_flush_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_flush_quic_stream,flush_stream_run) end
+  if iroh_dgram_read_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_read_quic_stream,read_stream_run) end
+  if iroh_dgram_drop_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_stream,drop_stream_run) end
   if iroh_dgram_drop_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_datagram,drop_run) end
 end
