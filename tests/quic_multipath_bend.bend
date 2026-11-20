@@ -654,6 +654,40 @@ def parse(host: String, port: Maybe<&2,U32>, mode: U32) -> IO(Unit):
     case None{}:
       IO.die(Unit,2,"expected a numeric port")
 
+def automatic_result(pair: NatProbe.Connection() & NatProbe.NewPathResult(),
+    retry: NatProbe.Connection() -> IO(Unit)) -> IO(Unit):
+  match pair:
+    case ((conn,_),Done{Some{path}}):
+      do IO<Unit>:
+        IO.print("PASS Bend automatically opened the punched QUIC path")
+        run_paths((conn,path))
+    case (next,Done{None{}}):
+      do IO<Unit>:
+        IO.sleep(1)
+        retry(next)
+    case ((conn,_),Fail{(code,message)}):
+      reject(Unit,conn,code,message)
+
+def wait_automatic(fuel: Nat, connection: NatProbe.Connection()) -> IO(Unit):
+  match fuel:
+    case 0n:
+      (conn,_) = connection
+      reject(Unit,conn,1,"automatic NAT traversal did not open a path")
+    case 1n+left:
+      do IO<Unit>:
+        result : NatProbe.Connection() & NatProbe.NewPathResult() <- NatProbe.step(connection)
+        automatic_result(result,next => wait_automatic(left,next))
+
+def connect_automatic(host: String, port: Maybe<&2,U32>) -> IO(Unit):
+  match port:
+    case Some{number}:
+      do IO<Unit>:
+        conn : NatProbe.Connection() <- IO.try(NatProbe.Connection(),
+          NatProbe.connect(host,number,List.replicate(U32,32n,73),fixture_key(0),text_alpn(),64,3000n))
+        wait_automatic(16000n,conn)
+    case None{}:
+      IO.die(Unit,2,"expected a numeric port")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,host,port,"multiple"]:
@@ -666,6 +700,8 @@ def run(args: List<String>) -> IO(Unit):
       parse(host,U32.read(port),4)
     case [_,host,port,"iroh-nat-punch"]:
       parse(host,U32.read(port),7)
+    case [_,host,port,"iroh-nat-automatic"]:
+      connect_automatic(host,U32.read(port))
     case [_,host,port,"bend-nat-dial"]:
       parse(host,U32.read(port),6)
     case Con{_,Con{host,Con{port,Nil{}}}}:

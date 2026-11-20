@@ -271,7 +271,7 @@ local QUIC_TRANSPORT_EXTENSION: uint16 <comptime> = 57
 
 ##[[
 local names = {
-  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
+  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_nat_offer_bytes', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
   'step_multipath', 'probe_multipath', 'multipath_status', 'multipath_path_timeouts', 'set_multipath_keepalive',
@@ -294,6 +294,7 @@ end
 ]]
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_offer_bytes: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_negotiated_multipath_alpn: uint32 <cimport,nodecl>
@@ -1589,6 +1590,10 @@ local function start_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return start_client(e,args,0,nilptr,false,true)
 end
 
+local function start_nat_offer_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,1,nilptr,false,true)
+end
+
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return start_client(e,args,1,nilptr,false,false)
 end
@@ -2766,6 +2771,7 @@ end
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
   if iroh_mp_start_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer,start_nat_offer_run) end
+  if iroh_mp_start_multipath_nat_offer_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_bytes,start_nat_offer_bytes_run) end
   if iroh_mp_start_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes,start_bytes_run) end
   if iroh_mp_start_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_start_multipath_alpns,start_alpns_run) end
   if iroh_mp_negotiated_multipath_alpn ~= 0xffffffff then io_eff(iroh_mp_negotiated_multipath_alpn,negotiated_alpn_run) end

@@ -1,6 +1,7 @@
 import Base
 import ./endpoint.bend as Endpoint
 import ./quic_multipath.bend as Quic
+import ./quic_multipath_nat.bend as Nat
 import ./relay_quic.bend as Relay
 
 def Connection() -> Type:
@@ -13,6 +14,16 @@ def dial(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -
   Endpoint.IpAddress{host,port} = address
   Endpoint.PeerKeys{seed,peer,alpn} = identity
   Quic.connect_multipath_bytes(host,port,seed,peer,alpn,U32.to_nat(timeout))
+
+# Use the automatic NAT traversal driver for a direct bootstrap address.
+def connect_nat_direct(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32, limit: U32)
+    -> IO(Nat.ConnectResult()):
+  Endpoint.IpAddress{host,port} = address
+  Endpoint.PeerKeys{seed,peer,alpn} = identity
+  Nat.connect(host,port,seed,peer,alpn,limit,U32.to_nat(timeout))
+
+def step_nat_direct(connection: Nat.Connection()) -> IO(Nat.Connection() & Nat.NewPathResult()):
+  Nat.step(connection)
 
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):

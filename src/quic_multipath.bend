@@ -374,6 +374,24 @@ def connect_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>
     started : ConnectResult() <- start_multipath_with_nat_limit(host,port,seed,peer,alpn,limit)
     finish_connect(started,timeout_ms)
 
+def start_multipath_nat_offer_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, parameter: List<&2,U32>) -> IO(ConnectResult()):
+  import "./quic_multipath.c"
+
+def connect_nat_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, encoded: Maybe<&2,List<&2,U32>>, timeout: Nat) -> IO(ConnectResult()):
+  match encoded:
+    case Some{parameter}:
+      do IO<ConnectResult()>:
+        started : ConnectResult() <- start_multipath_nat_offer_bytes(host,port,seed,peer,alpn,parameter)
+        finish_connect(started,timeout)
+    case None{}:
+      IO.pure(ConnectResult(),Fail{(22,"invalid NAT traversal limit")})
+
+def connect_multipath_bytes_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, limit: U32, timeout: Nat) -> IO(ConnectResult()):
+  connect_nat_bytes(host,port,seed,peer,alpn,NatWire.encode_limit(limit),timeout)
+
 def connect_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, timeout_ms: Nat) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
