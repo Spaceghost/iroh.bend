@@ -267,6 +267,20 @@ def dial_ticket(ticket: String, relayed: Bool) -> IO(Unit):
       Fixture.alpn(),Endpoint.HandshakeTimeouts{900,6000})
     check_endpoint(outcome,relayed)
 
+def lookup_ticket(ticket: String, sources: List<&2,Endpoint.AddressLookup>) -> IO(Unit):
+  do IO<Unit>:
+    outcome : Endpoint.ConnectResult() <- Endpoint.connect_ticket_with_lookup(ticket,List.replicate(U32,32n,73),
+      Fixture.alpn(),Endpoint.HandshakeTimeouts{700,6000},sources)
+    check_endpoint(outcome,False{})
+
+def lookup_dns_ticket(ticket: String, port: Maybe<&2,U32>, initial: List<&2,Endpoint.AddressLookup>) -> IO(Unit):
+  match port:
+    case Some{p}:
+      dns = {Endpoint.DnsLookup{Endpoint.DnsResolver{"dns.iroh.link.","127.0.0.1",p,1500}} : Endpoint.AddressLookup}
+      lookup_ticket(ticket,List.append(&2,Endpoint.AddressLookup,initial,[dns]))
+    case None{}:
+      IO.die(Unit,2,"expected a DNS port")
+
 def endpoint_fallback(url: String, bound: Socket & Result<&1,&1,U32 & String,U32>) -> IO(Unit):
   match bound:
     case (socket,Done{port}):
@@ -597,6 +611,12 @@ def listen_mixed(url: String, outage: Bool) -> IO(Unit):
 
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_, "lookup-ticket", ticket, "dns", port]:
+      lookup_dns_ticket(ticket,U32.read(port),[])
+    case [_, "lookup-ticket", ticket, "pkarr", url]:
+      lookup_ticket(ticket,[Endpoint.PkarrLookup{url,1500}])
+    case [_, "lookup-ticket", ticket, "pkarr-dns", url, port]:
+      lookup_dns_ticket(ticket,U32.read(port),[Endpoint.PkarrLookup{url,1500}])
     case [_, "dial-ticket", ticket, "direct"]:
       dial_ticket(ticket,False{})
     case [_, "dial-ticket", ticket, "relay"]:

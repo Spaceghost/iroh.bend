@@ -187,6 +187,12 @@ check-endpoint-ticket-dial: $(BUILD)/iroh-bend-relay-quic
 	@test -x "$(UPSTREAM_ENDPOINT_TICKET)" || { echo 'Set UPSTREAM_ENDPOINT_TICKET to the Iroh endpoint ticket listener.' >&2; exit 2; }
 	python3 -B tests/endpoint_ticket_dial.py "$<" "$(UPSTREAM_ENDPOINT_TICKET)" "$(UPSTREAM_IROH_RELAY_URL)"
 
+.PHONY: check-endpoint-ticket-lookup
+UPSTREAM_ENDPOINT_TICKET_LOOKUP ?=
+check-endpoint-ticket-lookup: $(BUILD)/iroh-bend-relay-quic
+	@test -x "$(UPSTREAM_ENDPOINT_TICKET_LOOKUP)" && test -n "$(PKARR_URL)" && test -n "$(DISCOVERY_DNS_PORT)" || { echo 'Set UPSTREAM_ENDPOINT_TICKET_LOOKUP, PKARR_URL and DISCOVERY_DNS_PORT for the local Iroh lookup service.' >&2; exit 2; }
+	python3 -B tests/endpoint_ticket_lookup.py "$<" "$(UPSTREAM_ENDPOINT_TICKET_LOOKUP)" "$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)"
+
 .PHONY: check-relay-quic-inbound check-relay-quic-reconnect check-relay-quic-direct-relay check-relay-quic-startup
 UPSTREAM_RELAY_INBOUND ?=
 check-relay-quic-inbound: $(BUILD)/iroh-bend-relay-quic

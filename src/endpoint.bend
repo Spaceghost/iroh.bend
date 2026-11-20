@@ -4,6 +4,7 @@ import ./ip.bend as Ip
 import ./direct.bend as Direct
 import ./discovery.bend as Dns
 import ./pkarr.bend as Pkarr
+import ./pkarr_http.bend as PkarrHttp
 import ./relay_quic.bend as Path
 import ./relay_quic_inbound.bend as Inbound
 import ./quic_datagram.bend as Quic
@@ -22,6 +23,10 @@ type Timeouts is Data:
 
 type DnsSource is Data:
   DnsResolver{origin: String, host: String, port: U32, timeout_ms: U32}
+
+type AddressLookup is Data:
+  DnsLookup{resolver: DnsSource}
+  PkarrLookup{relay: String, timeout_ms: U32}
 
 def Connected() -> Type:
   Direct.QuicConnection & Maybe<&1,Path.Bridge>
@@ -207,14 +212,18 @@ def ticket_routes(addresses: List<&2,Tickets.TransportAddress>) -> Routes:
     case Con{_,rest}:
       ticket_routes(rest)
 
+def ticket_action(-C: Type, ticket: Maybe<&2,Tickets.EndpointTicket>, seed: List<&2,U32>, alpn: List<&2,U32>,
+    action: Routes -> Identity -> IO(Result<&1,&1,U32 & String,C>)) -> IO(Result<&1,&1,U32 & String,C>):
+  match ticket:
+    case Some{Tickets.Ticket{peer,addresses}}:
+      action(ticket_routes(addresses),PeerKeys{seed,peer,alpn})
+    case None{}:
+      IO.pure(Result<&1,&1,U32 & String,C>,Fail{(1,"invalid endpoint ticket")})
+
 def use_ticket(~C: Type, ~dial: Routes -> Identity -> Timeouts -> IO(Result<&1,&1,U32 & String,C>),
     ticket: Maybe<&2,Tickets.EndpointTicket>, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts)
     -> IO(Result<&1,&1,U32 & String,C>):
-  match ticket:
-    case Some{Tickets.Ticket{peer,addresses}}:
-      dial(ticket_routes(addresses),PeerKeys{seed,peer,alpn},timeouts)
-    case None{}:
-      IO.pure(Result<&1,&1,U32 & String,C>,Fail{(1,"invalid endpoint ticket")})
+  ticket_action(C,ticket,seed,alpn,plan => identity => dial(plan,identity,timeouts))
 
 def with_ticket(~C: Type, ~dial: Routes -> Identity -> Timeouts -> IO(Result<&1,&1,U32 & String,C>),
     text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts)
@@ -359,6 +368,46 @@ def connect_resolved(~C: Type, ~attempt: Dialer(C), planned: Result<&1,&1,U32 & 
       dial_plan(~C,~attempt,plan,identity,timeouts)
     case Fail{error}:
       IO.pure(TransportResult(C),Fail{error})
+
+def pkarr_reply(reply: Result<&1,&1,U32 & String,Pkarr.Verification>) -> Result<&1,&1,U32 & String,Routes>:
+  match reply:
+    case Done{proof}:
+      pkarr_routes(proof)
+    case Fail{error}:
+      Fail{error}
+
+def resolve_source(source: AddressLookup, identity: Identity) -> IO(Result<&1,&1,U32 & String,Routes>):
+  match source:
+    case DnsLookup{resolver}:
+      lookup_routes(identity,resolver)
+    case PkarrLookup{relay,ms}:
+      PeerKeys{_,key,_} = identity
+      do IO<Result<&1,&1,U32 & String,Routes>>:
+        proof : Result<&1,&1,U32 & String,Pkarr.Verification> <- PkarrHttp.resolve(relay,key,ms)
+        return pkarr_reply(proof)
+
+def try_lookups(sources: List<&2,AddressLookup>, outcome: ConnectResult(), +identity: Identity,
+    +timeouts: Timeouts) -> IO(ConnectResult()):
+  match sources outcome:
+    case Con{source,rest} Fail{_}:
+      do IO<ConnectResult()>:
+        plan : Result<&1,&1,U32 & String,Routes> <- resolve_source(source,identity)
+        next : ConnectResult() <- connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+        try_lookups(rest,next,identity,timeouts)
+    case _ _:
+      IO.pure(ConnectResult(),outcome)
+
+def connect_with_lookup(plan: Routes, +identity: Identity, +timeouts: Timeouts, sources: List<&2,AddressLookup>)
+    -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    tried : ConnectResult() <- connect_routes(plan,identity,timeouts)
+    try_lookups(sources,tried,identity,timeouts)
+
+def connect_ticket_with_lookup(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts,
+    sources: List<&2,AddressLookup>) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    ticket : Maybe<&2,Tickets.EndpointTicket> <- Tickets.decode(text)
+    ticket_action(Connection(),ticket,seed,alpn,plan => identity => connect_with_lookup(plan,identity,timeouts,sources))
 
 def from_dns(reply: Result<&1,&1,U32 & String,Dns.Reply>, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
   connect_resolved(~Direct.QuicConnection,~direct_stream,dns_routes(reply),identity,timeouts)

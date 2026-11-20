@@ -1,0 +1,94 @@
+"""Dial upstream-issued tickets through DNS and signed Pkarr address lookup."""
+
+import subprocess
+import sys
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from urllib.request import Request, urlopen
+
+from endpoint_ticket_dial import read_ticket
+from quic_rebind import process
+
+
+class InvalidSignature(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests.append(self.path)
+        packet = self.server.packet
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(packet)))
+        self.end_headers()
+        self.wfile.write(packet)
+
+    def log_message(self, *_):
+        pass
+
+
+@contextmanager
+def invalid_relay():
+    with HTTPServer(("127.0.0.1", 0), InvalidSignature) as server:
+        server.requests = []
+        thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, expected_error=None):
+    with process(fixture, family, mode) as peer:
+        ticket, label, payload = read_ticket(peer).split()
+        packet = bytes.fromhex(payload)
+        request = Request(f"{pkarr.rstrip('/')}/{label}", data=packet, method="PUT",
+                          headers={"Content-Type": "application/octet-stream"})
+        with urlopen(request, timeout=5) as response:
+            if response.status != 204:
+                raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
+
+        base = pkarr
+        if invalid:
+            invalid.requests.clear()
+            invalid.packet = bytes([packet[0] ^ 1]) + packet[1:]
+            base = f"http://127.0.0.1:{invalid.server_port}/pkarr"
+        args = {"dns": (dns_port,), "pkarr": (base,), "pkarr-dns": (base, dns_port)}
+        result = subprocess.run((client, "lookup-ticket", ticket, source, *args[source]),
+                                capture_output=True, timeout=15)
+        if expected_error:
+            if result.returncode == 0 or expected_error not in result.stderr:
+                raise RuntimeError(f"Expected {expected_error!r}, got {result}")
+        else:
+            if result.returncode:
+                raise RuntimeError(f"Bend {mode} ticket via {source}: {result.stderr.decode()}")
+            transcript, _ = peer.communicate(timeout=12)
+            if peer.returncode:
+                raise RuntimeError(f"Iroh rejected the {mode} ticket exchange: {transcript!r}")
+        if invalid:
+            expected_requests = [] if mode == "direct" else [f"/pkarr/{label}"]
+            if invalid.requests != expected_requests:
+                raise AssertionError(f"Unexpected lookup requests: {invalid.requests}")
+    detail = expected_error.decode() if expected_error else "authenticated exchange"
+    if invalid and mode == "direct":
+        detail = "authenticated exchange without lookup"
+    elif invalid and source == "pkarr-dns":
+        detail = "authenticated DNS route after signature rejection"
+    print(f"PASS {family} {mode} ticket via {source} ({detail})", flush=True)
+
+
+def main(client, fixture, pkarr, dns_port):
+    with invalid_relay() as invalid:
+        for family in ("listen", "listen6"):
+            for source in ("dns", "pkarr"):
+                for mode in ("id-only", "stale"):
+                    check(client, fixture, family, mode, source, pkarr, dns_port)
+                check(client, fixture, family, "wrong-id", source, pkarr, dns_port,
+                      expected_error=b"peer endpoint key mismatch")
+            check(client, fixture, family, "direct", "pkarr", pkarr, dns_port, invalid)
+            check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,
+                  expected_error=b"invalid signed Pkarr endpoint packet")
+            check(client, fixture, family, "id-only", "pkarr-dns", pkarr, dns_port, invalid)
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])
