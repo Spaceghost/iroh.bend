@@ -13,7 +13,7 @@ require 'C.stdlib'
 require 'C.string'
 
 ##[[
-for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
+for _, name in ipairs{'relay_bind','relay_bind_raw','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
                       'relay_meter_challenge','relay_resume_rx','relay_reconfigure_rx','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayRead','RelayLeft',
                       'Con','True','False','Unit','Some','None',
@@ -25,6 +25,7 @@ for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','re
 end
 ]]
 local iroh_srv_relay_bind: uint32 <cimport,nodecl>
+local iroh_srv_relay_bind_raw: uint32 <cimport,nodecl>
 local iroh_srv_relay_poll: uint32 <cimport,nodecl>
 local iroh_srv_relay_queue: uint32 <cimport,nodecl>
 local iroh_srv_relay_authorized_with_meter: uint32 <cimport,nodecl>
@@ -92,7 +93,8 @@ local Protocol <cimport,nodecl,codename 'bend_lws_protocol'> = @record{
 }
 local Info <cimport,nodecl,codename 'bend_lws_info'> = @record{
   port: cint, iface: cstring, protocols: *Protocol, options: uint64, user: pointer,
-  vhost_name: cstring, ssl_cert_filepath: cstring, ssl_private_key_filepath: cstring, timeout_secs: cuint
+  vhost_name: cstring, ssl_cert_filepath: cstring, ssl_private_key_filepath: cstring, timeout_secs: cuint,
+  listen_accept_role: cstring, listen_accept_protocol: cstring, alpn: cstring
 }
 local LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION: cint <cimport,nodecl>
 local LWS_CALLBACK_ESTABLISHED: cint <cimport,nodecl>
@@ -102,6 +104,10 @@ local LWS_CALLBACK_CLOSED: cint <cimport,nodecl>
 local LWS_CALLBACK_SERVER_WRITEABLE: cint <cimport,nodecl>
 local LWS_CALLBACK_HTTP: cint <cimport,nodecl>
 local LWS_CALLBACK_HTTP_WRITEABLE: cint <cimport,nodecl>
+local LWS_CALLBACK_RAW_ADOPT: cint <cimport,nodecl>
+local LWS_CALLBACK_RAW_RX: cint <cimport,nodecl>
+local LWS_CALLBACK_RAW_WRITEABLE: cint <cimport,nodecl>
+local LWS_CALLBACK_RAW_CLOSE: cint <cimport,nodecl>
 local SSL <cimport,nodecl> = @record{}
 local function lws_get_ssl(wsi: *lws): *SSL <cimport,nodecl> end
 local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
@@ -114,8 +120,10 @@ local WSI_TOKEN_HTTP_AUTHORIZATION: cint <cimport,nodecl>
 local WSI_TOKEN_HTTP_URI_ARGS: cint <cimport,nodecl>
 local LWS_WRITE_BINARY: cint <cimport,nodecl>
 local LWS_WRITE_HTTP_FINAL: cint <cimport,nodecl>
+local LWS_WRITE_RAW: cint <cimport,nodecl>
 local LWS_PRE: csize <cimport,nodecl>
 local LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT: uint64 <cimport,nodecl>
+local LWS_SERVER_OPTION_ADOPT_APPLY_LISTEN_ACCEPT_CONFIG: uint64 <cimport,nodecl>
 local PENDING_TIMEOUT_USER_OK: cint <cimport,nodecl>
 local LWS_TO_KILL_ASYNC: cint <cimport,nodecl>
 local function lws_create_context(info: *Info): *lws_context <cimport,nodecl> end
@@ -148,8 +156,10 @@ local function lws_add_http_header_by_name(wsi: *lws, name: *cuchar, value: *cuc
     p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
 local function lws_finalize_write_http_header(wsi: *lws, start: *cuchar, p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
 local function lws_http_transaction_completed(wsi: *lws): cint <cimport,nodecl> end
+local function lws_raw_transaction_completed(wsi: *lws): cint <cimport,nodecl> end
 
 local MAX_FRAME <comptime> = 65544
+local MAX_RAW_WRITE <comptime> = MAX_FRAME + 10
 local MAX_PEERS <comptime> = 128
 local MAX_EVENTS <comptime> = 512
 local MAX_SEND <comptime> = 32
@@ -161,7 +171,7 @@ local Header = @record{next: pointer, name: cstring, size: csize, values: pointe
 local HeaderCapture = @record{ws: *lws, text: cstring, headers: pointer, used: csize, failed: boolean}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
-  metered: boolean, challenged: boolean, rx_held: boolean, inside_frame: boolean,
+  metered: boolean, challenged: boolean, rx_held: boolean, inside_frame: boolean, raw: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer, headers: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer,
@@ -315,16 +325,64 @@ end
 local function send(peer: *Peer): cint
   local frame = (@*Frame)(peer.outgoing)
   if frame == nilptr then
-    if peer.closing then return -1 end
+    if peer.closing then
+      if peer.raw then return lws_raw_transaction_completed(peer.ws) end
+      return -1
+    end
     return 0
   end
   local data = (@*[0]cuchar)(frame.data)
-  if lws_write(peer.ws,&data[LWS_PRE],frame.size,LWS_WRITE_BINARY) ~= (@cint)(frame.size) then return -1 end
+  local kind = peer.raw and LWS_WRITE_RAW or LWS_WRITE_BINARY
+  if lws_write(peer.ws,&data[LWS_PRE],frame.size,kind) ~= (@cint)(frame.size) then return -1 end
   peer.outgoing = frame.next
   peer.queued = peer.queued - 1
   free_frame(frame)
   if peer.outgoing == nilptr then peer.tail = nilptr end
   if peer.outgoing ~= nilptr or peer.closing then lws_callback_on_writable(peer.ws) end
+  return 0
+end
+
+local function join_peer(server: *Server, peer: *Peer, ws: *lws, version: uint32): boolean
+  if server.peer_count >= MAX_PEERS or next_id == 0 or
+      server.event_count >= MAX_EVENTS - MAX_PEERS then return false end
+  local ev = post(server,iroh_srv_RelayJoined,next_id)
+  ev.version = version
+  peer.id = next_id
+  next_id = next_id + 1
+  peer.ws = ws
+  peer.next = server.peers
+  server.peers = peer
+  server.peer_count = server.peer_count + 1
+  peer.deadline = io_tick() + 10000000000
+  return true
+end
+
+local function raw_callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
+  if reason ~= LWS_CALLBACK_RAW_ADOPT and reason ~= LWS_CALLBACK_RAW_RX and
+      reason ~= LWS_CALLBACK_RAW_WRITEABLE and reason ~= LWS_CALLBACK_RAW_CLOSE then return 0 end
+  if user == nilptr then return -1 end
+  local peer = (@*Peer)(user)
+  local server = (@*Server)(lws_context_user(lws_get_context(ws)))
+  if reason == LWS_CALLBACK_RAW_ADOPT then
+    if not join_peer(server,peer,ws,0) then return -1 end
+    peer.raw = true
+    peer.auth_len = -1
+    peer.path_len = -1
+    return 0
+  end
+  if peer.id == 0 then return 0 end
+  if reason == LWS_CALLBACK_RAW_RX then
+    if peer.closing or server.event_count >= MAX_EVENTS - MAX_PEERS or len > MAX_RAW_WRITE then return -1 end
+    if len == 0 then return 0 end
+    if peer.metered and not charge_receive(server,peer,len) then return -1 end
+    local ev = post(server,iroh_srv_RelayBytes,peer.id)
+    ev.body = (@cstring)(io_mem(C.malloc(len)))
+    ev.size = len
+    C.memcpy(ev.body,bytes,len)
+    return hold_receive(peer)
+  end
+  if reason == LWS_CALLBACK_RAW_WRITEABLE then return send(peer) end
+  remove_peer(server,peer)
   return 0
 end
 
@@ -547,19 +605,9 @@ local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, l
   local server = (@*Server)(lws_context_user(lws_get_context(ws)))
   if reason == LWS_CALLBACK_ESTABLISHED then
     local version = lws_get_protocol(ws).id
-    if server.peer_count >= MAX_PEERS or next_id == 0 or version == 0 or
-        server.event_count >= MAX_EVENTS - MAX_PEERS then return -1 end
-    local ev = post(server,iroh_srv_RelayJoined,next_id)
-    ev.version = version
-    peer.id = next_id
-    next_id = next_id + 1
-    peer.ws = ws
+    if version == 0 or not join_peer(server,peer,ws,version) then return -1 end
     capture_auth_header(peer,ws)
     if server.request_details then capture_request(peer,ws) end
-    peer.next = server.peers
-    server.peers = peer
-    server.peer_count = server.peer_count + 1
-    peer.deadline = io_tick() + 10000000000
     return 0
   end
   if peer.id == 0 then return 0 end
@@ -593,7 +641,7 @@ local function free_server(server: *Server)
   C.free(server.key)
   C.free(server)
 end
-local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
+local function bind_server(e: Env, f: *[0]Term, raw: boolean): Term
   if f[1] > 65535 or next_id == 0 then return io_fail(e,EINVAL,'invalid relay port or listener handle') end
   local server = (@*Server)(io_mem(C.calloc(1,#Server)))
   local n: uint64, cert_len: uint64, key_len: uint64
@@ -605,16 +653,25 @@ local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
     free_server(server)
     return io_fail(e,EINVAL,'invalid relay interface or TLS paths')
   end
-  server.protocols = (@*[0]Protocol)(io_mem(C.calloc(4,bend_lws_protocol_size)))
-  server.protocols[0] = {name = 'http', callback = callback, per_session_data_size = #Peer}
-  server.protocols[1] = {name = 'iroh-relay-v2', callback = callback, per_session_data_size = #Peer,
-    rx_buffer_size = 4096, id = 2}
-  server.protocols[2] = {name = 'iroh-relay-v1', callback = callback, per_session_data_size = #Peer,
-    rx_buffer_size = 4096, id = 1}
+  server.protocols = (@*[0]Protocol)(io_mem(C.calloc(raw and 2 or 4,bend_lws_protocol_size)))
   local info: Info = {port = (@cint)(f[1]), iface = server.iface, protocols = &server.protocols[0],
     user = server, timeout_secs = 10, vhost_name = 'iroh'}
+  if raw then
+    server.protocols[0] = {name = 'iroh-raw', callback = raw_callback, per_session_data_size = #Peer,
+      rx_buffer_size = 4096}
+    info.listen_accept_role = 'raw-skt'
+    info.listen_accept_protocol = 'iroh-raw'
+    info.alpn = 'http/1.1'
+    info.options = LWS_SERVER_OPTION_ADOPT_APPLY_LISTEN_ACCEPT_CONFIG
+  else
+    server.protocols[0] = {name = 'http', callback = callback, per_session_data_size = #Peer}
+    server.protocols[1] = {name = 'iroh-relay-v2', callback = callback, per_session_data_size = #Peer,
+      rx_buffer_size = 4096, id = 2}
+    server.protocols[2] = {name = 'iroh-relay-v1', callback = callback, per_session_data_size = #Peer,
+      rx_buffer_size = 4096, id = 1}
+  end
   if cert_len > 0 then
-    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT
+    info.options = info.options | LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT
     info.ssl_cert_filepath = server.cert
     info.ssl_private_key_filepath = server.key
   end
@@ -635,6 +692,12 @@ local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
   server.next = servers
   servers = server
   return io_done(e,io_tup(e,term_pak(iroh_srv_RelayListener,server.id),(@uint32)(port)))
+end
+local function bind_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  return bind_server(e,f,false)
+end
+local function bind_raw_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  return bind_server(e,f,true)
 end
 local function kick(peer: *Peer)
   peer.closing = true
@@ -675,11 +738,11 @@ local function poll_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_tup(e,f[0],result)
 end
 
-local function size_bytes(e: Env, item: Term): csize
+local function size_bytes(e: Env, item: Term, limit: csize): csize
   local count: csize = 0
   while term_aux(item) == iroh_srv_Con do
     local at = term_peek(e.mem,item)
-    if count == MAX_FRAME or e.mem[at] > 255 then return MAX_FRAME + 1 end
+    if count == limit or e.mem[at] > 255 then return limit + 1 end
     count = count + 1
     item = e.mem[at + 1]
   end
@@ -690,8 +753,9 @@ local function queue_run(e: Env, f: *[0]Term, work: *IoWork): Term
   if peer == nilptr or peer.closing or peer.queued >= MAX_SEND then
     return io_tup(e,f[0],term_pak(iroh_srv_False,0))
   end
-  local n = size_bytes(e,f[2])
-  if n > MAX_FRAME then return io_tup(e,f[0],term_pak(iroh_srv_False,0)) end
+  local max = peer.raw and MAX_RAW_WRITE or MAX_FRAME
+  local n = size_bytes(e,f[2],max)
+  if n > max then return io_tup(e,f[0],term_pak(iroh_srv_False,0)) end
   local frame = (@*Frame)(io_mem(C.calloc(1,#Frame)))
   frame.size = n
   frame.data = (@*cuchar)(io_mem(C.malloc(n + LWS_PRE)))
@@ -766,7 +830,7 @@ end
 local function export_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
   local none = term_pak(iroh_srv_None,0)
-  if peer == nilptr or peer.closing or peer.authorized or size_bytes(e,f[2]) ~= 32 then
+  if peer == nilptr or peer.closing or peer.authorized or size_bytes(e,f[2],32) ~= 32 then
     return io_tup(e,f[0],none)
   end
   local ssl = lws_get_ssl(peer.ws)
@@ -883,6 +947,7 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
     io_eff(iroh_srv_relay_enable_request_details,enable_request_run)
   end
   if iroh_srv_relay_bind ~= 0xffffffff then io_eff(iroh_srv_relay_bind,bind_run) end
+  if iroh_srv_relay_bind_raw ~= 0xffffffff then io_eff(iroh_srv_relay_bind_raw,bind_raw_run) end
   if iroh_srv_relay_poll ~= 0xffffffff then io_eff(iroh_srv_relay_poll,poll_run) end
   if iroh_srv_relay_millis ~= 0xffffffff then io_eff(iroh_srv_relay_millis,millis_run) end
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end

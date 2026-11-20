@@ -285,6 +285,28 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
+.PHONY: check-relay-raw-transport
+RELAY_RAW_SOURCES = src/relay_server_socket.bend src/relay_http.bend src/relay_http_accept.bend \
+	src/relay_raw_http.bend src/relay_websocket.bend src/relay.bend
+RELAY_RAW_EFFECTS = relay_server_socket relay_http_accept
+
+check-relay-raw-transport: $(BUILD)/iroh-bend-relay-raw-transport
+	python3 -B tests/relay_raw_transport.py "$<"
+
+$(BUILD)/relay-raw-transport.c: tests/relay_raw_transport.bend $(RELAY_RAW_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_RAW_EFFECTS))) tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/relay-raw-stage/src" "$(BUILD)/relay-raw-stage/tests"
+	cp $(RELAY_RAW_SOURCES) "$(BUILD)/relay-raw-stage/src/"
+	cp tests/relay_raw_transport.bend "$(BUILD)/relay-raw-stage/tests/"
+	for native in $(RELAY_RAW_EFFECTS); do \
+		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
+			"$(abspath $(BUILD)/relay-raw-stage/src)/$$native.c" || exit; \
+	done
+	cd "$(BUILD)/relay-raw-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_raw_transport.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
+
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 .PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-endpoint-multipath
 UPSTREAM_DATAGRAM_V4 ?=

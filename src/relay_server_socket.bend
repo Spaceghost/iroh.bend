@@ -31,6 +31,13 @@ def relay_bind(host: String, port: U32, cert: String, key: String)
     -> IO(Result<&1,&1,U32 & String,ServerSocket & U32>):
   import "./relay_server_socket.c"
 
+# Raw listeners expose accepted sockets as version 0 and post plaintext
+# chunks as RelayBytes. When metered, a RelayRead precedes each chunk.
+# Each chunk holds reads until relay_resume_rx.
+def relay_bind_raw(host: String, port: U32, cert: String, key: String)
+    -> IO(Result<&1,&1,U32 & String,ServerSocket & U32>):
+  import "./relay_server_socket.c"
+
 def relay_poll(server: ServerSocket) -> IO(ServerSocket & SocketEvent):
   import "./relay_server_socket.c"
 
