@@ -272,10 +272,15 @@ def take_quic_session(conn: DatagramConnection)
 
 # Consumes a ticket. Its local key, peer key, and ALPN must match.
 # Pass 1 to allow early data or 0 for handshake-only resumption.
+def start_quic_resume_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, session: QuicSession, early: U32, idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
+  import "./quic_datagram.c"
+
 def start_quic_resume(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, session: QuicSession, early: U32)
     -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
-  import "./quic_datagram.c"
+  start_quic_resume_with_idle_timeout(host,port,secret,peer,alpn,session,early,Close.default_idle_timeout())
 
 def drop_quic_session(session: QuicSession) -> IO(Unit):
   import "./quic_datagram.c"
@@ -313,9 +318,13 @@ def quic_remote_id(conn: DatagramConnection)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_datagram.c"
 
+def bind_resumable_quic_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"
+
 def bind_resumable_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
-  import "./quic_datagram.c"
+  bind_resumable_quic_with_idle_timeout(host,port,secret,peer,alpn,Close.default_idle_timeout())
 
 def send_quic_application_close(conn: DatagramConnection, high: U32, low: U32, reason: List<&2,U32>)
     -> IO(DatagramConnection & Close.WriteResult()):

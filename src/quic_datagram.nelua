@@ -280,8 +280,8 @@ for _, name in ipairs{'start_quic_datagram_with_idle_timeout','step_quic_datagra
     'start_route_handshake_with_idle_timeout','open_handshake_socket','read_handshake_socket','route_handshake_output','adopt_handshake_socket',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
-    'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
-    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic_with_idle_timeout','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
+    'take_quic_session','start_quic_resume_with_idle_timeout','drop_quic_session','write_early_datagram','quic_resumption_status',
+    'QuicSession','open_early_quic_stream','bind_resumable_quic_with_idle_timeout','bind_shared_quic_with_idle_timeout','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
     'send_quic_application_close','read_quic_application_close','quic_close_packet','cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
@@ -294,7 +294,7 @@ local iroh_dgram_read_handshake_socket: uint32 <cimport,nodecl>
 local iroh_dgram_route_handshake_output: uint32 <cimport,nodecl>
 local iroh_dgram_adopt_handshake_socket: uint32 <cimport,nodecl>
 local iroh_dgram_take_quic_session: uint32 <cimport,nodecl>
-local iroh_dgram_start_quic_resume: uint32 <cimport,nodecl>
+local iroh_dgram_start_quic_resume_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_session: uint32 <cimport,nodecl>
 local iroh_dgram_write_early_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_resumption_status: uint32 <cimport,nodecl>
@@ -303,7 +303,7 @@ local iroh_dgram_QuicSession: uint32 <cimport,nodecl>
 local iroh_dgram_bind_quic_identity: uint32 <cimport,nodecl>
 local iroh_dgram_bind_dual_quic_identity: uint32 <cimport,nodecl>
 local iroh_dgram_quic_remote_id: uint32 <cimport,nodecl>
-local iroh_dgram_bind_resumable_quic: uint32 <cimport,nodecl>
+local iroh_dgram_bind_resumable_quic_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_bind_shared_quic_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_try_accept_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_close_shared_quic: uint32 <cimport,nodecl>
@@ -1368,7 +1368,7 @@ end
 local function resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local ticket = pop_session(e,args[5])
   defer free_session(ticket) end
-  return start_client(e,args,ticket,args[6] ~= 0,true,false,DEFAULT_IDLE_MS)
+  return start_client(e,args,ticket,args[6] ~= 0,true,false,idle_milliseconds(e,args[7]))
 end
 
 local function drop_session_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2446,7 +2446,7 @@ local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function bind_resumable_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,true,false,false,DEFAULT_IDLE_MS)
+  return bind_listener(e,args,true,false,false,idle_milliseconds(e,args[5]))
 end
 
 local function bind_identity_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2604,13 +2604,13 @@ local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function register_quic_datagram() <cexport,codename 'iroh_register_quic_datagram',cattribute 'constructor'>
-  if iroh_dgram_start_quic_resume ~= 0xffffffff then io_eff(iroh_dgram_start_quic_resume,resume_run) end
+  if iroh_dgram_start_quic_resume_with_idle_timeout ~= 0xffffffff then io_eff(iroh_dgram_start_quic_resume_with_idle_timeout,resume_run) end
   if iroh_dgram_take_quic_session ~= 0xffffffff then io_eff(iroh_dgram_take_quic_session,take_session_run) end
   if iroh_dgram_drop_quic_session ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_session,drop_session_run) end
   if iroh_dgram_open_early_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_open_early_quic_stream,open_early_stream_run) end
   if iroh_dgram_write_early_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_early_datagram,early_datagram_run) end
   if iroh_dgram_quic_resumption_status ~= 0xffffffff then io_eff(iroh_dgram_quic_resumption_status,resumption_run) end
-  if iroh_dgram_bind_resumable_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_resumable_quic,bind_resumable_run) end
+  if iroh_dgram_bind_resumable_quic_with_idle_timeout ~= 0xffffffff then io_eff(iroh_dgram_bind_resumable_quic_with_idle_timeout,bind_resumable_run) end
   if iroh_dgram_bind_quic_identity ~= 0xffffffff then io_eff(iroh_dgram_bind_quic_identity,bind_identity_run) end
   if iroh_dgram_bind_dual_quic_identity ~= 0xffffffff then
     io_eff(iroh_dgram_bind_dual_quic_identity,bind_dual_identity_run)

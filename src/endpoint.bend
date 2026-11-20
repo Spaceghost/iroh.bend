@@ -1316,8 +1316,12 @@ def close_listener(listener: Quic.QuicDatagramListener) -> IO(Unit):
   Quic.close_shared_quic(listener)
 
 # Opt in to receiving replayable 0-RTT data on this listener.
-def bind_resumable(address: Address, identity: Identity)
+def bind_resumable_with_idle_timeout(address: Address, identity: Identity, idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
   IpAddress{host,port} = address
   PeerKeys{seed,peer,alpn} = identity
-  Quic.bind_resumable_quic(host,port,seed,peer,alpn)
+  Quic.bind_resumable_quic_with_idle_timeout(host,port,seed,peer,alpn,idle_ms)
+
+def bind_resumable(address: Address, identity: Identity)
+    -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
+  bind_resumable_with_idle_timeout(address,identity,Close.default_idle_timeout())

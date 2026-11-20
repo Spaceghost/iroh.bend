@@ -559,6 +559,11 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 - The QUIC client can take an opaque session ticket with
   `take_quic_session` after stepping the connection. Use it once with
   `start_quic_resume` and the original local key, peer key, and ALPN.
+  `start_quic_resume_with_idle_timeout` accepts a final millisecond QUIC
+  VarInt for the new connection, including a full handshake after a ticket
+  rejection. `bind_resumable_quic_with_idle_timeout` and
+  `Endpoint.bind_resumable_with_idle_timeout` apply the listener's setting
+  to each connection it accepts.
   Enable early data to use `open_early_quic_stream` or
   `write_early_datagram` before the handshake. Only send replay-safe
   operations. Check `quic_resumption_status` after authentication. If the
@@ -916,9 +921,15 @@ three-probe floor, the last local path, and expiry of a single-path QUIC
 connection. Run `make check-quic-path-idle` with `UPSTREAM_QUIC_PATH_IDLE`
 set to the pinned Noq peer. It uses Iroh 1.5.0's raw-key TLS code and
 accepts `listen HOST`, `listen-base HOST` or
-`dial PRIMARY SECONDARY IDLE_MS validated`. The endpoint's relay-specific
-path defaults and the connection idle options on specialized resumption
-and NAT constructors remain open.
+`dial PRIMARY SECONDARY IDLE_MS validated`. The Picoquic endpoint’s relay-specific
+path defaults and the idle settings on its resumption and NAT constructors
+remain open.
+
+Run `make check-quic-resumption-idle` with `UPSTREAM_QUIC_RESUMPTION_IDLE`
+set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and
+`IDLE resumed MS` from the negotiated transport parameters. The tests cover
+IPv4 and IPv6, accepted and rejected early streams and datagrams, and a
+handshake-only resumption that both peers report as `TimedOut`.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

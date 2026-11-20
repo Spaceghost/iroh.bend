@@ -255,8 +255,9 @@ $(BUILD)/relay-quic.c: tests/relay_quic.bend tests/endpoint_validation.bend test
 $(BUILD)/iroh-bend-relay-quic: $(BUILD)/relay-quic.c
 $(BUILD)/iroh-bend-quic-datagram-idle-routes: $(BUILD)/quic-datagram-idle-routes.c
 $(BUILD)/iroh-bend-quic-datagram-idle-listeners: $(BUILD)/quic-datagram-idle-listeners.c
+$(BUILD)/iroh-bend-quic-datagram-resumption-idle: $(BUILD)/quic-datagram-resumption-idle.c
 $(BUILD)/iroh-bend-quic-datagram-relay-close: $(BUILD)/quic-datagram-relay-close.c
-$(BUILD)/iroh-bend-relay-quic $(BUILD)/iroh-bend-quic-datagram-relay-close $(BUILD)/iroh-bend-quic-datagram-idle-routes $(BUILD)/iroh-bend-quic-datagram-idle-listeners:
+$(BUILD)/iroh-bend-relay-quic $(BUILD)/iroh-bend-quic-datagram-relay-close $(BUILD)/iroh-bend-quic-datagram-idle-routes $(BUILD)/iroh-bend-quic-datagram-idle-listeners $(BUILD)/iroh-bend-quic-datagram-resumption-idle:
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS) libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS) libcurl)
 
@@ -446,6 +447,12 @@ check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram $(QUIC_EARLY_LISTENER)
 	sh tests/quic_datagram.sh "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_DATAGRAM_V4)" \
 		"$(UPSTREAM_DATAGRAM_V6)" "$(UPSTREAM_DATAGRAM_ECHO)" "$(UPSTREAM_QUIC_SHARED)" \
 		"$(UPSTREAM_QUIC_SHARED_DIAL)" "$(UPSTREAM_QUIC_EARLY)" "$(UPSTREAM_QUIC_EARLY_DIAL)" "$(QUIC_EARLY_LISTENER)"
+
+.PHONY: check-quic-resumption-idle
+UPSTREAM_QUIC_RESUMPTION_IDLE ?=
+check-quic-resumption-idle: $(BUILD)/iroh-bend-quic-datagram-resumption-idle
+	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE to the Iroh resumption timeout fixture.' >&2; exit 2; }
+	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)"
 
 .PHONY: check-quic-listener-identity
 UPSTREAM_QUIC_IDENTITY_DIAL ?=
@@ -797,10 +804,11 @@ check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
 	@set -e; for role in outbound inbound; do for version in 1 2; do "$<" "$(RELAY_URL)" "$$role" "$$version"; done; done
 
 MULTIPATH_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-multipath-,$(addsuffix .c,relay-close idle-routes idle-listeners))
-DATAGRAM_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-datagram-,$(addsuffix .c,relay-close idle-routes idle-listeners))
+DATAGRAM_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-datagram-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-idle))
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
 $(BUILD)/quic-datagram-idle-routes.c: tests/quic_datagram_idle_routes.bend tests/quic_idle_routes.bend
 $(BUILD)/quic-datagram-idle-listeners.c: tests/quic_datagram_idle_listeners.bend tests/quic_idle_listeners.bend
+$(BUILD)/quic-datagram-resumption-idle.c: tests/quic_datagram_resumption_idle.bend tests/quic_early_listener.bend
 $(DATAGRAM_CLOSE_TEST_C): tests/quic_datagram_relay_close.bend tests/quic_datagram_cancel.bend tests/quic_datagram.bend
 $(BUILD)/quic-multipath-idle-routes.c: tests/quic_multipath_idle_routes.bend tests/quic_idle_routes.bend
 $(BUILD)/quic-multipath-idle-listeners.c: tests/quic_multipath_idle_listeners.bend tests/quic_idle_listeners.bend
