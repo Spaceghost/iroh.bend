@@ -6,6 +6,7 @@ import ../src/quic_close.bend as Close
 import ./quic_datagram.bend as Peer
 import ./quic_early_listener.bend as Listener
 import ./quic_relay_close.bend as RelayTest
+import ./quic_resumption_relay.bend as RelayResume
 import ./quic_datagram_cancel.bend as Datagram
 import ./quic_connection_close.bend as CloseTest
 import ./quic_idle_timeout.bend as Idle
@@ -119,43 +120,31 @@ def relay_accept(listener: Endpoint.RelayedListener) -> IO(Endpoint.RelayedListe
       RelayTest.accept(~Endpoint.RelayedListener,~Endpoint.Connection(),~Endpoint.try_accept_relay_identity,listener,15000n)
     authenticated(pair)
 
-def warm_relay(pair: Endpoint.RelayedListener & Q.DatagramConnection) -> IO(Endpoint.RelayedListener):
-  (listener,conn) = pair
-  do IO<Endpoint.RelayedListener>:
-    Listener.warm_session(conn)
-    return listener
-
-def finish_relay(pair: Endpoint.RelayedListener & Q.DatagramConnection) -> IO(Unit):
-  (listener,conn) = pair
+def relay_status(conn: Q.DatagramConnection, accepted: Bool) -> IO(Unit):
   do IO<Unit>:
     status : Q.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>> <- Q.quic_resumption_status(conn)
-    Listener.server_resume_status(status,True{})
-    IO.try(Unit,Endpoint.close_relay_identity(listener))
+    Listener.server_resume_status(status,accepted)
 
-def serve_relay(listener: Endpoint.RelayedListener, port: U32) -> IO(Unit):
-  do IO<Unit>:
-    IO.print(U32.show(port))
-    first : Endpoint.RelayedListener & Q.DatagramConnection <- relay_accept(listener)
-    warm : Endpoint.RelayedListener <- warm_relay(first)
-    resumed : Endpoint.RelayedListener & Q.DatagramConnection <- relay_accept(warm)
-    finish_relay(resumed)
+def serve_relay(owner: Endpoint.RelayedListener, port: U32, stage: String) -> IO(Unit):
+  RelayResume.listen(~Endpoint.RelayedListener,~Q.DatagramConnection,~relay_accept,~Listener.warm_session,
+    ~(conn => accepted => relay_status(conn,accepted)),~Endpoint.close_relay_identity,owner,port,stage)
 
-def direct_relay(result: Endpoint.RelayedListener & U32) -> IO(Unit):
+def direct_relay(result: Endpoint.RelayedListener & U32, stage: String) -> IO(Unit):
   (listener,port) = result
-  serve_relay(listener,port)
+  serve_relay(listener,port,stage)
 
-def relay(kind: String, url: String, idle_ms: Wire.VarInt) -> IO(Unit):
+def relay(kind: String, url: String, stage: String, idle_ms: Wire.VarInt) -> IO(Unit):
   match kind:
     case "relay":
       do IO<Unit>:
         owner : Endpoint.RelayedListener <- IO.try(Endpoint.RelayedListener,
           Endpoint.bind_relay_identity_with_idle_timeout(url,List.replicate(U32,32n,42),Peer.fixture_alpn(),1,idle_ms))
-        serve_relay(owner,0)
+        serve_relay(owner,0,stage)
     case _:
       do IO<Unit>:
         bound : Endpoint.RelayedListener & U32 <- IO.try(Endpoint.RelayedListener & U32,
           Endpoint.bind_direct_relay_identity_with_idle_timeout(0,url,List.replicate(U32,32n,42),Peer.fixture_alpn(),1,idle_ms))
-        direct_relay(bound)
+        direct_relay(bound,stage)
 
 def pair(a: Maybe<&2,U32>, b: Maybe<&2,U32>, run: U32 -> U32 -> IO(Unit)) -> IO(Unit):
   match a b:
@@ -171,8 +160,10 @@ def run(args: List<String>) -> IO(Unit):
         w => p => dial(host,w,p,mode,Wire.Var{h,l})))
     case [_,kind,host,mode,hi,lo]:
       pair(U32.read(hi),U32.read(lo),h => l => server(kind,host,mode,Wire.Var{h,l}))
+    case [_,"rotate",kind,url,stage,hi,lo]:
+      pair(U32.read(hi),U32.read(lo),h => l => relay(kind,url,stage,Wire.Var{h,l}))
     case [_,kind,url,hi,lo]:
-      pair(U32.read(hi),U32.read(lo),h => l => relay(kind,url,Wire.Var{h,l}))
+      pair(U32.read(hi),U32.read(lo),h => l => relay(kind,url,"accept",Wire.Var{h,l}))
     case _:
       IO.die(Unit,2,"expected client or server resumption arguments")
 

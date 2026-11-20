@@ -977,7 +977,12 @@ Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and
 received application datagrams on that path during both connections. The
 suite also dials the combined listener directly over IPv4 and IPv6. The
 same checks run against the Picoquic endpoint with
-`make check-quic-multipath-resumption-idle-relay`.
+`make check-quic-multipath-resumption-idle-relay`. Both targets restart the
+relay-only and combined listeners with the same identity and a new idle
+limit. The Iroh `dial-relay-rotated` fixture waits for a `+` on stdin
+before reconnecting. It reports `RELAY rejected 0-RTT` when the fresh
+listener rejects the old ticket, then verifies the retried stream and
+datagram on the authenticated connection.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

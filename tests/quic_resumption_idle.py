@@ -28,7 +28,7 @@ async def output(process, early_client=None):
     return await process.wait(), lines
 
 
-async def verify(processes, warm, resumed, quiet=False, relayed=False, early_client=None):
+async def verify(processes, warm, resumed, quiet=False, relayed=False, early_client=None, relay_rejected=False):
     results = await asyncio.gather(output(processes[0], early_client), *(output(proc) for proc in processes[1:]))
     for status, lines in results:
         if status:
@@ -39,6 +39,8 @@ async def verify(processes, warm, resumed, quiet=False, relayed=False, early_cli
             raise AssertionError(f"Iroh did not confirm {stage} timeout {ms} ms: {observed}")
     if relayed and not {"RELAY warm", "RELAY resumed"}.issubset(observed):
         raise AssertionError(f"Iroh did not receive datagrams over the relay on both connections: {observed}")
+    if relay_rejected and "RELAY rejected 0-RTT" not in observed:
+        raise AssertionError(f"Iroh did not report that its relayed 0-RTT attempt was rejected: {observed}")
     if quiet:
         expiry = [int(line.split()[1]) for line in observed if line.startswith("EXPIRED ")]
         if len(expiry) != 1 or not resumed - 175 <= expiry[0] < 8000:
@@ -91,11 +93,16 @@ async def server_case(bend, reference, host, rotate, warm, resumed, kind="server
     print(f"PASS Bend {kind} listener {host} {mode} negotiated {warm} -> {resumed} ms", flush=True)
 
 
+async def relay_port(server, kind):
+    port = await read_port(server, kind)
+    if (kind == "relay") != (port == 0):
+        raise AssertionError(f"unexpected direct port {port} for {kind}")
+    return port
+
+
 async def relay_case(bend, reference, urls, kind, host, idle):
     async with child(bend, kind, urls[0], *words(idle)) as server:
-        port = await read_port(server, kind)
-        if (kind == "relay") != (port == 0):
-            raise AssertionError(f"unexpected direct port {port} for {kind}")
+        port = await relay_port(server, kind)
         if host:
             address = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
             args = ["dial", address]
@@ -106,11 +113,30 @@ async def relay_case(bend, reference, urls, kind, host, idle):
     print(f"PASS Bend {kind} listener negotiated {idle} ms on warm and resumed {host or urls[0]} connections", flush=True)
 
 
+async def restarted_relay_case(bend, reference, urls, kind, warm, resumed):
+    async with AsyncExitStack() as stack:
+        first = await stack.enter_async_context(child(bend, "rotate", kind, urls[0], "warm", *words(warm)))
+        await relay_port(first, kind)
+        peer = await stack.enter_async_context(child(reference, "dial-relay-rotated", urls[1], str(warm), str(resumed)))
+
+        # Both listeners register the same identity on the same relay.
+        if await first.wait():
+            raise RuntimeError(f"warm {kind} listener failed before the restart")
+        replacement = await stack.enter_async_context(child(bend, "rotate", kind, urls[0], "reject", *words(resumed)))
+        await relay_port(replacement, kind)
+        peer.stdin.write(b"+")
+        await peer.stdin.drain()
+        await verify([peer, replacement], warm, resumed, relayed=True, relay_rejected=True)
+    print(f"PASS restarted {kind} listener on {urls[0]} rejected 0-RTT and negotiated {warm} -> {resumed} ms", flush=True)
+
+
 async def run(bend, reference, urls, role):
     if urls:
         for kind, host, idle in [("relay", None, WIDE), ("direct-relay", None, SHORT),
                                  ("direct-relay", "127.0.0.1", SHORT), ("direct-relay", "::1", 0)]:
             await asyncio.wait_for(relay_case(bend, reference, urls, kind, host, idle), 30)
+        for kind, warm, resumed in [("relay", WIDE, SHORT), ("direct-relay", SHORT, 0)]:
+            await asyncio.wait_for(restarted_relay_case(bend, reference, urls, kind, warm, resumed), 35)
         return
     for host in ("127.0.0.1", "::1"):
         if role != "listener":

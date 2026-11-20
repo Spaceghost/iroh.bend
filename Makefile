@@ -833,10 +833,10 @@ DATAGRAM_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-datagram-,$(addsuffix .c,relay
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
 $(BUILD)/quic-datagram-idle-routes.c: tests/quic_datagram_idle_routes.bend tests/quic_idle_routes.bend
 $(BUILD)/quic-datagram-idle-listeners.c: tests/quic_datagram_idle_listeners.bend tests/quic_idle_listeners.bend
-$(BUILD)/quic-datagram-resumption-idle.c: tests/quic_datagram_resumption_idle.bend tests/quic_early_listener.bend
+$(BUILD)/quic-datagram-resumption-idle.c: tests/quic_datagram_resumption_idle.bend tests/quic_early_listener.bend tests/quic_resumption_relay.bend
 $(DATAGRAM_CLOSE_TEST_C): tests/quic_datagram_relay_close.bend tests/quic_datagram_cancel.bend tests/quic_datagram.bend
 $(BUILD)/quic-multipath-idle-routes.c: tests/quic_multipath_idle_routes.bend tests/quic_idle_routes.bend
-$(BUILD)/quic-multipath-resumption-relay.c: tests/quic_multipath_resumption_relay.bend tests/quic_multipath_early_listener.bend
+$(BUILD)/quic-multipath-resumption-relay.c: tests/quic_multipath_resumption_relay.bend tests/quic_multipath_early_listener.bend tests/quic_resumption_relay.bend
 $(BUILD)/quic-multipath-idle-listeners.c: tests/quic_multipath_idle_listeners.bend tests/quic_idle_listeners.bend
 $(MULTIPATH_CLOSE_TEST_C): tests/quic_multipath_relay_close.bend tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(DATAGRAM_CLOSE_TEST_C) $(MULTIPATH_CLOSE_TEST_C): tests/quic_relay_close.bend tests/quic_idle_timeout.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))
