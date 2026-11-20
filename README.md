@@ -117,6 +117,15 @@ client requires a libcurl build with WebSocket support.
      reply 32, and closes with application code zero and an empty reason. Both
      peers print `PASS defaults kept alive`.
 
+   Run `make check-quic-idle-config` or `make check-quic-idle-config-control`
+   with the same fixture to check configured timers. In `configured`, the tested
+   peer advertises 1,150 ms. In `wide`, it advertises 4,294,967,419 ms. In
+   `no-limit` and `peer-limit`, it advertises zero. The observer sets its
+   own maximum to zero except in `peer-limit`, where it supplies 800 ms. It
+   checks the exact negotiated value in Iroh. Finite short cases check expiry.
+   In `wide` and `no-limit`, the observer waits 1.5 s before sending byte 31,
+   verifies byte 32 and closes with code zero and an empty reason.
+
    For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
    registers with the supplied Iroh relay, and prints `READY relay` when ready to accept.
@@ -478,6 +487,16 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   The multipath endpoint exposes the same two operations. Set `UPSTREAM_QUIC_CLOSE` to the Iroh
   fixture and run `make check-quic-close` for both transports. Run `make check-quic-close-control`
   with the same fixture to compare two Iroh peers.
+- Supply a QUIC VarInt in milliseconds to `connect_with_idle_timeout` or
+  `bind_shared_quic_with_idle_timeout` in the datagram module. The multipath
+  module offers `connect_multipath_bytes_with_idle_timeout` and
+  `bind_multipath_bytes_with_idle_timeout`. For example, `Wire.Var{0,1150}`
+  advertises 1.15 s, and `Wire.Var{0,0}` leaves the local maximum unbounded.
+  The connection uses the smaller nonzero value advertised by the two peers.
+  The handshake deadline remains a separate argument. ngtcp2 represents
+  durations in nanoseconds and Picoquic uses microseconds. The bindings
+  report `EOVERFLOW` for milliseconds above 18,446,744,073,709 and
+  18,446,744,073,709,551 respectively.
 - After an explicit local reset, step the connection and poll `quic_stream_reset_acked`
   (ngtcp2) or `multipath_stream_reset_acked` (Picoquic). The result is 0 before
   a reset and while it is pending, and 1 when the peer has acknowledged it.
@@ -846,8 +865,9 @@ They also check expiry under one-way packet loss and verify that later datagram
 and stream operations report the timeout. With default settings, Iroh observes
 a 30-second negotiated idle timeout and a heartbeat after five seconds from each
 backend. Both connections exchange fresh data after the heartbeat. These checks
-cover the connection-wide timers. Choosing the advertised idle timeout through
-Bend's endpoint configuration and matching Iroh's per-path timeouts remain open.
+cover the connection-wide timers. The pinned direct dial and listen APIs also
+accept a caller-selected maximum idle timeout. Per-path idle timeout parity
+remains open.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

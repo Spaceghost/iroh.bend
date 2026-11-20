@@ -125,20 +125,44 @@ def serve(bound: Q.MultipathListener & U32, suite: Suite) -> IO(Unit):
     pair : Q.MultipathListener & Q.MultipathConnection <- Listener.accept(9000n,listener)
     accepted(pair,suite)
 
-def command(host: String, port: Maybe<&2,U32>, suite: Suite) -> IO(Unit):
+def bind_case(host: String, setting: Maybe<&2,Wire.VarInt>) -> IO(Result<&1,&1,U32 & String,Q.MultipathListener & U32>):
+  match setting:
+    case None{}:
+      Q.bind_multipath_bytes(host,0,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn())
+    case Some{idle_ms}:
+      Q.bind_multipath_bytes_with_idle_timeout(host,0,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn(),idle_ms)
+
+def dial_case(host: String, port: U32, setting: Maybe<&2,Wire.VarInt>) -> IO(Result<&1,&1,U32 & String,Q.MultipathConnection>):
+  match setting:
+    case None{}:
+      Q.connect_multipath_bytes(host,port,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn(),5000n)
+    case Some{idle_ms}:
+      Q.connect_multipath_bytes_with_idle_timeout(host,port,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn(),5000n,idle_ms)
+
+def run_case(host: String, port: Maybe<&2,U32>, suite: Suite, setting: Maybe<&2,Wire.VarInt>) -> IO(Unit):
   match port:
     case Some{0}:
       do IO<Unit>:
         bound : Q.MultipathListener & U32 <- IO.try(Q.MultipathListener & U32,
-          Q.bind_multipath_bytes(host,0,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn()))
+          bind_case(host,setting))
         serve(bound,suite)
     case Some{port}:
       do IO<Unit>:
         conn : Q.MultipathConnection <- IO.try(Q.MultipathConnection,
-          Q.connect_multipath_bytes(host,port,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn(),5000n))
+          dial_case(host,port,setting))
         exchange(conn,suite)
     case None{}:
       IO.die(Unit,1,"expected a UDP port")
+
+def command(host: String, port: Maybe<&2,U32>, suite: Suite) -> IO(Unit):
+  run_case(host,port,suite,None{})
+
+def configured(host: String, +port: String, mode: Maybe<&2,IdleTest.Mode>) -> IO(Unit):
+  match mode:
+    case Some{IdleTest.Configured{+value,expected,name}}:
+      run_case(host,U32.read(port),IdleCase{String.eq(port,"0"),IdleTest.Configured{value,expected,name}},Some{value})
+    case _:
+      IO.die(Unit,1,"unknown QUIC test case")
 
 def close_case(host: String, port: String, send: Bool, id: Maybe<&2,U32>) -> IO(Unit):
   match id:
@@ -169,6 +193,8 @@ def run(args: List<String>) -> IO(Unit):
       close_case(host,port,True{},U32.read(id))
     case Con{_,Con{host,Con{port,Con{"receive",Con{id,Nil{}}}}}}:
       close_case(host,port,False{},U32.read(id))
+    case [_,host,port,name]:
+      configured(host,port,IdleTest.setting(name))
     case _:
       IO.die(Unit,1,"expected an IP address and UDP port")
 

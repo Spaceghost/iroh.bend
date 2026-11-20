@@ -110,6 +110,7 @@ local function picoquic_disable_keep_alive(cnx:*cnx_t) <cimport,nodecl> end
 local function picoquic_tls_is_psk_handshake(cnx:*cnx_t):cint <cimport,nodecl> end
 local function picoquic_create(max:uint32, cert:cstring,key:cstring,ca:cstring,alpn:cstring, cb:pointer, cbctx:pointer,
     cidcb:pointer,cidctx:pointer,seed:pointer, now:uint64, sim:pointer,tickets:cstring,enckey:pointer,enclen:csize):*quic_t <cimport,nodecl> end
+local function picoquic_set_default_idle_timeout(quic:*quic_t,interval_ms:uint64) <cimport,nodecl> end
 local function picoquic_set_default_multipath_option(quic:*quic_t, enabled:cint) <cimport,nodecl> end
 local AlpnSelector = @function(*quic_t,*iov_t,csize):csize
 local function picoquic_set_alpn_select_fn(quic:*quic_t, selector:AlpnSelector) <cimport,nodecl> end
@@ -275,6 +276,7 @@ local ECONNREFUSED: cint <cimport,nodecl>
 local ENETUNREACH: cint <cimport,nodecl>
 local EHOSTUNREACH: cint <cimport,nodecl>
 local EBADF: uint32 <cimport,nodecl>
+local EOVERFLOW: uint32 <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
 local ENOMEM: uint32 <cimport,nodecl>
 local ETIMEDOUT: uint32 <cimport,nodecl>
@@ -301,9 +303,9 @@ local QUIC_TRANSPORT_EXTENSION: uint16 <comptime> = 57
 
 ##[[
 local names = {
-  'start_multipath_route_handshake', 'start_multipath_nat_route_handshake', 'open_multipath_handshake_socket',
+  'start_multipath_route_handshake_with_idle_timeout', 'start_multipath_nat_route_handshake', 'open_multipath_handshake_socket',
   'read_multipath_handshake_socket', 'multipath_handshake_output', 'adopt_multipath_handshake_socket',
-  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_nat_offer_bytes', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
+  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_nat_offer_bytes', 'start_multipath_bytes_with_idle_timeout', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
   'step_multipath', 'probe_multipath', 'multipath_status', 'multipath_path_timeouts', 'set_multipath_keepalive',
@@ -311,7 +313,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'send_multipath_application_close', 'read_multipath_application_close', 'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_close_acked', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes_with_idle_timeout', 'bind_multipath_alpns', 'set_multipath_alpns',
   'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
@@ -329,7 +331,7 @@ local iroh_mp_QadServer: uint32 <cimport,nodecl>
 local iroh_mp_bind_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_step_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_close_qad_server: uint32 <cimport,nodecl>
-local iroh_mp_start_multipath_route_handshake: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_route_handshake_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_route_handshake: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_handshake_socket: uint32 <cimport,nodecl>
@@ -338,7 +340,7 @@ local iroh_mp_adopt_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer_bytes: uint32 <cimport,nodecl>
-local iroh_mp_start_multipath_bytes: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_bytes_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_negotiated_multipath_alpn: uint32 <cimport,nodecl>
 local iroh_mp_peer_multipath_parameters: uint32 <cimport,nodecl>
@@ -391,7 +393,7 @@ local iroh_mp_listener_qad_addresses: uint32 <cimport,nodecl>
 local iroh_mp_poll_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
-local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_bytes_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_bind_dual_multipath_nat_identity: uint32 <cimport,nodecl>
 local iroh_mp_bind_dual_multipath_identity: uint32 <cimport,nodecl>
@@ -2163,7 +2165,16 @@ local function early_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,io_box(e,iroh_mp_Some,accepted)))
 end
 
-local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean, advertise_nat: boolean, detached: boolean): Term
+local DEFAULT_IDLE_MS: uint64 <comptime> = 30000
+local MAX_IDLE_MS: uint64 <comptime> = 0xffffffffffffffff // 1000
+
+local function idle_milliseconds(e: Env, value: Term): uint64
+  local words: [2]Term
+  spare_free(e,cls_fit(2),ctr_take(e,value,2,&words[0]))
+  return (words[0] << 32) | words[1]
+end
+
+local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean, advertise_nat: boolean, detached: boolean, idle_ms: uint64): Term
   defer free_session(session) end
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
@@ -2181,6 +2192,7 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
   local peer: storage_t
   local peer_size = address(host,(@uint16)(args[1]),&peer)
   if peer_size == 0 then return io_fail(e,EINVAL,'invalid numeric peer address') end
+  if idle_ms > MAX_IDLE_MS then return io_fail(e,EOVERFLOW,'idle timeout exceeds Picoquic microsecond range') end
   if next_connection == 0 then return io_fail(e,ENOMEM,'multipath handles exhausted') end
   local conn = (@*Connection)(C.calloc(1,#Connection))
   if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
@@ -2227,6 +2239,7 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
   conn.resume = session
   conn.early = early
   session = nilptr
+  picoquic_set_default_idle_timeout(conn.quic,idle_ms)
   picoquic_set_default_multipath_option(conn.quic,1)
   conn.cnx = picoquic_create_client_cnx(conn.quic,&peer,now,1,nilptr,nilptr,(@pointer)(on_event),conn)
   if conn.cnx == nilptr then
@@ -2246,37 +2259,37 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
 end
 
 local function start_multipath_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,false,true)
+  return start_client(e,args,1,nilptr,false,false,true,idle_milliseconds(e,args[5]))
 end
 
 local function start_multipath_nat_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,true,true)
+  return start_client(e,args,1,nilptr,false,true,true,DEFAULT_IDLE_MS)
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false,false,false)
+  return start_client(e,args,0,nilptr,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function start_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false,true,false)
+  return start_client(e,args,0,nilptr,false,true,false,DEFAULT_IDLE_MS)
 end
 
 local function start_nat_offer_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,true,false)
+  return start_client(e,args,1,nilptr,false,true,false,DEFAULT_IDLE_MS)
 end
 
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,false,false)
+  return start_client(e,args,1,nilptr,false,false,false,idle_milliseconds(e,args[5]))
 end
 
 local function start_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,2,nilptr,false,false,false)
+  return start_client(e,args,2,nilptr,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function start_resume(e: Env, args: *[0]Term, early: boolean): Term
   local session = remove_session(handle_id(e,args[5],iroh_mp_MultipathSession))
   if session == nilptr then return io_fail(e,EBADF,'multipath session is no longer available') end
-  return start_client(e,args,1,session,early,false,false)
+  return start_client(e,args,1,session,early,false,false,DEFAULT_IDLE_MS)
 end
 
 local function start_resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2894,7 +2907,7 @@ local function read_nat_frame_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 
-local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean, dual:boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean, dual:boolean, idle_ms: uint64): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
   local alpn_term = args[discover_peer and 3 or 4]
@@ -2915,6 +2928,7 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat
   elseif not dual and wildcard then
     return io_fail(e,EINVAL,'multipath listener requires a concrete IP address')
   end
+  if idle_ms > MAX_IDLE_MS then return io_fail(e,EOVERFLOW,'idle timeout exceeds Picoquic microsecond range') end
   if next_listener == 0 then return io_fail(e,ENOMEM,'multipath listener handles exhausted') end
   local listener = (@*Listener)(C.calloc(1,#Listener))
   if listener == nilptr then return io_fail(e,ENOMEM,nilptr) end
@@ -2966,6 +2980,7 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat
   picoquic_set_client_authentication(listener.quic,1)
   picoquic_enforce_client_only(listener.quic,0)
   picoquic_set_accept_0rtt(listener.quic,0)
+  picoquic_set_default_idle_timeout(listener.quic,idle_ms)
   picoquic_set_default_multipath_option(listener.quic,1)
   picoquic_enable_path_callbacks_default(listener.quic,1)
   picoquic_set_max_half_open_retry_threshold(listener.quic,LISTENER_LIMIT)
@@ -2997,42 +3012,42 @@ local function accept_connection(e: Env, listener: *Listener): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,false,false,false,false)
+  return bind_listener(e,args,0,false,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,true,false,false,false)
+  return bind_listener(e,args,0,true,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,1,false,false,false,false)
+  return bind_listener(e,args,1,false,false,false,false,idle_milliseconds(e,args[5]))
 end
 
 local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,false,false,false,false)
+  return bind_listener(e,args,2,false,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_resumable_run(e:Env, args:*[0]Term, work:*IoWork):Term
-  return bind_listener(e,args,1,false,true,false,false)
+  return bind_listener(e,args,1,false,true,false,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,2,false,args[4] == 1,true,false)
+  return bind_listener(e,args,2,false,args[4] == 1,true,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_dual_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,2,false,args[4] == 1,true,true)
+  return bind_listener(e,args,2,false,args[4] == 1,true,true,DEFAULT_IDLE_MS)
 end
 
 local function bind_dual_nat_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,2,true,args[4] == 1,true,true)
+  return bind_listener(e,args,2,true,args[4] == 1,true,true,DEFAULT_IDLE_MS)
 end
 
 local function bind_nat_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,true,false,false,false)
+  return bind_listener(e,args,2,true,false,false,false,DEFAULT_IDLE_MS)
 end
 
 local function used_alpns(listener: *Listener)
@@ -4403,7 +4418,7 @@ local function close_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
-  if iroh_mp_start_multipath_route_handshake ~= 0xffffffff then io_eff(iroh_mp_start_multipath_route_handshake,start_multipath_route_handshake_run) end
+  if iroh_mp_start_multipath_route_handshake_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_route_handshake_with_idle_timeout,start_multipath_route_handshake_run) end
   if iroh_mp_start_multipath_nat_route_handshake ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_route_handshake,start_multipath_nat_route_handshake_run) end
   if iroh_mp_open_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_open_multipath_handshake_socket,open_multipath_handshake_socket_run) end
   if iroh_mp_read_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_read_multipath_handshake_socket,read_multipath_handshake_socket_run) end
@@ -4412,7 +4427,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
   if iroh_mp_start_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer,start_nat_offer_run) end
   if iroh_mp_start_multipath_nat_offer_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_bytes,start_nat_offer_bytes_run) end
-  if iroh_mp_start_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes,start_bytes_run) end
+  if iroh_mp_start_multipath_bytes_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes_with_idle_timeout,start_bytes_run) end
   if iroh_mp_start_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_start_multipath_alpns,start_alpns_run) end
   if iroh_mp_negotiated_multipath_alpn ~= 0xffffffff then io_eff(iroh_mp_negotiated_multipath_alpn,negotiated_alpn_run) end
   if iroh_mp_peer_multipath_parameters ~= 0xffffffff then io_eff(iroh_mp_peer_multipath_parameters,peer_parameters_run) end
@@ -4466,7 +4481,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_source,bind_nat_source_run) end
   if iroh_mp_multipath_nat_local_candidate ~= 0xffffffff then io_eff(iroh_mp_multipath_nat_local_candidate,local_nat_candidate_run) end
   if iroh_mp_open_multipath_nat_path ~= 0xffffffff then io_eff(iroh_mp_open_multipath_nat_path,open_nat_path_run) end
-  if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
+  if iroh_mp_bind_multipath_bytes_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes_with_idle_timeout,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_bind_resumable_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_resumable_multipath,bind_resumable_run) end
   if iroh_mp_bind_multipath_identity ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_identity,bind_identity_run) end

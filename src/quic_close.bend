@@ -1,6 +1,10 @@
 import Base
 import ./quic_nat.bend as Wire
 
+# QUIC max_idle_timeout is measured in milliseconds. Zero advertises no local limit.
+def default_idle_timeout() -> Wire.VarInt:
+  Wire.Var{0,30000}
+
 type Reason is Data:
   LocallyClosed{}
   TimedOut{}

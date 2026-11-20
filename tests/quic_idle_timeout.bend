@@ -99,6 +99,20 @@ type Mode is Data:
   Activity{}
   OneWay{}
   Defaults{}
+  Configured{idle_ms: Wire.VarInt, expected_ms: Nat, name: String}
+
+def setting(name: String) -> Maybe<&2,Mode>:
+  match name:
+    case "configured":
+      Some{Configured{Wire.Var{0,1150},1150n,"configured"}}
+    case "wide":
+      Some{Configured{Wire.Var{1,123},0n,"wide"}}
+    case "no-limit":
+      Some{Configured{Wire.Var{0,0},0n,"no-limit"}}
+    case "peer-limit":
+      Some{Configured{Wire.Var{0,0},800n,"peer-limit"}}
+    case _:
+      None{}
 
 def repetitions(mode: Mode) -> Nat:
   match mode:
@@ -114,33 +128,40 @@ def repetitions(mode: Mode) -> Nat:
       Stream.Check{Stream.SendDatagram{32},Stream.Complete{}}],13000n)
 
 @unsafe def expired(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C,
-    name: String) -> IO(Unit):
+    expected_ms: Nat, name: String) -> IO(Unit):
   do IO<Unit>:
     last : Nat <- IO.now()
     pending : C & Close.ReadResult() <- CloseTest.inspect(C,ops,conn)
     open : C <- CloseTest.initial(C,pending)
     end_conn : C <- wait(~C,~ops,open,6000n)
     now : Nat <- IO.now()
-    checked : C <- CloseTest.require(C,end_conn,Nat.is_ge(now,Nat.add(last,700n)),
+    checked : C <- CloseTest.require(C,end_conn,Nat.is_ge(now,Nat.add(last,Nat.sub(expected_ms,100n))),
       "idle timeout before the negotiated deadline")
     finish(~C,~ops,~driver,checked,name)
+
+@unsafe def kept_alive(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C, name: String) -> IO(Unit):
+  do IO<Unit>:
+    answered : C <- reply(~C,~driver,conn)
+    closed : C <- CloseTest.wait(~C,~ops,answered,0,5000n)
+    release(C,driver,closed)
+    IO.print("PASS " ++ (name ++ " kept alive"))
 
 @unsafe def scenario(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C, mode: Mode) -> IO(Unit):
   match mode:
     case Defaults{}:
-      do IO<Unit>:
-        answered : C <- reply(~C,~driver,conn)
-        closed : C <- CloseTest.wait(~C,~ops,answered,0,5000n)
-        release(C,driver,closed)
-        IO.print("PASS defaults kept alive")
+      kept_alive(~C,~ops,~driver,conn,"defaults")
+    case Configured{_,0n,name}:
+      kept_alive(~C,~ops,~driver,conn,name)
+    case Configured{_,expected_ms,name}:
+      expired(~C,~ops,~driver,conn,expected_ms,name)
     case OneWay{}:
       do IO<Unit>:
         answered : C <- reply(~C,~driver,conn)
-        expired(~C,~ops,~driver,answered,"one-way")
+        expired(~C,~ops,~driver,answered,800n,"one-way")
     case Activity{}:
-      expired(~C,~ops,~driver,conn,"activity")
+      expired(~C,~ops,~driver,conn,800n,"activity")
     case Idle{}:
-      expired(~C,~ops,~driver,conn,"idle")
+      expired(~C,~ops,~driver,conn,800n,"idle")
 
 @unsafe def exchange(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C,
     listener: Bool, +mode: Mode) -> IO(Unit):

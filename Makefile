@@ -722,6 +722,17 @@ check-quic-close-control:
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
 UPSTREAM_QUIC_IDLE ?=
+IDLE_CONFIG_CASES = configured no-limit wide peer-limit
+.PHONY: check-quic-idle-config check-quic-datagram-idle-config check-quic-multipath-idle-config check-quic-idle-config-control
+check-quic-idle-config: check-quic-datagram-idle-config check-quic-multipath-idle-config
+check-quic-datagram-idle-config check-quic-multipath-idle-config: check-%-idle-config: $(BUILD)/iroh-bend-%-cancel
+	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$<" "$(UPSTREAM_QUIC_IDLE)" --cases $(IDLE_CONFIG_CASES)
+
+check-quic-idle-config-control:
+	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$(UPSTREAM_QUIC_IDLE)" "$(UPSTREAM_QUIC_IDLE)" --control --cases $(IDLE_CONFIG_CASES)
+
 .PHONY: check-quic-idle check-quic-datagram-idle check-quic-multipath-idle
 check-quic-idle: check-quic-datagram-idle check-quic-multipath-idle
 check-quic-datagram-idle check-quic-multipath-idle: check-%-idle: $(BUILD)/iroh-bend-%-cancel

@@ -21,9 +21,13 @@ type MultipathRead is Data:
   MultipathReadBytes{bytes: List<&2,U32>}
 
 # Bend owns every candidate socket until the pinned TLS handshake selects one.
+def start_multipath_route_handshake_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
+  import "./quic_multipath.c"
+
 def start_multipath_route_handshake(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
-  import "./quic_multipath.c"
+  start_multipath_route_handshake_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
 def start_multipath_nat_route_handshake(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
@@ -64,9 +68,13 @@ def start_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, 
     limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   start_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
 
+def start_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
 def start_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
-  import "./quic_multipath.c"
+  start_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
 def start_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
@@ -402,9 +410,13 @@ def bind_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, p
     limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   bind_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
 
+def bind_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
-  import "./quic_multipath.c"
+  bind_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
 # Accept tickets and 0-RTT from this peer. Application I/O starts after authentication.
 def bind_resumable_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
@@ -535,11 +547,15 @@ def connect_multipath_bytes_with_nat_limit(host: String, port: U32, seed: List<&
     alpn: List<&2,U32>, limit: U32, timeout: Nat) -> IO(ConnectResult()):
   connect_nat_bytes(host,port,seed,peer,alpn,NatWire.encode_limit(limit),timeout)
 
+def connect_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, timeout_ms: Nat, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    started : ConnectResult() <- start_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,idle_ms)
+    finish_connect(started,timeout_ms)
+
 def connect_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, timeout_ms: Nat) -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    started : ConnectResult() <- start_multipath_bytes(host,port,seed,peer,alpn)
-    finish_connect(started,timeout_ms)
+  connect_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,timeout_ms,Close.default_idle_timeout())
 
 def connect_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>, timeout_ms: Nat) -> IO(ConnectResult()):

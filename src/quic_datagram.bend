@@ -7,15 +7,24 @@ import ./quic_nat.bend as NatWire
 type DatagramConnection is Type:
   DatagramConnection{id: U32}
 
+def start_quic_datagram_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
+  import "./quic_datagram.c"
+
 def start_quic_datagram(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
-  import "./quic_datagram.c"
+  start_quic_datagram_with_idle_timeout(host,port,secret,peer,alpn,Close.default_idle_timeout())
 
 # Initial route selection uses one ngtcp2/TLS session. Bend owns the connected
 # UDP sockets until the socket carrying the authenticated handshake is adopted.
+def start_route_handshake_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,DatagramConnection & Socket>):
+  import "./quic_datagram.c"
+
 def start_route_handshake(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,DatagramConnection & Socket>):
-  import "./quic_datagram.c"
+  start_route_handshake_with_idle_timeout(host,port,secret,peer,alpn,Close.default_idle_timeout())
 
 def open_handshake_socket(host: String, port: U32) -> IO(Result<&1,&1,U32 & String,Socket>):
   import "./quic_datagram.c"
@@ -143,12 +152,16 @@ def begin_handshake(started: Result<&1,&1,U32 & String,DatagramConnection>, +tim
       IO.pure(Result<&1,&1,U32 & String,DatagramConnection>,Fail{error})
 
 # Dial a numeric IPv4 or IPv6 address with pinned Ed25519 keys and one ALPN.
-def connect(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
-    alpn: List<&2,U32>, timeout_ms: Nat) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
+def connect_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, timeout_ms: Nat, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
   do IO<Result<&1,&1,U32 & String,DatagramConnection>>:
     started : Result<&1,&1,U32 & String,DatagramConnection> <-
-      start_quic_datagram(host,port,secret,peer,alpn)
+      start_quic_datagram_with_idle_timeout(host,port,secret,peer,alpn,idle_ms)
     begin_handshake(started,timeout_ms)
+
+def connect(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, timeout_ms: Nat) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
+  connect_with_idle_timeout(host,port,secret,peer,alpn,timeout_ms,Close.default_idle_timeout())
 
 type QuicStreamRead is Data:
   QuicStreamPending{}
@@ -231,9 +244,14 @@ type QuicDatagramListener is Type:
   QuicDatagramListener{id: U32}
 
 # Bind a concrete IPv4 or IPv6 address. Port zero picks an available port.
+def bind_shared_quic_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"
+
 def bind_shared_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
-  import "./quic_datagram.c"
+  bind_shared_quic_with_idle_timeout(host,port,secret,peer,alpn,Close.default_idle_timeout())
 
 # Process listener traffic and return a connection after key and ALPN verification.
 def try_accept_shared_quic(listener: QuicDatagramListener)

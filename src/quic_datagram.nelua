@@ -168,6 +168,7 @@ local NGTCP2_ERR_CONN_ID_BLOCKED: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_STATE: cint <cimport,nodecl>
 local NGTCP2_ERR_NOMEM: cint <cimport,nodecl>
 local NGTCP2_PATH_VALIDATION_RESULT_SUCCESS: cint <cimport,nodecl>
+local NGTCP2_MILLISECONDS: uint64 <cimport,nodecl>
 local NGTCP2_SECONDS: uint64 <cimport,nodecl>
 local NGTCP2_PROTO_VER_V1: uint32 <cimport,nodecl>
 local function inet_pton(family: cint, text: cstring, ip: pointer): cint <cimport,nodecl> end
@@ -274,20 +275,20 @@ local ngtcp2_crypto_version_negotiation_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 
 ##[[
-for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram','start_quic_migration','start_quic_path_migration','quic_migration_status',
+for _, name in ipairs{'start_quic_datagram_with_idle_timeout','step_quic_datagram','write_quic_datagram','start_quic_migration','start_quic_path_migration','quic_migration_status',
     'monitor_quic_path','quic_path_timing','quic_millis',
-    'start_route_handshake','open_handshake_socket','read_handshake_socket','route_handshake_output','adopt_handshake_socket',
+    'start_route_handshake_with_idle_timeout','open_handshake_socket','read_handshake_socket','route_handshake_output','adopt_handshake_socket',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
-    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
+    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic_with_idle_timeout','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
     'send_quic_application_close','read_quic_application_close','quic_close_packet','cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
 end
 ]]
-local iroh_dgram_start_route_handshake: uint32 <cimport,nodecl>
+local iroh_dgram_start_route_handshake_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_open_handshake_socket: uint32 <cimport,nodecl>
 local iroh_dgram_read_handshake_socket: uint32 <cimport,nodecl>
 local iroh_dgram_route_handshake_output: uint32 <cimport,nodecl>
@@ -303,11 +304,11 @@ local iroh_dgram_bind_quic_identity: uint32 <cimport,nodecl>
 local iroh_dgram_bind_dual_quic_identity: uint32 <cimport,nodecl>
 local iroh_dgram_quic_remote_id: uint32 <cimport,nodecl>
 local iroh_dgram_bind_resumable_quic: uint32 <cimport,nodecl>
-local iroh_dgram_bind_shared_quic: uint32 <cimport,nodecl>
+local iroh_dgram_bind_shared_quic_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_try_accept_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_close_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_QuicDatagramListener: uint32 <cimport,nodecl>
-local iroh_dgram_start_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_start_quic_datagram_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_dgram_step_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_migration: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_path_migration: uint32 <cimport,nodecl>
@@ -370,6 +371,7 @@ local TAG_CTR: uint64 <cimport,nodecl>
 local ETIMEDOUT: uint32 <cimport,nodecl>
 local EIO: uint32 <cimport,nodecl>
 local EBADF: uint32 <cimport,nodecl>
+local EOVERFLOW: uint32 <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
 local EACCES: uint32 <cimport,nodecl>
 local EMSGSIZE: uint32 <cimport,nodecl>
@@ -422,7 +424,7 @@ local Listener = @record{
   local_addr: iroh_datagram_address, local_size: cuint,
   ipv4_addr: iroh_datagram_address, ipv4_size: cuint, dispatch_ipv4: boolean, wildcard: boolean,
   ctx: *SSL_CTX, expected_key: *EVP_PKEY, alpn: [256]cuchar, alpn_size: cuint,
-  refs: uint32, pending: uint32, stopped: boolean, resumable: boolean
+  refs: uint32, pending: uint32, stopped: boolean, resumable: boolean, idle_ms: uint64
 }
 local Session = @record{
   next: pointer, id: uint32, tls: *SSL_SESSION, context: *SSL_CTX,
@@ -1085,7 +1087,7 @@ local function select_alpn(ssl: *SSL, out: **cuchar, outlen: *cuchar, offered: *
   return SSL_TLSEXT_ERR_OK
 end
 
-local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint64): cint
+local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint64, idle_ms: uint64): cint
   local callbacks: ngtcp2_callbacks = {
     client_initial = initial == nilptr and ngtcp2_crypto_client_initial_cb or nilptr,
     recv_client_initial = initial ~= nilptr and ngtcp2_crypto_recv_client_initial_cb or nilptr,
@@ -1113,7 +1115,7 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
   if iroh_dgram_quic_close_packet ~= 0xffffffff then callbacks.decrypt = (@pointer)(decrypt_packet) end
   local params: ngtcp2_transport_params
   ngtcp2_transport_params_default(&params)
-  params.max_idle_timeout = 30 * NGTCP2_SECONDS
+  params.max_idle_timeout = idle_ms * NGTCP2_MILLISECONDS
   params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
   params.initial_max_data = STREAM_WINDOW * STREAM_COUNT
   params.initial_max_stream_data_bidi_local = STREAM_WINDOW
@@ -1297,7 +1299,16 @@ local function open_resumed_tls(conn: *Connection, config: *QuicConfig, ticket: 
   return nilptr
 end
 
-local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boolean, resuming: boolean, detached: boolean): Term
+local DEFAULT_IDLE_MS: uint64 <comptime> = 30000
+local MAX_IDLE_MS: uint64 <comptime> = 0xffffffffffffffff // 1000000
+
+local function idle_milliseconds(e: Env, value: Term): uint64
+  local words: [2]Term
+  spare_free(e,cls_fit(2),ctr_take(e,value,2,&words[0]))
+  return (words[0] << 32) | words[1]
+end
+
+local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boolean, resuming: boolean, detached: boolean, idle_ms: uint64): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
@@ -1305,6 +1316,7 @@ local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boo
   if not unpack_config(e,args,&config) or args[1] == 0 or args[1] > 65535 or io_nul(host,host_size) then
     return io_fail(e,EINVAL,'invalid QUIC address, Ed25519 key, or ALPN')
   end
+  if idle_ms > MAX_IDLE_MS then return io_fail(e,EOVERFLOW,'idle timeout exceeds ngtcp2 nanosecond range') end
   if resuming and ticket == nilptr then return io_fail(e,EBADF,'QUIC session closed or already used') end
   if ticket ~= nilptr and not owns_ticket(&config,ticket) then
     return io_fail(e,EACCES,'QUIC session identity or ALPN does not match')
@@ -1331,7 +1343,7 @@ local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boo
       return io_fail(e,EIO,error)
     end
   end
-  local status = open_engine(conn,nilptr,io_tick())
+  local status = open_engine(conn,nilptr,io_tick(),idle_ms)
   if status == 0 and conn.early_attempted then
     status = ngtcp2_conn_decode_and_set_0rtt_transport_params(conn.engine,&ticket.parameters[0],ticket.parameters_size)
   end
@@ -1350,13 +1362,13 @@ local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boo
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,nilptr,false,false,false)
+  return start_client(e,args,nilptr,false,false,false,idle_milliseconds(e,args[5]))
 end
 
 local function resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local ticket = pop_session(e,args[5])
   defer free_session(ticket) end
-  return start_client(e,args,ticket,args[6] ~= 0,true,false)
+  return start_client(e,args,ticket,args[6] ~= 0,true,false,DEFAULT_IDLE_MS)
 end
 
 local function drop_session_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -1573,7 +1585,7 @@ local function server_connection(listener: *Listener, address: *iroh_datagram_ad
   C.memcpy(&conn.remote_addr,address,#iroh_datagram_address)
   conn.remote_size = address_size
   conn.accept_deadline = now + ACCEPT_TIMEOUT
-  if not setup_ssl(conn,listener.ctx,nilptr,0) or open_engine(conn,&initial,now) ~= 0 then
+  if not setup_ssl(conn,listener.ctx,nilptr,0) or open_engine(conn,&initial,now,listener.idle_ms) ~= 0 then
     destroy(conn)
     return nilptr
   end
@@ -1784,7 +1796,7 @@ local function step(e: Env, conn: *Connection): Term
 end
 
 local function start_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,nilptr,false,false,true)
+  return start_client(e,args,nilptr,false,false,true,idle_milliseconds(e,args[5]))
 end
 
 local function open_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2361,7 +2373,7 @@ local function bind_udp(fd: cint, address: *iroh_datagram_address, size: *cuint,
   return bind(fd,address,bound_size) == 0 and getsockname(fd,address,size) == 0
 end
 
-local function bind_listener(e: Env, args: *[0]Term, resume: boolean, discover_peer: boolean, dual: boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, resume: boolean, discover_peer: boolean, dual: boolean, idle_ms: uint64): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
@@ -2375,10 +2387,12 @@ local function bind_listener(e: Env, args: *[0]Term, resume: boolean, discover_p
   if not configured or args[1] > 65535 or io_nul(host,host_size) then
     return io_fail(e,EINVAL,'invalid QUIC listen address, Ed25519 key, or ALPN')
   end
+  if idle_ms > MAX_IDLE_MS then return io_fail(e,EOVERFLOW,'idle timeout exceeds ngtcp2 nanosecond range') end
   if next_listener_id == 0 then return io_fail(e,ENOMEM,'QUIC listener handles exhausted') end
   local listener = (@*Listener)(C.calloc(1,#Listener))
   if listener == nilptr then return io_fail(e,ENOMEM,nilptr) end
   listener.refs = 1
+  listener.idle_ms = idle_ms
   listener.fd = -1
   listener.ipv4_fd = -1
   local bound_size = numeric_address(host,(@cushort)(args[1]),&listener.local_addr)
@@ -2428,21 +2442,21 @@ local function bind_listener(e: Env, args: *[0]Term, resume: boolean, discover_p
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,false,false,false)
+  return bind_listener(e,args,false,false,false,idle_milliseconds(e,args[5]))
 end
 
 local function bind_resumable_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,true,false,false)
+  return bind_listener(e,args,true,false,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_identity_run(e: Env, args: *[0]Term, work: *IoWork): Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,args[4] == 1,true,false)
+  return bind_listener(e,args,args[4] == 1,true,false,DEFAULT_IDLE_MS)
 end
 
 local function bind_dual_identity_run(e: Env, args: *[0]Term, work: *IoWork): Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,args[4] == 1,true,true)
+  return bind_listener(e,args,args[4] == 1,true,true,DEFAULT_IDLE_MS)
 end
 
 local function try_accept(e: Env, listener: *Listener): Term
@@ -2602,11 +2616,11 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
     io_eff(iroh_dgram_bind_dual_quic_identity,bind_dual_identity_run)
   end
   if iroh_dgram_quic_remote_id ~= 0xffffffff then io_eff(iroh_dgram_quic_remote_id,remote_id_run) end
-  if iroh_dgram_bind_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_shared_quic,bind_run) end
+  if iroh_dgram_bind_shared_quic_with_idle_timeout ~= 0xffffffff then io_eff(iroh_dgram_bind_shared_quic_with_idle_timeout,bind_run) end
   if iroh_dgram_try_accept_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_try_accept_shared_quic,accept_run) end
   if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end
-  if iroh_dgram_start_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram,start_run) end
-  if iroh_dgram_start_route_handshake ~= 0xffffffff then io_eff(iroh_dgram_start_route_handshake,start_route_handshake_run) end
+  if iroh_dgram_start_quic_datagram_with_idle_timeout ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram_with_idle_timeout,start_run) end
+  if iroh_dgram_start_route_handshake_with_idle_timeout ~= 0xffffffff then io_eff(iroh_dgram_start_route_handshake_with_idle_timeout,start_route_handshake_run) end
   if iroh_dgram_open_handshake_socket ~= 0xffffffff then io_eff(iroh_dgram_open_handshake_socket,open_handshake_socket_run) end
   if iroh_dgram_read_handshake_socket ~= 0xffffffff then io_eff(iroh_dgram_read_handshake_socket,read_handshake_socket_run) end
   if iroh_dgram_route_handshake_output ~= 0xffffffff then io_eff(iroh_dgram_route_handshake_output,route_handshake_output_run) end

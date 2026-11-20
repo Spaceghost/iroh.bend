@@ -59,7 +59,7 @@ async def check(bend, reference, case, host, bend_listens, control):
         return [reference, *mode, case, *(["control"] if tested else [])]
 
     routed = case in ("one-way", "defaults")
-    marker = b"PASS defaults kept alive" if case == "defaults" else f"PASS {case} timed out".encode()
+    marker = f"PASS {case} kept alive".encode() if case in ("defaults", "wide", "no-limit") else f"PASS {case} timed out".encode()
     context = f"{case} {host} {'listener' if bend_listens else 'dialer'}"
     async with asyncio.timeout(18 if case == "defaults" else 10):
         async with child(*args(True, 0)) as server:
@@ -100,5 +100,5 @@ if __name__ == "__main__":
     parser.add_argument("reference")
     parser.add_argument("--control", action="store_true")
     cases = ("idle", "activity", "one-way", "defaults")
-    parser.add_argument("--cases", nargs="+", choices=cases, default=cases)
+    parser.add_argument("--cases", nargs="+", choices=(*cases, "configured", "wide", "no-limit", "peer-limit"), default=cases)
     asyncio.run(run(parser.parse_args()))
