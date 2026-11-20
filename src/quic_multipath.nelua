@@ -24,7 +24,7 @@ local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
   max_datagram_frame_size:uint32,active_connection_id_limit:uint32,max_packet_size:uint32
 }
 local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
-local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer,send_queue:pointer}
+local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer,send_queue:pointer,remote_error:uint64,remote_stop_error:uint64}
 local packet_context_t <cimport,nodecl,codename 'picoquic_packet_context_t'> = @record{}
 local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{
   unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64,pkt_ctx:packet_context_t
@@ -300,7 +300,7 @@ local names = {
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'multipath_micros', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
-  'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
+  'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
@@ -357,6 +357,8 @@ local iroh_mp_resolve_multipath_early_stream: uint32 <cimport,nodecl>
 local iroh_mp_assign_stream_path: uint32 <cimport,nodecl>
 local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_cancel_multipath_stream_half: uint32 <cimport,nodecl>
+local iroh_mp_peer_multipath_stream_code: uint32 <cimport,nodecl>
 local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
@@ -537,6 +539,7 @@ local Path = @record{
 }
 local Stream = @record{
   next: pointer, id: uint32, rx: *[0]uint8, size: csize,
+  reset_code: uint64, stop_code: uint64, tx_reset: boolean, rx_stopped: boolean,
   incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean, early: boolean
 }
 local Datagram = @record{next:pointer,size:csize}
@@ -1600,8 +1603,15 @@ local function create_stream(conn: *Connection, id: uint64, incoming: boolean): 
   return stream
 end
 
+local function discard_received(conn: *Connection, stream: *Stream)
+  conn.received = conn.received - stream.size
+  C.free(stream.rx)
+  stream.rx = nilptr
+  stream.size = 0
+end
+
 local function receive_stream(conn: *Connection, stream: *Stream, bytes: *uint8, size: csize): cint
-  if size == 0 then return 0 end
+  if size == 0 or stream.rx_stopped or stream.reset then return 0 end
   if size > RX_LIMIT - conn.received then
     conn.buffer_error = true
     return -1
@@ -1754,10 +1764,19 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
         return -1
       end
     end
-    if kind == picoquic_callback_stream_reset then
-      stream.reset = true
-    elseif kind == picoquic_callback_stop_sending then
-      stream.stop = true
+    if kind == picoquic_callback_stream_reset or kind == picoquic_callback_stop_sending then
+      local native = picoquic_find_stream(cnx,id)
+      if native == nilptr then return -1 end
+      if kind == picoquic_callback_stream_reset then
+        stream.reset = true
+        stream.reset_code = native.remote_error
+        discard_received(conn,stream)
+      else
+        stream.stop = true
+        stream.stop_code = native.remote_stop_error
+        -- Picoquic leaves the RESET_STREAM response to its application.
+        return picoquic_reset_stream(cnx,id,stream.stop_code)
+      end
     else
       if kind == picoquic_callback_stream_fin then stream.fin = true end
       return receive_stream(conn,stream,bytes,size)
@@ -4065,7 +4084,7 @@ local function write_stream(e: Env, conn: *Connection, id: Term, payload: Term, 
     return io_fail(e,EBADF,'unknown QUIC stream')
   end
   if stream.incoming and (id & 2) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
-  if stream.sent_fin or stream.stop then return io_fail(e,EPIPE,'QUIC stream send half closed') end
+  if stream.sent_fin or stream.stop or stream.tx_reset then return io_fail(e,EPIPE,'QUIC stream send half closed') end
   if conn.cnx.nb_bytes_queued + (@uint64)(size) > TX_LIMIT then return io_done(e,0) end
   if picoquic_add_to_stream_with_ctx(conn.cnx,id,&bytes[0],(@csize)(size),(@cint)(fin),stream) ~= 0 then
     return io_fail(e,EPIPE,'could not queue QUIC stream bytes')
@@ -4090,6 +4109,7 @@ local function read_stream(e: Env, conn: *Connection, id: Term, max: Term): Term
   local stream = find_stream(conn,id)
   if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
   if not stream.incoming and (id & 2) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
+  if stream.rx_stopped then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
   if stream.reset then return io_fail(e,ECONNRESET,'QUIC stream reset by peer') end
   if stream.size == 0 then
     return io_done(e,term_pak(stream.fin and iroh_mp_MultipathReadFin or iroh_mp_MultipathReadPending,0))
@@ -4112,6 +4132,55 @@ local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],read_stream(e,find_connection(e,args[0]),args[1],args[2]))
 end
 
+local function has_stream_half(stream: *Stream, half: Term): boolean
+  return (stream.id & 2) == 0 or stream.incoming == (half == 1)
+end
+
+local function cancel_half(e: Env, conn: *Connection, id: Term, half: Term, high: Term, low: Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if half > 1 or high > 0x3fffffff then return io_fail(e,EINVAL,'invalid QUIC stream cancellation') end
+  local stream = find_stream(conn,id)
+  if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if not has_stream_half(stream,half) then return io_fail(e,EPIPE,'QUIC stream has no such half') end
+  local code = (high << 32) | low
+  if half == 0 then
+    if stream.tx_reset or stream.stop or picoquic_reset_stream(conn.cnx,id,code) ~= 0 then
+      return io_fail(e,EPIPE,'QUIC stream send half is closed')
+    end
+    stream.tx_reset = true
+  else
+    if stream.rx_stopped then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
+    if not stream.reset and not stream.fin and picoquic_stop_sending(conn.cnx,id,code) ~= 0 then
+      return io_fail(e,EPIPE,'could not stop the QUIC stream')
+    end
+    stream.rx_stopped = true
+    discard_received(conn,stream)
+  end
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function cancel_half_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],cancel_half(e,find_connection(e,args[0]),args[1],args[2],args[3],args[4]))
+end
+
+local function peer_code(e: Env, conn: *Connection, id: Term, half: Term): Term
+  if conn == nilptr then return closed_error(e,conn) end
+  local stream = find_stream(conn,id)
+  if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if half > 1 or not has_stream_half(stream,half) then return io_fail(e,EPIPE,'QUIC stream has no such half') end
+  if (half == 0 and stream.stop) or (half == 1 and stream.reset) then
+    local code = half == 0 and stream.stop_code or stream.reset_code
+    local value = io_tup(e,code >> 32,(@uint32)(code))
+    return io_done(e,io_box(e,iroh_mp_Some,value))
+  end
+  if conn.closed then return closed_error(e,conn) end
+  return none(e)
+end
+
+local function peer_code_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],peer_code(e,find_connection(e,args[0]),args[1],args[2]))
+end
+
 local function drop_stream(e: Env, conn: *Connection, id: Term): Term
   if conn == nilptr then return closed_error(e,conn) end
   local stream = conn.streams
@@ -4123,17 +4192,16 @@ local function drop_stream(e: Env, conn: *Connection, id: Term): Term
   if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
   if not conn.closed then
     local bidi = (id & 2) == 0
-    if (bidi or not stream.incoming) and not stream.sent_fin and not stream.stop then
+    if (bidi or not stream.incoming) and not stream.sent_fin and not stream.stop and not stream.tx_reset then
       picoquic_reset_stream(conn.cnx,id,0)
     end
-    if (bidi or stream.incoming) and not stream.fin and not stream.reset then picoquic_stop_sending(conn.cnx,id,0) end
+    if (bidi or stream.incoming) and not stream.fin and not stream.reset and not stream.rx_stopped then picoquic_stop_sending(conn.cnx,id,0) end
     local native = picoquic_find_stream(conn.cnx,id)
     if native ~= nilptr then native.app_stream_ctx = &discarded_stream end
   end
   if previous == nilptr then conn.streams = (@*Stream)(stream.next) else previous.next = stream.next end
   conn.stream_count = conn.stream_count - 1
-  conn.received = conn.received - stream.size
-  C.free(stream.rx)
+  discard_received(conn,stream)
   C.free(stream)
   return io_done(e,term_pak(iroh_mp_Unit,0))
 end
@@ -4188,6 +4256,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_assign_stream_path ~= 0xffffffff then io_eff(iroh_mp_assign_stream_path,assign_run) end
   if iroh_mp_write_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_stream,write_run) end
   if iroh_mp_read_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_read_multipath_stream,read_run) end
+  if iroh_mp_cancel_multipath_stream_half ~= 0xffffffff then io_eff(iroh_mp_cancel_multipath_stream_half,cancel_half_run) end
+  if iroh_mp_peer_multipath_stream_code ~= 0xffffffff then io_eff(iroh_mp_peer_multipath_stream_code,peer_code_run) end
   if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end

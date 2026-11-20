@@ -562,7 +562,7 @@ $(BUILD)/endpoint-multipath-options.c: tests/endpoint_multipath_options.bend tes
 $(BUILD)/endpoint-multipath-ticket.c: tests/endpoint_multipath_ticket.bend
 $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend
 $(BUILD)/endpoint-multipath-recovery.c: tests/endpoint_multipath_recovery.bend
-$(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endpoint-multipath-options.c $(BUILD)/endpoint-multipath-recovery.c $(BUILD)/endpoint-multipath-nat.c $(BUILD)/endpoint-multipath-dual-stack.c $(BUILD)/endpoint-multipath-listener.c $(BUILD)/endpoint-multipath-inbound-nat.c: $(BUILD)/%.c: tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
+$(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endpoint-multipath-options.c $(BUILD)/endpoint-multipath-recovery.c $(BUILD)/endpoint-multipath-nat.c $(BUILD)/endpoint-multipath-dual-stack.c $(BUILD)/endpoint-multipath-listener.c $(BUILD)/endpoint-multipath-inbound-nat.c: $(BUILD)/%.c: tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(RELAY_QUIC_SOURCES) src/endpoint_multipath.bend src/quic_multipath.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(@:.c=-stage)/src/"
 	cp "tests/$(subst -,_,$*).bend" tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend $(filter tests/endpoint_validation.bend,$^) "$(@:.c=-stage)/tests/"
@@ -578,17 +578,17 @@ $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-tick
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
 
-$(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-multipath-stage/src" "$(BUILD)/quic-multipath-stage/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(BUILD)/quic-multipath-stage/src/"
+	cp src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(BUILD)/quic-multipath-stage/src/"
 	cp tests/quic_multipath_bend.bend "$(BUILD)/quic-multipath-stage/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(BUILD)/quic-multipath-stage/src/quic_multipath.c)"
 	cd "$(BUILD)/quic-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_bend.bend -o "$(abspath $@)"
 
-$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-multipath-listener-stage/src" "$(BUILD)/quic-multipath-listener-stage/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(BUILD)/quic-multipath-listener-stage/src/"
+	cp src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(BUILD)/quic-multipath-listener-stage/src/"
 	cp tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend "$(BUILD)/quic-multipath-listener-stage/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(BUILD)/quic-multipath-listener-stage/src/quic_multipath.c)"
@@ -599,9 +599,9 @@ check-quic-multipath-early-listener: $(BUILD)/iroh-bend-quic-multipath-early-lis
 	@test -x "$(UPSTREAM_QUIC_EARLY_DIAL)" || { echo 'Set UPSTREAM_QUIC_EARLY_DIAL to the Iroh early-data dialer.' >&2; exit 2; }
 	python3 -B tests/quic_multipath_early_listener.py "$<" "$(UPSTREAM_QUIC_EARLY_DIAL)"
 
-$(BUILD)/quic-multipath-early-listener.c: tests/quic_multipath_early_listener.bend tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-early-listener.c: tests/quic_multipath_early_listener.bend tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(@:.c=-stage)/src/"
+	cp src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(@:.c=-stage)/src/"
 	cp tests/quic_multipath_early_listener.bend tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
@@ -620,9 +620,9 @@ check-relay-qad: $(BUILD)/iroh-bend-relay-qad
 	python3 -B tests/relay_qad.py "$<" "$(UPSTREAM_QAD_CLIENT)" "$(QAD_SERVER_CERT)" "$(QAD_SERVER_KEY)" \
 		"$(QAD_TEST_TLS_NAME)" "$(QAD_TEST_CA_DER)"
 
-$(BUILD)/relay-qad.c: tests/relay_qad.bend src/quic_multipath.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/relay-qad.c: tests/relay_qad.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
+	cp src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
 	cp tests/relay_qad.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
@@ -633,9 +633,9 @@ $(BUILD)/iroh-bend-quic-multipath: $(BUILD)/quic-multipath.c
 $(BUILD)/iroh-bend-quic-multipath-listener: $(BUILD)/quic-multipath-listener.c
 $(BUILD)/iroh-bend-quic-multipath-session: $(BUILD)/quic-multipath-session.c
 
-$(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_multipath.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
+	cp src/quic_multipath.bend src/quic_stream.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
 	cp tests/quic_multipath_session.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
