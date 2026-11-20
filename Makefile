@@ -233,7 +233,7 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
-.PHONY: check-quic-datagram check-quic-rebind
+.PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -242,6 +242,7 @@ UPSTREAM_QUIC_SHARED_DIAL ?=
 UPSTREAM_QUIC_EARLY ?=
 UPSTREAM_QUIC_EARLY_DIAL ?=
 UPSTREAM_QUIC_REBIND ?=
+UPSTREAM_QUIC_MIGRATION ?=
 DATAGRAM_LIBS = libngtcp2_crypto_ossl libngtcp2 openssl
 QUIC_EARLY_LISTENER = $(if $(strip $(UPSTREAM_QUIC_EARLY_DIAL)),$(BUILD)/iroh-bend-quic-early-listener)
 
@@ -253,6 +254,10 @@ check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram $(QUIC_EARLY_LISTENER)
 check-quic-rebind: $(BUILD)/iroh-bend-quic-datagram
 	@test -x "$(UPSTREAM_QUIC_REBIND)" || { echo 'Set UPSTREAM_QUIC_REBIND to the executable Iroh dial-rebind fixture.' >&2; exit 2; }
 	python3 tests/quic_rebind.py "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_QUIC_REBIND)"
+
+check-quic-migration: $(BUILD)/iroh-bend-quic-migration
+	@test -x "$(UPSTREAM_QUIC_MIGRATION)" || { echo 'Set UPSTREAM_QUIC_MIGRATION to the executable Iroh migration listener.' >&2; exit 2; }
+	python3 -B tests/quic_migration.py "$(BUILD)/iroh-bend-quic-migration" "$(UPSTREAM_QUIC_MIGRATION)"
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"
@@ -275,5 +280,17 @@ $(BUILD)/quic-early-listener.c: tests/quic_early_listener.bend tests/quic_datagr
 	cd "$(BUILD)/quic-early-listener-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_early_listener.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-quic-early-listener: $(BUILD)/quic-early-listener.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS)) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS))
+
+$(BUILD)/quic-migration.c: tests/quic_migration.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/quic-migration-stage/src" "$(BUILD)/quic-migration-stage/tests"
+	cp src/quic_datagram.bend "$(BUILD)/quic-migration-stage/src/"
+	cp tests/quic_migration.bend tests/quic_datagram.bend "$(BUILD)/quic-migration-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_datagram.nelua \
+		"$(abspath $(BUILD)/quic-migration-stage/src/quic_datagram.c)"
+	cd "$(BUILD)/quic-migration-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_migration.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-migration: $(BUILD)/quic-migration.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS)) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS))

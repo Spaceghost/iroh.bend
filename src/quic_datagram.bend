@@ -7,9 +7,20 @@ def start_quic_datagram(host: String, port: U32, secret: List<&2,U32>, peer: Lis
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
   import "./quic_datagram.c"
 
-# Process one UDP input packet, timer expiry, and one outgoing packet.
+# Process UDP input, timer expiry, and one outgoing packet.
 # The result is 1 once the peer key and QUIC handshake are verified.
 def step_quic_datagram(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+# Validate a new numeric local address for a direct dial. Port 0 chooses a
+# free UDP port. The result is the bound port or 0 to retry after stepping.
+def start_quic_migration(conn: DatagramConnection, host: String, port: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+# 0 means idle, 1 validating, 2 migrated, and 3 validation failed.
+def quic_migration_status(conn: DatagramConnection)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"
 

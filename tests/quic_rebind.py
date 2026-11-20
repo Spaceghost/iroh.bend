@@ -8,7 +8,7 @@ from contextlib import ExitStack, contextmanager, suppress
 
 @contextmanager
 def process(*command):
-    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
     try:
         yield child
     finally:
@@ -27,7 +27,7 @@ def read_address(listener):
     with selectors.DefaultSelector() as ready:
         ready.register(listener.stdout, selectors.EVENT_READ)
         if not ready.select(10):
-            raise TimeoutError("Bend listener did not print its address")
+            raise TimeoutError("QUIC listener did not print its address")
         return int(listener.stdout.readline().rsplit(b":", 1)[-1])
 
 

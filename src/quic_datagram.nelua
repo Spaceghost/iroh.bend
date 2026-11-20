@@ -98,7 +98,8 @@ local ngtcp2_callbacks <cimport,nodecl> = @record{
   delete_crypto_cipher_ctx: pointer, version_negotiation: pointer, get_new_connection_id2: pointer,
   get_path_challenge_data2: pointer, recv_datagram: pointer, ack_datagram: pointer,
   stream_open: pointer, recv_stream_data: pointer, acked_stream_data_offset: pointer,
-  stream_reset: pointer, stream_close: pointer, handshake_completed: pointer
+  stream_reset: pointer, stream_close: pointer, handshake_completed: pointer, handshake_confirmed: pointer,
+  path_validation: pointer
 }
 local ngtcp2_crypto_conn_ref <cimport,nodecl> = @record{get_conn: pointer, user_data: pointer}
 local X509_STORE_CTX <cimport,nodecl> = @record{}
@@ -123,6 +124,10 @@ local OPENSSL_NPN_NEGOTIATED: cint <cimport,nodecl>
 local X509_V_OK: cint <cimport,nodecl>
 local X509_V_ERR_APPLICATION_VERIFICATION: cint <cimport,nodecl>
 local NGTCP2_ERR_CALLBACK_FAILURE: cint <cimport,nodecl>
+local NGTCP2_ERR_CONN_ID_BLOCKED: cint <cimport,nodecl>
+local NGTCP2_ERR_INVALID_STATE: cint <cimport,nodecl>
+local NGTCP2_ERR_NOMEM: cint <cimport,nodecl>
+local NGTCP2_PATH_VALIDATION_RESULT_SUCCESS: cint <cimport,nodecl>
 local NGTCP2_PROTO_VER_V1: uint32 <cimport,nodecl>
 local function inet_pton(family: cint, text: cstring, ip: pointer): cint <cimport,nodecl> end
 local function htons(port: cushort): cushort <cimport,nodecl> end
@@ -161,6 +166,8 @@ local function ngtcp2_pkt_decode_version_cid(target: *ngtcp2_version_cid,
 local function ngtcp2_conn_get_scid2(conn: *ngtcp2_conn, out: *ngtcp2_cid): csize <cimport,nodecl> end
 local function ngtcp2_conn_is_local_stream2(conn: *ngtcp2_conn, id: int64): cint <cimport,nodecl> end
 local function ngtcp2_conn_get_tls_alert2(conn: *ngtcp2_conn): cuchar <cimport,nodecl> end
+local function ngtcp2_conn_initiate_migration(conn: *ngtcp2_conn, path: *ngtcp2_path, now: uint64): cint <cimport,nodecl> end
+local function ngtcp2_conn_get_path2(conn: *ngtcp2_conn): *ngtcp2_path <cimport,nodecl> end
 local function ngtcp2_conn_del(conn: *ngtcp2_conn) <cimport,nodecl> end
 local function ngtcp2_conn_set_tls_native_handle(conn: *ngtcp2_conn, tls: pointer) <cimport,nodecl> end
 local function ngtcp2_settings_default(settings: *ngtcp2_settings) <cimport,nodecl> end
@@ -217,7 +224,7 @@ local ngtcp2_crypto_version_negotiation_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 
 ##[[
-for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram',
+for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram','start_quic_migration','quic_migration_status',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
@@ -242,6 +249,8 @@ local iroh_dgram_close_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_QuicDatagramListener: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_step_quic_datagram: uint32 <cimport,nodecl>
+local iroh_dgram_start_quic_migration: uint32 <cimport,nodecl>
+local iroh_dgram_quic_migration_status: uint32 <cimport,nodecl>
 local iroh_dgram_write_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_read_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_datagram_acks: uint32 <cimport,nodecl>
@@ -293,6 +302,9 @@ local EMSGSIZE: uint32 <cimport,nodecl>
 local ENOTSUP: uint32 <cimport,nodecl>
 local ENOMEM: uint32 <cimport,nodecl>
 local EINTR: cint <cimport,nodecl>
+local ECONNREFUSED: cint <cimport,nodecl>
+local EHOSTUNREACH: cint <cimport,nodecl>
+local ENETUNREACH: cint <cimport,nodecl>
 local SOCK_CLOEXEC: cint <cimport,nodecl>
 local NGTCP2_ERR_CRYPTO: cint <cimport,nodecl>
 local NGTCP2_ERR_DRAINING: cint <cimport,nodecl>
@@ -352,6 +364,11 @@ local Connection = @record{
   local_addr: iroh_datagram_address,
   remote_size: cuint,
   local_size: cuint,
+  candidate_fd: cint,
+  candidate_addr: iroh_datagram_address,
+  candidate_size: cuint,
+  migration_state: uint32,
+  confirmed: boolean,
   output: [PACKET_CAPACITY]cuchar,
   output_path: ngtcp2_path,
   output_local_addr: iroh_datagram_address,
@@ -594,7 +611,7 @@ local function connection_path(conn: *Connection): ngtcp2_path
 end
 
 local function packet_path(conn: *Connection): *ngtcp2_path
-  if conn.listener == nilptr then return nilptr end
+  if conn.listener == nilptr and conn.migration_state == 0 then return nilptr end
   conn.output_path = {
     iroh_datagram_local_path = {addr = &conn.output_local_addr},
     remote = {addr = &conn.output_remote_addr}
@@ -641,6 +658,22 @@ local function same_address(left: *iroh_datagram_address, right: *iroh_datagram_
   local b = (@*iroh_datagram_ipv6)(right)
   return a.sin6_port == b.sin6_port and a.sin6_scope_id == b.sin6_scope_id and
     C.memcmp(&a.sin6_addr,&b.sin6_addr,16) == 0
+end
+
+local function confirm_handshake(engine: *ngtcp2_conn, user: pointer): cint
+  local conn = (@*Connection)(user)
+  conn.confirmed = true
+  return 0
+end
+
+local function migration_validated(engine: *ngtcp2_conn, flags: uint32, path: *ngtcp2_path,
+    fallback: *ngtcp2_path, result: cint, user: pointer): cint
+  local conn = (@*Connection)(user)
+  if conn.listener == nilptr and conn.migration_state == 1 and
+      same_address(&conn.candidate_addr,(@*iroh_datagram_address)(path.iroh_datagram_local_path.addr)) then
+    conn.migration_state = result == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS and 2 or 3
+  end
+  return 0
 end
 
 local function udp_socket(addr: *iroh_datagram_address): cint
@@ -806,7 +839,8 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
     recv_datagram = (@pointer)(receive_datagram), ack_datagram = (@pointer)(ack_datagram),
     stream_open = (@pointer)(stream_opened), recv_stream_data = (@pointer)(stream_received),
     acked_stream_data_offset = (@pointer)(stream_acknowledged), stream_reset = (@pointer)(stream_reset),
-    stream_close = (@pointer)(stream_closed), handshake_completed = (@pointer)(handshake_done)
+    stream_close = (@pointer)(stream_closed), handshake_completed = (@pointer)(handshake_done),
+    handshake_confirmed = (@pointer)(confirm_handshake), path_validation = (@pointer)(migration_validated)
   }
   local scid: ngtcp2_cid = {datalen = CID_SIZE}
   if RAND_bytes(&scid.data[0],CID_SIZE) ~= 1 then return NGTCP2_ERR_CALLBACK_FAILURE end
@@ -862,6 +896,7 @@ local function destroy(conn: *Connection)
   elseif conn.fd >= 0 then
     close(conn.fd)
   end
+  if conn.listener == nilptr and conn.candidate_fd >= 0 then close(conn.candidate_fd) end
   free_session(conn.saved_session)
   while conn.inbox_first ~= nilptr do pop_datagram(conn) end
   while conn.streams ~= nilptr do remove_stream(conn,conn.streams) end
@@ -1004,6 +1039,7 @@ local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boo
   local conn = (@*Connection)(C.calloc(1,#Connection))
   if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
   conn.fd = -1
+  conn.candidate_fd = -1
   if not open_udp(conn,host,(@cushort)(args[1])) then
     local code = (@uint32)(errno)
     destroy(conn)
@@ -1052,10 +1088,85 @@ local function authenticated(conn: *Connection): boolean
   return ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 and authenticated_pin(conn)
 end
 
+local function start_migration(e: Env, conn: *Connection, host: Term, port: Term): Term
+  if conn == nilptr or conn.failed then return io_fail(e,EBADF,'QUIC connection closed') end
+  if conn.listener ~= nilptr then return io_fail(e,ENOTSUP,'only a QUIC dialer can initiate migration') end
+  if conn.candidate_fd >= 0 then return io_fail(e,EALREADY,'QUIC migration already in progress') end
+  if not conn.confirmed or not authenticated(conn) or conn.output_size ~= 0 then return io_done(e,0) end
+  local host_size: uint64
+  local text = io_cstr(e,host,&host_size)
+  defer C.free(text) end
+  local local_addr: iroh_datagram_address
+  local size: cuint = 0
+  if port <= 65535 and not io_nul(text,host_size) then size = numeric_address(text,(@cushort)(port),&local_addr) end
+  if size == 0 or local_addr.ss_family ~= conn.remote_addr.ss_family or not concrete_address(&local_addr) then
+    return io_fail(e,EINVAL,'QUIC migration requires a concrete numeric IP matching the peer address family')
+  end
+  local fd = udp_socket(&local_addr)
+  if fd < 0 then return io_fail(e,(@uint32)(errno),nilptr) end
+  if bind(fd,&local_addr,size) ~= 0 or connect(fd,&conn.remote_addr,conn.remote_size) ~= 0 or
+      getsockname(fd,&local_addr,&size) ~= 0 then
+    local code = (@uint32)(errno)
+    close(fd)
+    return io_fail(e,code,nilptr)
+  end
+  local path = connection_path(conn)
+  path.iroh_datagram_local_path = {addr = &local_addr, addrlen = size}
+  local status = ngtcp2_conn_initiate_migration(conn.engine,&path,io_tick())
+  if status ~= 0 then
+    close(fd)
+    if status == NGTCP2_ERR_CONN_ID_BLOCKED then return io_done(e,0) end
+    if status == NGTCP2_ERR_INVALID_STATE then return io_fail(e,ENOTSUP,ngtcp2_strerror(status)) end
+    if status == NGTCP2_ERR_INVALID_ARGUMENT then return io_fail(e,EINVAL,ngtcp2_strerror(status)) end
+    conn.failed = true
+    return io_fail(e,status == NGTCP2_ERR_NOMEM and ENOMEM or EIO,ngtcp2_strerror(status))
+  end
+  conn.candidate_fd = fd
+  conn.candidate_addr = local_addr
+  conn.candidate_size = size
+  -- ngtcp2 can immediately reuse a path still in its validated path history.
+  local current = ngtcp2_conn_get_path2(conn.engine)
+  conn.migration_state = same_address(&local_addr,(@*iroh_datagram_address)(current.iroh_datagram_local_path.addr)) and 2 or 1
+  return io_done(e,address_port(&local_addr))
+end
+
+local function start_migration_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],start_migration(e,find(e,args[0]),args[1],args[2]))
+end
+
+local function migration_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],io_fail(e,EBADF,'QUIC connection closed')) end
+  return io_tup(e,args[0],io_done(e,conn.migration_state))
+end
+
+local function output_on_candidate(conn: *Connection): boolean
+  return conn.listener == nilptr and conn.candidate_fd >= 0 and
+    same_address(&conn.candidate_addr,(@*iroh_datagram_address)(conn.output_path.iroh_datagram_local_path.addr))
+end
+
 local function send_packet(conn: *Connection, size: csize): isize
-  if conn.listener == nilptr then return send(conn.fd,&conn.output[0],size,0) end
-  local remote = conn.output_path.remote
-  return sendto(conn.fd,&conn.output[0],size,0,remote.addr,remote.addrlen)
+  if conn.listener ~= nilptr then
+    local remote = conn.output_path.remote
+    return sendto(conn.fd,&conn.output[0],size,0,remote.addr,remote.addrlen)
+  end
+  if output_on_candidate(conn) then return send(conn.candidate_fd,&conn.output[0],size,0) end
+  if conn.migration_state ~= 0 and not same_address(&conn.local_addr,
+      (@*iroh_datagram_address)(conn.output_path.iroh_datagram_local_path.addr)) then
+    -- A response queued before validation can refer to an already retired socket.
+    return (@isize)(size)
+  end
+  return send(conn.fd,&conn.output[0],size,0)
+end
+
+local function network_unreachable(code: cint): boolean
+  return code == ECONNREFUSED or code == EHOSTUNREACH or code == ENETUNREACH
+end
+
+local function migration_can_lose(conn: *Connection, candidate: boolean): boolean
+  if conn.candidate_fd < 0 then return false end
+  if conn.migration_state == 1 then return true end
+  return (conn.migration_state == 2) ~= candidate
 end
 
 local function close_transport(conn: *Connection, error: cint)
@@ -1092,6 +1203,7 @@ local function server_connection(listener: *Listener, address: *iroh_datagram_ad
   listener.refs = listener.refs + 1
   listener.pending = listener.pending + 1
   conn.listener = listener
+  conn.candidate_fd = -1
   conn.fd = listener.fd
   conn.local_addr = listener.local_addr
   conn.local_size = listener.local_size
@@ -1170,7 +1282,8 @@ end
 local function send_pending(conn: *Connection, now: uint64): cint
   if conn.output_size == 0 then return 0 end
   local size = send_packet(conn,conn.output_size)
-  if size == (@isize)(conn.output_size) then
+  local lost = size < 0 and network_unreachable(errno) and migration_can_lose(conn,output_on_candidate(conn))
+  if size == (@isize)(conn.output_size) or lost then
     conn.output_size = 0
     conn.output_early = false
     ngtcp2_conn_update_pkt_tx_time(conn.engine,now)
@@ -1179,6 +1292,19 @@ local function send_pending(conn: *Connection, now: uint64): cint
   if size >= 0 then return (@cint)(EIO) end
   if errno == EAGAIN or errno == EINTR then return 0 end
   return errno
+end
+
+local function settle_migration(conn: *Connection)
+  if conn.listener ~= nilptr or conn.candidate_fd < 0 or conn.migration_state == 1 or conn.output_size ~= 0 then return end
+  if conn.migration_state == 2 then
+    close(conn.fd)
+    conn.fd = conn.candidate_fd
+    conn.local_addr = conn.candidate_addr
+    conn.local_size = conn.candidate_size
+  else
+    close(conn.candidate_fd)
+  end
+  conn.candidate_fd = -1
 end
 
 local function engine_error(e: Env, conn: *Connection, status: cint): Term
@@ -1209,6 +1335,19 @@ local function advance(conn: *Connection, now: uint64): cint
   return send_pending(conn,now)
 end
 
+local function read_client_packet(conn: *Connection, fd: cint, path: *ngtcp2_path, now: uint64): cint
+  local incoming: [65536]cuchar
+  local size = recv(fd,&incoming[0],#incoming,0)
+  if size > 0 then
+    ingest(conn,path,&incoming[0],(@csize)(size),now)
+  elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
+    if not network_unreachable(errno) or not migration_can_lose(conn,fd == conn.candidate_fd) then
+      return errno
+    end
+  end
+  return 0
+end
+
 local function step(e: Env, conn: *Connection): Term
   if conn == nilptr or conn.failed then return closed(e) end
   local now = io_tick()
@@ -1216,19 +1355,20 @@ local function step(e: Env, conn: *Connection): Term
     local code = dispatch(conn.listener,now)
     if code ~= 0 then return socket_error(e,conn,code) end
   else
-    local incoming: [65536]cuchar
-    local size = recv(conn.fd,&incoming[0],#incoming,0)
-    if size > 0 then
-      local path = connection_path(conn)
-      ingest(conn,&path,&incoming[0],(@csize)(size),now)
-    elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
-      return socket_error(e,conn,errno)
+    local path = connection_path(conn)
+    local code = read_client_packet(conn,conn.fd,&path,now)
+    if code ~= 0 then return socket_error(e,conn,code) end
+    if not conn.failed and conn.candidate_fd >= 0 then
+      path.iroh_datagram_local_path = {addr = &conn.candidate_addr, addrlen = conn.candidate_size}
+      code = read_client_packet(conn,conn.candidate_fd,&path,now)
+      if code ~= 0 then return socket_error(e,conn,code) end
     end
   end
   if conn.failed then return engine_error(e,conn,conn.read_failure) end
   local status = advance(conn,now)
   if status < 0 then return engine_error(e,conn,status) end
   if status > 0 then return socket_error(e,conn,status) end
+  settle_migration(conn)
   return io_done(e,authenticated(conn) and 1 or 0)
 end
 
@@ -1665,6 +1805,8 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end
   if iroh_dgram_start_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram,start_run) end
   if iroh_dgram_step_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_step_quic_datagram,step_run) end
+  if iroh_dgram_start_quic_migration ~= 0xffffffff then io_eff(iroh_dgram_start_quic_migration,start_migration_run) end
+  if iroh_dgram_quic_migration_status ~= 0xffffffff then io_eff(iroh_dgram_quic_migration_status,migration_status_run) end
   if iroh_dgram_write_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_quic_datagram,write_run) end
   if iroh_dgram_read_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_read_quic_datagram,read_run) end
   if iroh_dgram_quic_datagram_acks ~= 0xffffffff then io_eff(iroh_dgram_quic_datagram_acks,acks_run) end
