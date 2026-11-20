@@ -29,9 +29,14 @@ def start_multipath_route_handshake(host: String, port: U32, seed: List<&2,U32>,
     -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
   start_multipath_route_handshake_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
+def start_multipath_nat_route_handshake_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, parameter: List<&2,U32>, idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
+  import "./quic_multipath.c"
+
 def start_multipath_nat_route_handshake(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
-  import "./quic_multipath.c"
+  start_multipath_nat_route_handshake_with_idle_timeout(host,port,seed,peer,alpn,parameter,Close.default_idle_timeout())
 
 def open_multipath_handshake_socket(host: String, port: U32) -> IO(Result<&1,&1,U32 & String,Socket>):
   import "./quic_multipath.c"
@@ -52,21 +57,29 @@ def start_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U
   import "./quic_multipath.c"
 
 # TLS protocol identifiers are 1 to 255 opaque bytes.
-def start_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
-    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+def start_multipath_nat_offer_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
 
+def start_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  start_multipath_nat_offer_with_idle_timeout(host,port,seed,peer,alpn,parameter,Close.default_idle_timeout())
+
 def start_nat_parameter(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
-    parameter: Maybe<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+    parameter: Maybe<&2,List<&2,U32>>, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   match parameter:
     case Some{encoded}:
-      start_multipath_nat_offer(host,port,seed,peer,alpn,encoded)
+      start_multipath_nat_offer_with_idle_timeout(host,port,seed,peer,alpn,encoded,idle_ms)
     case None{}:
       IO.pure(Result<&1,&1,U32 & String,MultipathConnection>,Fail{(22,"invalid NAT traversal limit")})
 
+def start_multipath_with_nat_limit_and_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    limit: U32, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  start_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit),idle_ms)
+
 def start_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
     limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
-  start_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
+  start_multipath_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,Close.default_idle_timeout())
 
 def start_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
     idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
@@ -475,21 +488,29 @@ def bind_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U3
   import "./quic_multipath.c"
 
 # Low-level transport fixture. The normal listener waits for QNT frame handling.
-def bind_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
-    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+def bind_multipath_nat_offer_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+def bind_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_multipath_nat_offer_with_idle_timeout(host,port,seed,peer,alpn,parameter,Close.default_idle_timeout())
+
 def bind_nat_parameter(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
-    parameter: Maybe<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+    parameter: Maybe<&2,List<&2,U32>>, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   match parameter:
     case Some{encoded}:
-      bind_multipath_nat_offer(host,port,seed,peer,alpn,encoded)
+      bind_multipath_nat_offer_with_idle_timeout(host,port,seed,peer,alpn,encoded,idle_ms)
     case None{}:
       IO.pure(Result<&1,&1,U32 & String,MultipathListener & U32>,Fail{(22,"invalid NAT traversal limit")})
 
+def bind_multipath_with_nat_limit_and_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    limit: U32, idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit),idle_ms)
+
 def bind_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
     limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
-  bind_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
+  bind_multipath_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,Close.default_idle_timeout())
 
 def bind_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
     idle_ms: NatWire.VarInt) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
@@ -532,10 +553,15 @@ def bind_dual_multipath_identity(host: String, port: U32, seed: List<&2,U32>,
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   bind_dual_multipath_identity_with_idle_timeout(host,port,seed,alpns,early_data,Close.default_idle_timeout())
 
+def bind_dual_multipath_nat_identity_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32, parameter: List<&2,U32>, idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 def bind_dual_multipath_nat_identity(host: String, port: U32, seed: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>, early_data: U32, parameter: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
-  import "./quic_multipath.c"
+  bind_dual_multipath_nat_identity_with_idle_timeout(host,port,seed,alpns,early_data,parameter,Close.default_idle_timeout())
 
 def multipath_remote_id(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
@@ -546,10 +572,14 @@ def bind_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List
     alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
-def bind_multipath_alpns_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
-    alpns: List<&2,List<&2,U32>>, parameter: List<&2,U32>)
+def bind_multipath_alpns_nat_offer_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, parameter: List<&2,U32>, idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
+
+def bind_multipath_alpns_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_multipath_alpns_nat_offer_with_idle_timeout(host,port,seed,peer,alpns,parameter,Close.default_idle_timeout())
 
 # Replace the preference list for new handshakes. An empty list pauses admission.
 def set_multipath_alpns(listener: MultipathListener, alpns: List<&2,List<&2,U32>>)
@@ -627,29 +657,41 @@ def connect_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2
     started : ConnectResult() <- start_multipath(host,port,seed,peer,alpn)
     finish_connect(started,timeout_ms)
 
+def connect_multipath_with_nat_limit_and_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: String, limit: U32, timeout_ms: Nat, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    started : ConnectResult() <- start_multipath_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,idle_ms)
+    finish_connect(started,timeout_ms)
+
 def connect_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: String, limit: U32, timeout_ms: Nat) -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    started : ConnectResult() <- start_multipath_with_nat_limit(host,port,seed,peer,alpn,limit)
-    finish_connect(started,timeout_ms)
+  connect_multipath_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,timeout_ms,Close.default_idle_timeout())
+
+def start_multipath_nat_offer_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, parameter: List<&2,U32>, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  import "./quic_multipath.c"
 
 def start_multipath_nat_offer_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, parameter: List<&2,U32>) -> IO(ConnectResult()):
-  import "./quic_multipath.c"
+  start_multipath_nat_offer_bytes_with_idle_timeout(host,port,seed,peer,alpn,parameter,Close.default_idle_timeout())
 
 def connect_nat_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
-    alpn: List<&2,U32>, encoded: Maybe<&2,List<&2,U32>>, timeout: Nat) -> IO(ConnectResult()):
+    alpn: List<&2,U32>, encoded: Maybe<&2,List<&2,U32>>, timeout: Nat, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
   match encoded:
     case Some{parameter}:
       do IO<ConnectResult()>:
-        started : ConnectResult() <- start_multipath_nat_offer_bytes(host,port,seed,peer,alpn,parameter)
+        started : ConnectResult() <- start_multipath_nat_offer_bytes_with_idle_timeout(host,port,seed,peer,alpn,parameter,idle_ms)
         finish_connect(started,timeout)
     case None{}:
       IO.pure(ConnectResult(),Fail{(22,"invalid NAT traversal limit")})
 
+def connect_multipath_bytes_with_nat_limit_and_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, limit: U32, timeout: Nat, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  connect_nat_bytes(host,port,seed,peer,alpn,NatWire.encode_limit(limit),timeout,idle_ms)
+
 def connect_multipath_bytes_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, limit: U32, timeout: Nat) -> IO(ConnectResult()):
-  connect_nat_bytes(host,port,seed,peer,alpn,NatWire.encode_limit(limit),timeout)
+  connect_multipath_bytes_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,timeout,Close.default_idle_timeout())
 
 def connect_multipath_bytes_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, timeout_ms: Nat, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):

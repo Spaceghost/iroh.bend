@@ -17,9 +17,8 @@ Continue the first open item below and update the checkpoint after each verified
 
 ## Current checkpoint
 
-1. Carry the configured connection idle timeout through the Picoquic NAT dialers and listeners. Verify the advertised idle limit and NAT transport parameters against the Iroh 1.5.0 peer.
-2. Check Picoquic's handling of a peer abandoning the last local path against Noq 1.5.0. Its upstream tests exercise both opening a replacement within the three-PTO grace period and closing when that period expires.
-3. Keep live **listener** NAT mapping refresh parked until the owner asks to resume it. The outbound connection's mapping-refresh tests are a separate, passing case.
+1. Match Picoquic's handling of peer abandonment of the last path to Noq 1.5.0. The upstream `remote_path_abandon_last_path` tests passed on Fedora. Verify that Bend can open a replacement within the three-PTO grace period and closes if the grace period expires without a replacement.
+2. Keep live **listener** NAT mapping refresh parked until the owner asks to resume it. The outbound connection's mapping-refresh tests are a separate, passing case.
 
 ## Checking the last checkpoint
 
@@ -32,6 +31,8 @@ The ngtcp2 resumption and identity listener APIs now carry the configured connec
 Picoquic’s pinned, identity and dual-stack listeners accept a configured idle timeout for full and resumed handshakes. Run `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/pico-resumption-idle/make.sh` on Fedora for the IPv4/IPv6 listener checks against Iroh 1.5.0. Add `relays` to run the relay-only and combined listener checks over WS and WSS. Both backends also run a listener restart on the same relay and identity. Iroh verifies ticket rejection, the replacement timeout and application datagram delivery on the relay.
 
 Pass `check-quic-multipath-resumption-idle` to the same runner to check the Picoquic dialer. On both IP families, Iroh observed the caller’s limit on accepted early data, a full handshake after ticket rejection, and a resumed connection that expired while quiet.
+
+Picoquic’s NAT dialers and listeners advertise the configured connection idle limit. The IPv4, IPv6, WS and WSS runs checked both peers’ NAT address limits alongside the connection limit, including zero, values above 32 bits, and a shorter peer limit. Run `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/pico-nat-idle/make.sh` for the direct checks. Add `relays` for WS and WSS.
 
 Run the path checks on Fedora with the build and reference scripts in the evidence directory.
 

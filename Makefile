@@ -615,7 +615,7 @@ $(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endp
 # Build the endpoint integration fixture without compiler optimizations.
 $(BUILD)/iroh-bend-quic-multipath-idle-routes: $(BUILD)/quic-multipath-idle-routes.c
 $(BUILD)/iroh-bend-quic-multipath-idle-listeners: $(BUILD)/quic-multipath-idle-listeners.c
-$(BUILD)/iroh-bend-quic-multipath-relay-close $(BUILD)/iroh-bend-quic-multipath-resumption-relay $(BUILD)/iroh-bend-quic-multipath-idle-routes $(BUILD)/iroh-bend-quic-multipath-idle-listeners $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
+$(BUILD)/iroh-bend-quic-multipath-relay-close $(BUILD)/iroh-bend-quic-multipath-resumption-relay $(BUILD)/iroh-bend-quic-multipath-idle-routes $(BUILD)/iroh-bend-quic-multipath-idle-listeners $(BUILD)/iroh-bend-quic-multipath-nat-idle $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
 	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
@@ -794,6 +794,16 @@ check-quic-datagram-idle-config-relay check-quic-multipath-idle-config-relay: ch
 	@test -x "$(UPSTREAM_QUIC_IDLE)" && test -n "$(UPSTREAM_IROH_RELAY_URL)" && test -n "$(RELAY_URL)" || { echo 'Set UPSTREAM_QUIC_IDLE, RELAY_URL, and UPSTREAM_IROH_RELAY_URL.' >&2; exit 2; }
 	python3 -B tests/quic_idle_timeout.py "$<" "$(UPSTREAM_QUIC_IDLE)" --relay "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --cases $(IDLE_CONFIG_CASES)
 
+.PHONY: check-quic-multipath-nat-idle check-quic-multipath-nat-idle-relay
+UPSTREAM_QUIC_NAT_IDLE ?=
+check-quic-multipath-nat-idle: $(BUILD)/iroh-bend-quic-multipath-nat-idle
+	@test -x "$(UPSTREAM_QUIC_NAT_IDLE)" || { echo 'Set UPSTREAM_QUIC_NAT_IDLE to the Iroh NAT and idle timeout fixture.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$<" "$(UPSTREAM_QUIC_NAT_IDLE)" --nat --cases $(IDLE_CONFIG_CASES)
+
+check-quic-multipath-nat-idle-relay: $(BUILD)/iroh-bend-quic-multipath-nat-idle
+	@test -x "$(UPSTREAM_QUIC_NAT_IDLE)" && test -n "$(UPSTREAM_IROH_RELAY_URL)" && test -n "$(RELAY_URL)" || { echo 'Set UPSTREAM_QUIC_NAT_IDLE, RELAY_URL, and UPSTREAM_IROH_RELAY_URL.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$<" "$(UPSTREAM_QUIC_NAT_IDLE)" --nat --relay "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --cases $(IDLE_CONFIG_CASES)
+
 check-quic-idle-config-control:
 	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
 	python3 -B tests/quic_idle_timeout.py "$(UPSTREAM_QUIC_IDLE)" "$(UPSTREAM_QUIC_IDLE)" --control --cases $(IDLE_CONFIG_CASES)
@@ -828,7 +838,7 @@ check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
 	"$<" seal
 	@set -e; for role in outbound inbound; do for version in 1 2; do "$<" "$(RELAY_URL)" "$$role" "$$version"; done; done
 
-MULTIPATH_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-multipath-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-relay))
+MULTIPATH_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-multipath-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-relay nat-idle))
 DATAGRAM_CLOSE_TEST_C = $(addprefix $(BUILD)/quic-datagram-,$(addsuffix .c,relay-close idle-routes idle-listeners resumption-idle))
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
 $(BUILD)/quic-datagram-idle-routes.c: tests/quic_datagram_idle_routes.bend tests/quic_idle_routes.bend
@@ -838,6 +848,7 @@ $(DATAGRAM_CLOSE_TEST_C): tests/quic_datagram_relay_close.bend tests/quic_datagr
 $(BUILD)/quic-multipath-idle-routes.c: tests/quic_multipath_idle_routes.bend tests/quic_idle_routes.bend
 $(BUILD)/quic-multipath-resumption-relay.c: tests/quic_multipath_resumption_relay.bend tests/quic_multipath_early_listener.bend tests/quic_resumption_relay.bend
 $(BUILD)/quic-multipath-idle-listeners.c: tests/quic_multipath_idle_listeners.bend tests/quic_idle_listeners.bend
+$(BUILD)/quic-multipath-nat-idle.c: tests/quic_multipath_nat_idle.bend
 $(MULTIPATH_CLOSE_TEST_C): tests/quic_multipath_relay_close.bend tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(DATAGRAM_CLOSE_TEST_C) $(MULTIPATH_CLOSE_TEST_C): tests/quic_relay_close.bend tests/quic_idle_timeout.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))
 $(BUILD)/relay-quic-drain.c $(DATAGRAM_CLOSE_TEST_C) $(MULTIPATH_CLOSE_TEST_C): $(BUILD)/%.c: tools/nelua-effect.sh

@@ -166,7 +166,52 @@ async def endpoint_route(bend, reference, case, *, host=None, relay=None, lookup
     print(f"PASS endpoint idle timeout {case} {target} via {'DNS' if lookup else 'supplied route'}", flush=True)
 
 
+async def nat_exchange(bend, iroh, case):
+    marker = f"PASS {case} kept alive".encode()
+    for proc, (out, _) in zip((bend, iroh), await asyncio.gather(bend.communicate(), iroh.communicate())):
+        if proc.returncode or marker not in out.splitlines():
+            raise RuntimeError(f"{case} {proc.pid} exited {proc.returncode}: {out!r}")
+        if proc is iroh and b"NAT negotiated local 64 remote 32" not in out.splitlines():
+            raise RuntimeError(f"Iroh did not confirm NAT traversal parameters: {out!r}")
+
+
+async def nat_idle(bend, reference, case, mode, *, host=None, relay=None):
+    async with asyncio.timeout(20):
+        if mode.startswith("listen"):
+            async with child(bend, case, mode, relay[0] if relay else host) as server:
+                port = int(await server.stdout.readline())
+                if relay:
+                    target, dial = relay[1], "dial-relay"
+                else:
+                    target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
+                    dial = "dial"
+                async with child(reference, dial, target, case, "route", "nat") as client:
+                    await nat_exchange(server, client, case)
+        else:
+            listen = ["listen-relay", relay[1]] if relay else ["listen6" if host == "::1" else "listen"]
+            async with child(reference, *listen, case, "route", "nat") as server:
+                if relay:
+                    await expect(server, b"READY relay")
+                    route = [relay[0]]
+                else:
+                    port = int((await server.stdout.readline()).rsplit(b":", 1)[-1])
+                    route = [host, str(port)]
+                async with child(bend, case, mode, *route) as client:
+                    await nat_exchange(client, server, case)
+    print(f"PASS NAT {mode} {case} {relay[0] if relay else host}", flush=True)
+
+
 async def run(args):
+    if args.nat:
+        for case in args.cases:
+            if args.relay:
+                for mode in ("relay", "relay-route", "listen-relay"):
+                    await nat_idle(args.bend, args.reference, case, mode, relay=args.relay)
+            else:
+                for mode in ("direct", "route", "listen"):
+                    await asyncio.gather(*(nat_idle(args.bend, args.reference, case, mode, host=host)
+                                           for host in ("127.0.0.1", "::1")))
+        return
     if args.relay or args.routes:
         for case in args.cases:
             for lookup in (False, True):
@@ -194,6 +239,7 @@ if __name__ == "__main__":
     parser.add_argument("--relay", nargs=2, metavar=("WEBSOCKET_URL", "IROH_ORIGIN"))
     parser.add_argument("--listeners", action="store_true", help="exercise two live listeners in one Bend process")
     parser.add_argument("--routes", action="store_true", help="dial through the public endpoint route API")
+    parser.add_argument("--nat", action="store_true", help="check NAT negotiation with configured idle limits")
     cases = ("idle", "activity", "one-way", "defaults")
     parser.add_argument("--cases", nargs="+", choices=(*cases, "configured", "wide", "no-limit", "peer-limit"), default=cases)
     asyncio.run(run(parser.parse_args()))

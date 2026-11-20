@@ -176,12 +176,12 @@ def observe_nat_listener(bound: Result<&1,&1,U32 & String,Quic.MultipathListener
       IO.pure(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>,Fail{error})
 
 def bind_nat_listener_offer(offer: Maybe<&2,List<&2,U32>>, port: U32, +url: String, +seed: List<&2,U32>,
-    alpns: List<&2,List<&2,U32>>, early_data: U32, limit: U32) -> IO(BindNatRelayed()):
+    alpns: List<&2,List<&2,U32>>, early_data: U32, limit: U32, idle_ms: NatWire.VarInt) -> IO(BindNatRelayed()):
   match offer:
     case Some{parameter}:
       do IO<BindNatRelayed()>:
         bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
-          Quic.bind_dual_multipath_nat_identity("::",port,seed,alpns,early_data,parameter)
+          Quic.bind_dual_multipath_nat_identity_with_idle_timeout("::",port,seed,alpns,early_data,parameter,idle_ms)
         observed : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <- observe_nat_listener(bound,url)
         attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_listener(observed,url,seed)
         return nat_listener_bound(attached,limit)
@@ -189,9 +189,13 @@ def bind_nat_listener_offer(offer: Maybe<&2,List<&2,U32>>, port: U32, +url: Stri
       IO.pure(BindNatRelayed(),Fail{(22,"invalid NAT traversal limit")})
 
 # Discover reachable addresses on the shared UDP sockets and allow explicit candidates per connection.
+def bind_nat_listener_with_idle_timeout(port: U32, url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>,
+    early_data: U32, +limit: U32, idle_ms: NatWire.VarInt) -> IO(BindNatRelayed()):
+  bind_nat_listener_offer(NatWire.encode_limit(limit),port,url,seed,alpns,early_data,limit,idle_ms)
+
 def bind_nat_listener(port: U32, url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>,
-    early_data: U32, +limit: U32) -> IO(BindNatRelayed()):
-  bind_nat_listener_offer(NatWire.encode_limit(limit),port,url,seed,alpns,early_data,limit)
+    early_data: U32, limit: U32) -> IO(BindNatRelayed()):
+  bind_nat_listener_with_idle_timeout(port,url,seed,alpns,early_data,limit,Close.default_idle_timeout())
 
 def accepted_nat(outcome: Nat.ListenerResult(), owner: NatRelayedListener()) -> AcceptNatRelayed():
   match outcome:
@@ -246,11 +250,16 @@ def dial(address: Endpoint.Address, +identity: Endpoint.Identity, timeout: U32) 
   Endpoint.before_connect(Quic.MultipathConnection,identity,u => dial_address(address,identity,timeout))
 
 # Use the automatic NAT traversal driver for a direct bootstrap address.
-def connect_nat_direct(address: Endpoint.Address, +identity: Endpoint.Identity, timeout: U32, limit: U32)
-    -> IO(Nat.ConnectResult()):
+def connect_nat_direct_with_idle_timeout(address: Endpoint.Address, +identity: Endpoint.Identity, timeout: U32, limit: U32,
+    idle_ms: NatWire.VarInt) -> IO(Nat.ConnectResult()):
   Endpoint.IpAddress{host,port} = address
   Endpoint.PeerKeys{seed,peer,alpn} = identity
-  Endpoint.before_connect(Nat.Connection(),identity,u => Nat.connect(host,port,seed,peer,alpn,limit,U32.to_nat(timeout)))
+  Endpoint.before_connect(Nat.Connection(),identity,u =>
+    Nat.connect_with_idle_timeout(host,port,seed,peer,alpn,limit,U32.to_nat(timeout),idle_ms))
+
+def connect_nat_direct(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32, limit: U32)
+    -> IO(Nat.ConnectResult()):
+  connect_nat_direct_with_idle_timeout(address,identity,timeout,limit,Close.default_idle_timeout())
 
 def step_nat_direct(connection: Nat.Connection()) -> IO(Nat.Connection() & Nat.NewPathResult()):
   Nat.step(connection)
@@ -282,25 +291,30 @@ def mark_nat_relay(outcome: Nat.ConnectResult(), relay: Relay.Bridge, discovery:
       Endpoint.attach_connection(Nat.Connection(),Fail{error},relay)
 
 def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, identity: Endpoint.Identity,
-    source: Endpoint.Address, limit: U32, timeout: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
+    source: Endpoint.Address, limit: U32, timeout: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>,
+    idle_ms: NatWire.VarInt) -> IO(NatRelayResult()):
   match result:
     case Done{(bridge,port)}:
       Endpoint.PeerKeys{seed,peer,alpn} = identity
       Endpoint.IpAddress{local_ip,local_port} = source
       do IO<NatRelayResult()>:
         connected : Nat.ConnectResult() <-
-          Nat.connect_from("127.0.0.1",port,seed,peer,alpn,local_ip,local_port,limit,U32.to_nat(timeout))
+          Nat.connect_from_with_idle_timeout("127.0.0.1",port,seed,peer,alpn,local_ip,local_port,limit,U32.to_nat(timeout),idle_ms)
         mark_nat_relay(connected,bridge,discovery)
     case Fail{error}:
       IO.pure(NatRelayResult(),Fail{error})
 
-def connect_nat_relay_using(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
-    timeout: U32, limit: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
+def connect_nat_relay_using_with_idle_timeout(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>, idle_ms: NatWire.VarInt) -> IO(NatRelayResult()):
   Endpoint.PeerKeys{seed,peer,_} = identity
   Endpoint.before_connect(NatRelayConnection(),identity,u =>
     do IO<NatRelayResult()>:
       result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
-      attach_nat_relay(result,identity,source,limit,timeout,discovery))
+      attach_nat_relay(result,identity,source,limit,timeout,discovery,idle_ms))
+
+def connect_nat_relay_using(url: String, identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
+  connect_nat_relay_using_with_idle_timeout(url,identity,source,timeout,limit,discovery,Close.default_idle_timeout())
 
 # Bootstrap through an authenticated relay and probe with a reachable UDP source.
 def connect_nat_relay(url: String, identity: Endpoint.Identity, source: Endpoint.Address,
@@ -492,16 +506,20 @@ def dial_relay_offer(address: Endpoint.Address, identity: Endpoint.Identity, tim
   Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,routed_nat_limit(),U32.to_nat(timeout))
 
 def start_routed_offer(encoded: Maybe<&2,Race.Packet()>, host: String, port: U32, seed: Race.Packet(), peer: Race.Packet(),
-    alpn: Race.Packet()) -> Race.Started(Quic.MultipathConnection):
+    alpn: Race.Packet(), idle_ms: NatWire.VarInt) -> Race.Started(Quic.MultipathConnection):
   match encoded:
     case Some{parameter}:
-      Quic.start_multipath_nat_route_handshake(host,port,seed,peer,alpn,parameter)
+      Quic.start_multipath_nat_route_handshake_with_idle_timeout(host,port,seed,peer,alpn,parameter,idle_ms)
     case None{}:
       IO.pure(Result<&1,&1,U32 & String,Quic.MultipathConnection & Socket>,Fail{(22,"invalid NAT traversal limit")})
 
+def start_routed_handshake_with_idle_timeout(host: String, port: U32, seed: Race.Packet(), peer: Race.Packet(), alpn: Race.Packet(),
+    idle_ms: NatWire.VarInt) -> Race.Started(Quic.MultipathConnection):
+  start_routed_offer(NatWire.encode_limit(routed_nat_limit()),host,port,seed,peer,alpn,idle_ms)
+
 def start_routed_handshake(host: String, port: U32, seed: Race.Packet(), peer: Race.Packet(), alpn: Race.Packet())
     -> Race.Started(Quic.MultipathConnection):
-  start_routed_offer(NatWire.encode_limit(routed_nat_limit()),host,port,seed,peer,alpn)
+  start_routed_handshake_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
 def routed_handshake() -> Race.Backend<Quic.MultipathConnection>:
   Race.Backend{start_routed_handshake,Quic.open_multipath_handshake_socket,
@@ -534,14 +552,19 @@ def setup_routed(result: ConnectResult(), candidates: List<&2,Endpoint.Address>,
     case Fail{error}:
       IO.pure(RoutedResult(),Fail{error})
 
-def connect_routed(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +timeouts: Endpoint.Timeouts)
+def connect_routed_with_idle_timeout(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +timeouts: Endpoint.Timeouts,
+    idle_ms: NatWire.VarInt)
     -> IO(RoutedResult()):
   Endpoint.DialRoutes{candidates,urls} = routes
   do IO<RoutedResult()>:
     result : ConnectResult() <- Endpoint.before_connect(Connection(),identity,u =>
-      Endpoint.start_dial_with(~Quic.MultipathConnection,~routed_handshake(),routes,identity,timeouts,[]))
+      Endpoint.start_dial_using(~Quic.MultipathConnection,~routed_handshake(),
+        ~start_routed_handshake_with_idle_timeout,idle_ms,routes,identity,timeouts,[]))
     now : U32 <- Quic.multipath_millis()
     setup_routed(result,candidates,urls,identity,timeouts,now)
+
+def connect_routed(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts) -> IO(RoutedResult()):
+  connect_routed_with_idle_timeout(routes,identity,timeouts,Close.default_idle_timeout())
 
 def after_probe(outcome: Connection() & Result<&1,&1,U32 & String,Maybe<&1,U32>>, peer: Endpoint.Address,
     rest: List<&2,Endpoint.Address>, since: U32, now: U32, expired: Bool) -> Connection() & ProbeState:

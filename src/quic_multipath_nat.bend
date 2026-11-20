@@ -1,5 +1,6 @@
 import Base
 import ./quic_multipath.bend as Quic
+import ./quic_close.bend as Close
 import ./quic_nat.bend as Wire
 import ./quic_nat_retry.bend as Retry
 import ./quic_nat_state.bend as State
@@ -684,11 +685,15 @@ def connected(result: Quic.ConnectResult(), limit: U32) -> IO(ConnectResult()):
     case Fail{error}:
       IO.pure(ConnectResult(),Fail{error})
 
-def connect(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
-    +limit: U32, timeout: Nat) -> IO(ConnectResult()):
+def connect_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    +limit: U32, timeout: Nat, idle_ms: Wire.VarInt) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
-    result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,limit,timeout)
+    result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,timeout,idle_ms)
     connected(result,limit)
+
+def connect(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    limit: U32, timeout: Nat) -> IO(ConnectResult()):
+  connect_with_idle_timeout(host,port,seed,peer,alpn,limit,timeout,Close.default_idle_timeout())
 
 def from_source(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit>, limit: U32)
     -> IO(ConnectResult()):
@@ -712,11 +717,15 @@ def with_source(result: Quic.ConnectResult(), source: String, port: U32, limit: 
 
 # Use a separate UDP socket for off-path probes while control frames use the
 # initial QUIC path. The source must be reachable at the address advertised.
-def connect_from(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
-    source: String, source_port: U32, +limit: U32, timeout: Nat) -> IO(ConnectResult()):
+def connect_from_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    source: String, source_port: U32, +limit: U32, timeout: Nat, idle_ms: Wire.VarInt) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
-    result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,limit,timeout)
+    result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit_and_idle_timeout(host,port,seed,peer,alpn,limit,timeout,idle_ms)
     with_source(result,source,source_port,limit)
+
+def connect_from(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    source: String, source_port: U32, limit: U32, timeout: Nat) -> IO(ConnectResult()):
+  connect_from_with_idle_timeout(host,port,seed,peer,alpn,source,source_port,limit,timeout,Close.default_idle_timeout())
 
 def driven(pair: Quic.MultipathConnection & DialerResult(), previous: Dialer)
     -> (Connection() & NewPathResult()):
@@ -866,20 +875,24 @@ def bound_listener(result: Result<&1,&1,U32 & String,Quic.MultipathListener & U3
       Fail{error}
 
 def bind_listener_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
-    alpns: List<&2,List<&2,U32>>, limit: U32, parameter: Maybe<&2,List<&2,U32>>) -> IO(BindListenerResult()):
+    alpns: List<&2,List<&2,U32>>, limit: U32, parameter: Maybe<&2,List<&2,U32>>, idle_ms: Wire.VarInt) -> IO(BindListenerResult()):
   match parameter:
     case Some{encoded}:
       do IO<BindListenerResult()>:
         result : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
-          Quic.bind_multipath_alpns_nat_offer(host,port,seed,peer,alpns,encoded)
+          Quic.bind_multipath_alpns_nat_offer_with_idle_timeout(host,port,seed,peer,alpns,encoded,idle_ms)
         return bound_listener(result,limit)
     case None{}:
       IO.pure(BindListenerResult(),Fail{(22,"invalid NAT traversal limit")})
 
 # List opaque ALPN byte strings in server preference order.
+def bind_listener_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, +limit: U32, idle_ms: Wire.VarInt) -> IO(BindListenerResult()):
+  bind_listener_offer(host,port,seed,peer,alpns,limit,Wire.encode_limit(limit),idle_ms)
+
 def bind_listener(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
-    alpns: List<&2,List<&2,U32>>, +limit: U32) -> IO(BindListenerResult()):
-  bind_listener_offer(host,port,seed,peer,alpns,limit,Wire.encode_limit(limit))
+    alpns: List<&2,List<&2,U32>>, limit: U32) -> IO(BindListenerResult()):
+  bind_listener_with_idle_timeout(host,port,seed,peer,alpns,limit,Close.default_idle_timeout())
 
 def accept_listener_state(result: ListenerResult(), listener: NatListener()) -> AcceptListenerResult():
   match result:

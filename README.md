@@ -949,8 +949,14 @@ Run `make check-quic-path-idle-relay-profiles` with the same fixture to check
 the 30-second relay deadline in both Bend roles and the 15-second deadline
 on a direct loopback path. Existing WS and WSS tests also exercise the
 combined listener and carry an open stream across relay and direct outages.
-Connection idle settings on the specialized Picoquic NAT constructors remain
-open.
+`connect_nat_direct_with_idle_timeout`, `connect_nat_relay_using_with_idle_timeout`,
+`connect_routed_with_idle_timeout` and `bind_nat_listener_with_idle_timeout`
+also accept the connection idle setting. Run `make check-quic-multipath-nat-idle`
+with `UPSTREAM_QUIC_NAT_IDLE` set to the Iroh 1.5.0 NAT and idle timeout fixture.
+Both peers verify the NAT transport parameters and exchange application
+datagrams. The fixture checks the negotiated limit on IPv4 and IPv6. Run
+`make check-quic-multipath-nat-idle-relay` with the same fixture and relay
+settings to cover WS and WSS.
 
 Run `make check-quic-resumption-idle` with `UPSTREAM_QUIC_RESUMPTION_IDLE`
 set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and

@@ -320,9 +320,9 @@ local QUIC_TRANSPORT_EXTENSION: uint16 <comptime> = 57
 
 ##[[
 local names = {
-  'start_multipath_route_handshake_with_idle_timeout', 'start_multipath_nat_route_handshake', 'open_multipath_handshake_socket',
+  'start_multipath_route_handshake_with_idle_timeout', 'start_multipath_nat_route_handshake_with_idle_timeout', 'open_multipath_handshake_socket',
   'read_multipath_handshake_socket', 'multipath_handshake_output', 'adopt_multipath_handshake_socket',
-  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_nat_offer_bytes', 'start_multipath_bytes_with_idle_timeout', 'start_multipath_alpns', 'negotiated_multipath_alpn',
+  'start_multipath', 'start_multipath_nat_offer_with_idle_timeout', 'start_multipath_nat_offer_bytes_with_idle_timeout', 'start_multipath_bytes_with_idle_timeout', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume_with_idle_timeout', 'multipath_resumption_status', 'multipath_early_status',
   'read_multipath_step', 'write_multipath_step', 'set_multipath_path_idle_timeout', 'mark_multipath_relay_path',
@@ -331,8 +331,8 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'send_multipath_application_close', 'read_multipath_application_close', 'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_close_acked', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes_with_idle_timeout', 'bind_multipath_alpns', 'set_multipath_alpns',
-  'bind_resumable_multipath_with_idle_timeout', 'bind_multipath_identity_with_idle_timeout', 'bind_dual_multipath_identity_with_idle_timeout', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer_with_idle_timeout', 'bind_multipath_alpns_nat_offer_with_idle_timeout', 'bind_multipath_bytes_with_idle_timeout', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'bind_resumable_multipath_with_idle_timeout', 'bind_multipath_identity_with_idle_timeout', 'bind_dual_multipath_identity_with_idle_timeout', 'bind_dual_multipath_nat_identity_with_idle_timeout', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path', 'bind_multipath_relay_socket',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -350,14 +350,14 @@ local iroh_mp_bind_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_step_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_close_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_route_handshake_with_idle_timeout: uint32 <cimport,nodecl>
-local iroh_mp_start_multipath_nat_route_handshake: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_route_handshake_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_multipath_handshake_output: uint32 <cimport,nodecl>
 local iroh_mp_adopt_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
-local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
-local iroh_mp_start_multipath_nat_offer_bytes: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_offer_with_idle_timeout: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_offer_bytes_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_bytes_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_negotiated_multipath_alpn: uint32 <cimport,nodecl>
@@ -397,8 +397,8 @@ local iroh_mp_peer_multipath_stream_code: uint32 <cimport,nodecl>
 local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
-local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
-local iroh_mp_bind_multipath_alpns_nat_offer: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_nat_offer_with_idle_timeout: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_alpns_nat_offer_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
@@ -415,7 +415,7 @@ local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
-local iroh_mp_bind_dual_multipath_nat_identity: uint32 <cimport,nodecl>
+local iroh_mp_bind_dual_multipath_nat_identity_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_bind_dual_multipath_identity_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_identity_with_idle_timeout: uint32 <cimport,nodecl>
 local iroh_mp_multipath_remote_id: uint32 <cimport,nodecl>
@@ -2389,7 +2389,7 @@ local function start_multipath_route_handshake_run(e: Env, args: *[0]Term, work:
 end
 
 local function start_multipath_nat_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,true,true,DEFAULT_IDLE_MS)
+  return start_client(e,args,1,nilptr,false,true,true,idle_milliseconds(e,args[6]))
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2397,11 +2397,11 @@ local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function start_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false,true,false,DEFAULT_IDLE_MS)
+  return start_client(e,args,0,nilptr,false,true,false,idle_milliseconds(e,args[6]))
 end
 
 local function start_nat_offer_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,true,false,DEFAULT_IDLE_MS)
+  return start_client(e,args,1,nilptr,false,true,false,idle_milliseconds(e,args[6]))
 end
 
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -3352,7 +3352,7 @@ local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function bind_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,true,false,false,false,DEFAULT_IDLE_MS)
+  return bind_listener(e,args,0,true,false,false,false,idle_milliseconds(e,args[6]))
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -3381,11 +3381,11 @@ end
 
 local function bind_dual_nat_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,2,true,args[4] == 1,true,true,DEFAULT_IDLE_MS)
+  return bind_listener(e,args,2,true,args[4] == 1,true,true,idle_milliseconds(e,args[6]))
 end
 
 local function bind_nat_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,true,false,false,false,DEFAULT_IDLE_MS)
+  return bind_listener(e,args,2,true,false,false,false,idle_milliseconds(e,args[6]))
 end
 
 local function used_alpns(listener: *Listener)
@@ -4768,14 +4768,14 @@ end
 
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
   if iroh_mp_start_multipath_route_handshake_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_route_handshake_with_idle_timeout,start_multipath_route_handshake_run) end
-  if iroh_mp_start_multipath_nat_route_handshake ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_route_handshake,start_multipath_nat_route_handshake_run) end
+  if iroh_mp_start_multipath_nat_route_handshake_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_route_handshake_with_idle_timeout,start_multipath_nat_route_handshake_run) end
   if iroh_mp_open_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_open_multipath_handshake_socket,open_multipath_handshake_socket_run) end
   if iroh_mp_read_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_read_multipath_handshake_socket,read_multipath_handshake_socket_run) end
   if iroh_mp_multipath_handshake_output ~= 0xffffffff then io_eff(iroh_mp_multipath_handshake_output,multipath_handshake_output_run) end
   if iroh_mp_adopt_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_adopt_multipath_handshake_socket,adopt_multipath_handshake_socket_run) end
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
-  if iroh_mp_start_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer,start_nat_offer_run) end
-  if iroh_mp_start_multipath_nat_offer_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_bytes,start_nat_offer_bytes_run) end
+  if iroh_mp_start_multipath_nat_offer_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_with_idle_timeout,start_nat_offer_run) end
+  if iroh_mp_start_multipath_nat_offer_bytes_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_bytes_with_idle_timeout,start_nat_offer_bytes_run) end
   if iroh_mp_start_multipath_bytes_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes_with_idle_timeout,start_bytes_run) end
   if iroh_mp_start_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_start_multipath_alpns,start_alpns_run) end
   if iroh_mp_negotiated_multipath_alpn ~= 0xffffffff then io_eff(iroh_mp_negotiated_multipath_alpn,negotiated_alpn_run) end
@@ -4813,8 +4813,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_read_multipath_application_close ~= 0xffffffff then io_eff(iroh_mp_read_multipath_application_close,application_close_reason_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
-  if iroh_mp_bind_multipath_alpns_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns_nat_offer,bind_nat_alpns_run) end
-  if iroh_mp_bind_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer,bind_nat_offer_run) end
+  if iroh_mp_bind_multipath_alpns_nat_offer_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns_nat_offer_with_idle_timeout,bind_nat_alpns_run) end
+  if iroh_mp_bind_multipath_nat_offer_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer_with_idle_timeout,bind_nat_offer_run) end
   if iroh_mp_read_multipath_nat_frame ~= 0xffffffff then io_eff(iroh_mp_read_multipath_nat_frame,read_nat_frame_run) end
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
@@ -4836,8 +4836,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_bind_resumable_multipath_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_bind_resumable_multipath_with_idle_timeout,bind_resumable_run) end
   if iroh_mp_bind_multipath_identity_with_idle_timeout ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_identity_with_idle_timeout,bind_identity_run) end
-  if iroh_mp_bind_dual_multipath_nat_identity ~= 0xffffffff then
-    io_eff(iroh_mp_bind_dual_multipath_nat_identity,bind_dual_nat_identity_run)
+  if iroh_mp_bind_dual_multipath_nat_identity_with_idle_timeout ~= 0xffffffff then
+    io_eff(iroh_mp_bind_dual_multipath_nat_identity_with_idle_timeout,bind_dual_nat_identity_run)
   end
   if iroh_mp_bind_dual_multipath_identity_with_idle_timeout ~= 0xffffffff then
     io_eff(iroh_mp_bind_dual_multipath_identity_with_idle_timeout,bind_dual_identity_run)
