@@ -668,6 +668,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   `set_multipath_path_idle_timeout` rearms one path with a new limit in
   milliseconds. Zero disables its local idle timer. The effective duration
   is at least three of that path's probe timeouts.
+  A validated path schedules a QUIC PING after five seconds without packets
+  in either direction, including when the path is on standby.
+  Passing zero to `set_multipath_keepalive` disables both the connection
+  and path heartbeats.
   Once a path is available, use `assign_stream_path` on a locally
   opened stream. `clear_stream_path` restores Picoquic's scheduling.
   Build with the Picoquic and picotls settings used by `check-quic-multipath`.
@@ -928,10 +932,11 @@ peer receives `PATH_ABANDON` with code `0x3e76` and reports
 three-probe floor, the last local path, and expiry of a single-path QUIC
 connection. Run `make check-quic-path-idle` with `UPSTREAM_QUIC_PATH_IDLE`
 set to the pinned Noq peer. It uses Iroh 1.5.0's raw-key TLS code and
-accepts `listen HOST`, `listen-base HOST` or
-`dial PRIMARY SECONDARY IDLE_MS validated`. The Picoquic endpoint’s relay-specific
-path defaults and the idle settings on its resumption and NAT constructors
-remain open.
+accepts `listen HOST`, `listen-base HOST`, `listen-heartbeat HOST` or
+`dial PRIMARY SECONDARY IDLE_MS validated`. IPv4 and IPv6 tests receive
+PINGs on the standby path while application streams use the original path.
+The Picoquic endpoint’s relay-specific path defaults and the idle settings
+on its resumption and NAT constructors remain open.
 
 Run `make check-quic-resumption-idle` with `UPSTREAM_QUIC_RESUMPTION_IDLE`
 set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and

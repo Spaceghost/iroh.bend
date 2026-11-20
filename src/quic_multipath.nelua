@@ -28,10 +28,13 @@ local native_sack_t <cimport,nodecl,codename 'picoquic_sack_list_t'> = @record{}
 local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer,send_queue:pointer,
   remote_error:uint64,remote_stop_error:uint64,fin_sent:cuint,reset_acked:cuint,sent_offset:uint64,sack_list:native_sack_t}
 local packet_context_t <cimport,nodecl,codename 'picoquic_packet_context_t'> = @record{pending_last:pointer}
-local tuple_t <cimport,nodecl,codename 'picoquic_tuple_t'> = @record{challenge_failed:cuint}
+local tuple_t <cimport,nodecl,codename 'picoquic_tuple_t'> = @record{
+  challenge_failed:cuint,challenge_verified:cuint,if_index:culong,p_remote_cnxid:pointer
+}
 local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{
   unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64,pkt_ctx:packet_context_t,
-  app_path_ctx:pointer,first_tuple:*tuple_t,path_is_demoted:cuint,retransmit_timer:uint64,latest_sent_time:uint64
+  app_path_ctx:pointer,first_tuple:*tuple_t,path_is_demoted:cuint,retransmit_timer:uint64,
+  last_packet_received_at:uint64,latest_sent_time:uint64,bytes_in_transit:uint64,cwin:uint64
 }
 local probe_packet_t <cimport,nodecl,codename 'picoquic_packet_t'> = @record{
   send_path:*path_t,send_time:uint64,offset:csize,ptype:cint,pc:cint,is_ack_eliciting:cuint,bytes:[1536]uint8
@@ -225,6 +228,8 @@ local function real_delete_abandoned_paths(cnx:*cnx_t,now:uint64,wake:*uint64)
     <cimport,codename '__real_picoquic_delete_abandoned_paths'> end
 local function picoquic_find_path_by_unique_id(cnx:*cnx_t,id:uint64):cint <cimport,nodecl> end
 local function picoquic_is_packet_ack_eliciting(packet:*probe_packet_t):cint <cimport,nodecl> end
+local function picoquic_is_sending_authorized_by_pacing(cnx:*cnx_t,path:*path_t,now:uint64,wake:*uint64):cint <cimport,nodecl> end
+local picoquic_frame_type_ping:uint8 <cimport,nodecl>
 local PICOQUIC_TRANSPORT_UNSTABLE_INTERFACE:uint64 <cimport,nodecl>
 local PICOQUIC_ERROR_PATH_LAST_REMAINING:cint <cimport,nodecl>
 local function picoquic_set_path_status(cnx: *cnx_t, id:uint64, status:cint): cint <cimport,nodecl> end
@@ -266,6 +271,7 @@ local function picoquic_dequeue_stateless_packet(quic: *quic_t): *stateless_t <c
 local function picoquic_delete_stateless_packet(packet: *stateless_t) <cimport,nodecl> end
 local picoquic_state_disconnected: cint <cimport,nodecl>
 local picoquic_state_disconnecting: cint <cimport,nodecl>
+local picoquic_state_ready: cint <cimport,nodecl>
 local picoquic_callback_almost_ready: cint <cimport,nodecl>
 local picoquic_callback_path_suspended: cint <cimport,nodecl>
 local picoquic_callback_path_deleted: cint <cimport,nodecl>
@@ -629,7 +635,7 @@ local Connection = @record{
   selected_alpn: *Alpn, peer_parameters: PeerParameters, detached: boolean, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
-  early: boolean, early_decided: boolean, keepalive_configured: boolean, idle_sample_at:uint64
+  early: boolean, early_decided: boolean, keepalive_configured: boolean, keepalive_disabled:boolean, idle_sample_at:uint64
 }
 local connections: *Connection
 local next_connection: uint32 = 1
@@ -2996,14 +3002,73 @@ local function pump_listener(listener: *Listener, now: uint64): uint32
   return 0
 end
 
+local function send_path_frame(conn:*Connection, path:*path_t, fd:cint, peer:*storage_t, source:*storage_t, frame:*uint8,
+    size:csize, iface:cint, now:uint64, tracking:**uint8): uint32
+  local cnx = conn.cnx
+  local length = picoquic_predict_packet_header_length(cnx,picoquic_packet_1rtt_protected,&path.pkt_ctx)
+  local checksum = picoquic_get_checksum_length(cnx,picoquic_epoch_1rtt)
+  local output: [IO_CAPACITY]uint8
+  if length + size + checksum > #output then return EMSGSIZE end
+  local packet = picoquic_create_packet(conn.quic)
+  if packet == nilptr then return ENOMEM end
+  packet.ptype = picoquic_packet_1rtt_protected
+  packet.pc = picoquic_packet_context_application
+  packet.offset = length
+  packet.send_path = path
+  packet.send_time = now
+  packet.is_ack_eliciting = 1
+  local payload = (@*[0]uint8)(&packet.bytes[0])
+  C.memcpy(&payload[length],frame,size)
+  local sent: csize
+  -- Consume the active path's packet number and apply its 1-RTT protection.
+  picoquic_finalize_and_protect_packet(cnx,packet,0,length + size,length,checksum,
+    &sent,&output[0],#output,path,now,1)
+  if sent == 0 then
+    picoquic_recycle_packet(conn.quic,packet)
+    return EIO
+  end
+  if tracking ~= nilptr then
+    -- The encrypted payload already contains the actual extension frame.
+    -- Describe its plaintext entry as a length-bearing datagram only in
+    -- Picoquic's retransmission queue. Its ACK/loss callbacks let Bend retry
+    -- the extension without exposing an unknown tag to Picoquic's ACK parser.
+    payload[length] = picoquic_frame_type_datagram_l
+    payload[length + 1] = (@uint8)(size - 2)
+  end
+  note_path_send(path,now)
+  local written:isize
+  if source ~= nilptr and conn.listener ~= nilptr and conn.listener.ipv4_fd >= 0 then
+    written = send_listener(conn.listener,peer,source,iface,&output[0],sent)
+  else
+    written = sendto(fd,&output[0],sent,0,peer,address_size(peer))
+  end
+  if written < 0 then return (@uint32)(errno) end
+  if written ~= (@isize)(sent) then return EIO end
+  if tracking ~= nilptr then $tracking = &payload[length + 2] end
+  return 0
+end
+
 local function time_words(e:Env, us:uint64):Term
   return io_node(e,iroh_mp_IdleMicros,us >> 32,us & 0xffffffff)
 end
 
-local function idle_samples(e:Env,conn:*Connection,now:uint64,default_ms:uint32):Term
-  local samples = term_pak(iroh_mp_Nil,0)
-  if not idle_managed(conn.cnx) then return samples end
+local function heartbeat_path(path:*path_t):boolean
+  local tuple = path.first_tuple
+  return path.path_is_demoted == 0 and tuple.challenge_verified ~= 0 and tuple.challenge_failed == 0 and
+    tuple.p_remote_cnxid ~= nilptr
+end
+
+local function last_path_packet(path:*path_t):uint64
+  local received = path.last_packet_received_at
+  return received > path.latest_sent_time and received or path.latest_sent_time
+end
+
+local function timer_samples(e:Env,conn:*Connection,now:uint64,default_ms:uint32):Term
+  local idle = term_pak(iroh_mp_Nil,0)
+  local heartbeat = idle
+  if not idle_managed(conn.cnx) then return io_tup(e,idle,heartbeat) end
   conn.idle_sample_at = now
+  local keepalive = not conn.keepalive_disabled and conn.cnx.cnx_state == picoquic_state_ready
   local paths = (@*[0]*path_t)(conn.cnx.path)
   for i = 0,<conn.cnx.nb_paths do
     local path = paths[i]
@@ -3013,11 +3078,19 @@ local function idle_samples(e:Env,conn:*Connection,now:uint64,default_ms:uint32)
       if limit ~= 0 and now >= activity.since then
         local times = io_tup(e,time_words(e,now - activity.since),time_words(e,activity.pto))
         local sample = io_tup(e,path.unique_path_id,io_tup(e,time_words(e,(@uint64)(limit) * 1000),times))
-        samples = io_node(e,iroh_mp_Con,sample,samples)
+        idle = io_node(e,iroh_mp_Con,sample,idle)
+      end
+    end
+    if keepalive and heartbeat_path(path) then
+      local last = last_path_packet(path)
+      if now >= last then
+        local age = (now - last) // 1000
+        local sample = io_tup(e,path.unique_path_id,age <= 0xffffffff and age or 0xffffffff)
+        heartbeat = io_node(e,iroh_mp_Con,sample,heartbeat)
       end
     end
   end
-  return samples
+  return io_tup(e,idle,heartbeat)
 end
 
 local function read_step(e:Env,conn:*Connection,default_ms:uint32):Term
@@ -3028,20 +3101,24 @@ local function read_step(e:Env,conn:*Connection,default_ms:uint32):Term
   if error == 0 then error = read_packets(conn,now) end
   if conn.closed or conn.buffer_error then return closed_error(e,conn) end
   if error ~= 0 then return io_fail(e,error,'QUIC packet I/O failed') end
-  return io_done(e,idle_samples(e,conn,now,default_ms))
+  return io_done(e,timer_samples(e,conn,now,default_ms))
 end
 
 local function read_step_run(e:Env,args:*[0]Term,work:*IoWork):Term
   return io_tup(e,args[0],read_step(e,find_connection(e,args[0]),(@uint32)(args[1])))
 end
 
+local function pop_timer_path(e:Env,paths:*Term):Term
+  local cells:[2]Term
+  local location = ctr_take(e,$paths,2,&cells[0])
+  if location ~= 0 then spare_free(e,cls_fit(2),location) end
+  $paths = cells[1]
+  return cells[0]
+end
+
 local function apply_path_expiry(e:Env,conn:*Connection,expired:Term,reason:uint64,now:uint64):cint
   while term_tag(expired) == TAG_CTR and term_aux(expired) == iroh_mp_Con do
-    local cells:[2]Term
-    local location = ctr_take(e,expired,2,&cells[0])
-    if location ~= 0 then spare_free(e,cls_fit(2),location) end
-    expired = cells[1]
-    local id = cells[0]
+    local id = pop_timer_path(e,&expired)
     local path = native_path(conn.cnx,id)
     if path ~= nilptr and path.path_is_demoted == 0 then
       local activity = (@*IdleActivity)(path.app_path_ctx)
@@ -3058,7 +3135,44 @@ local function apply_path_expiry(e:Env,conn:*Connection,expired:Term,reason:uint
   return 0
 end
 
-local function write_step(e:Env,conn:*Connection,expired:Term,reason:uint64):Term
+local function send_path_heartbeat(conn:*Connection,path:*path_t,now:uint64):uint32
+  local wake: uint64 = 0xffffffffffffffff
+  if path.cwin <= path.bytes_in_transit or path.cwin - path.bytes_in_transit < 64 or
+      picoquic_is_sending_authorized_by_pacing(conn.cnx,path,now,&wake) == 0 then return 0 end
+  local source:storage_t, peer:storage_t
+  local id = path.unique_path_id
+  if picoquic_get_path_addr(conn.cnx,id,1,&source) ~= 0 or picoquic_get_path_addr(conn.cnx,id,2,&peer) ~= 0 then
+    return 0
+  end
+  local fd:cint
+  if conn.listener ~= nilptr then
+    fd = listener_socket(conn.listener,&source,&peer)
+  else
+    local route = route_packet(conn,&source,&peer)
+    if route == nilptr then return 0 end
+    fd = route.fd
+    if bootstrap_tuple(route,&source,&peer) then peer = route.peer end
+  end
+  if fd < 0 then return 0 end
+  local frame:[2]uint8 = {picoquic_frame_type_ping,0}
+  local error = send_path_frame(conn,path,fd,&peer,&source,&frame[0],#frame,(@cint)(path.first_tuple.if_index),now,nilptr)
+  local code = (@cint)(error)
+  if code == EAGAIN or code == EINTR or socket_unreachable(code) or local_path_error(conn,code) then return 0 end
+  return error
+end
+
+local function apply_path_heartbeats(e:Env,conn:*Connection,heartbeats:Term,now:uint64):uint32
+  while term_tag(heartbeats) == TAG_CTR and term_aux(heartbeats) == iroh_mp_Con do
+    local path = native_path(conn.cnx,pop_timer_path(e,&heartbeats))
+    if path ~= nilptr and heartbeat_path(path) and last_path_packet(path) < conn.idle_sample_at then
+      local error = send_path_heartbeat(conn,path,now)
+      if error ~= 0 then return error end
+    end
+  end
+  return 0
+end
+
+local function write_step(e:Env,conn:*Connection,expired:Term,reason:uint64,heartbeats:Term):Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   local now = picoquic_current_time()
   if idle_managed(conn.cnx) then
@@ -3066,6 +3180,10 @@ local function write_step(e:Env,conn:*Connection,expired:Term,reason:uint64):Ter
     if status ~= 0 then return io_fail(e,EIO,picoquic_error_name((@uint64)(status))) end
   end
   local error = write_packet(conn,now)
+  if error == 0 and conn.output_size == 0 and not conn.closed and not conn.keepalive_disabled and
+      conn.cnx.cnx_state == picoquic_state_ready then
+    error = apply_path_heartbeats(e,conn,heartbeats,now)
+  end
   close_retired_sockets(conn)
   if conn.closed or conn.buffer_error then return closed_error(e,conn) end
   if error ~= 0 then return io_fail(e,error,'QUIC packet I/O failed') end
@@ -3075,7 +3193,7 @@ local function write_step(e:Env,conn:*Connection,expired:Term,reason:uint64):Ter
 end
 
 local function write_step_run(e:Env,args:*[0]Term,work:*IoWork):Term
-  return io_tup(e,args[0],write_step(e,find_connection(e,args[0]),args[1],args[2]))
+  return io_tup(e,args[0],write_step(e,find_connection(e,args[0]),args[1],args[2],args[3]))
 end
 
 local function optional_id(e: Env, id: uint64): Term
@@ -3442,52 +3560,6 @@ local function nat_probe(inbox:*NatInbox, peer:*storage_t, raw:*uint8, now:uint6
   return nilptr,available
 end
 
-local function send_nat_packet(conn:*Connection, path:*path_t, fd:cint, peer:*storage_t, source:*storage_t, frame:*uint8,
-    size:csize, now:uint64, tracking:**uint8): uint32
-  local cnx = conn.cnx
-  local length = picoquic_predict_packet_header_length(cnx,picoquic_packet_1rtt_protected,&path.pkt_ctx)
-  local checksum = picoquic_get_checksum_length(cnx,picoquic_epoch_1rtt)
-  local output: [IO_CAPACITY]uint8
-  if length + size + checksum > #output then return EMSGSIZE end
-  local packet = picoquic_create_packet(conn.quic)
-  if packet == nilptr then return ENOMEM end
-  packet.ptype = picoquic_packet_1rtt_protected
-  packet.pc = picoquic_packet_context_application
-  packet.offset = length
-  packet.send_path = path
-  packet.send_time = now
-  packet.is_ack_eliciting = 1
-  local payload = (@*[0]uint8)(&packet.bytes[0])
-  C.memcpy(&payload[length],frame,size)
-  local sent: csize
-  -- Consume the active path's packet number and apply its 1-RTT protection.
-  picoquic_finalize_and_protect_packet(cnx,packet,0,length + size,length,checksum,
-    &sent,&output[0],#output,path,now,1)
-  if sent == 0 then
-    picoquic_recycle_packet(conn.quic,packet)
-    return EIO
-  end
-  if tracking ~= nilptr then
-    -- The encrypted payload already contains the actual extension frame.
-    -- Describe its plaintext entry as a length-bearing datagram only in
-    -- Picoquic's retransmission queue. Its ACK/loss callbacks let Bend retry
-    -- the extension without exposing an unknown tag to Picoquic's ACK parser.
-    payload[length] = picoquic_frame_type_datagram_l
-    payload[length + 1] = (@uint8)(size - 2)
-  end
-  note_path_send(path,now)
-  local written:isize
-  if source ~= nilptr and conn.listener ~= nilptr and conn.listener.ipv4_fd >= 0 then
-    written = send_listener(conn.listener,peer,source,0,&output[0],sent)
-  else
-    written = sendto(fd,&output[0],sent,0,peer,address_size(peer))
-  end
-  if written < 0 then return (@uint32)(errno) end
-  if written ~= (@isize)(sent) then return EIO end
-  if tracking ~= nilptr then $tracking = &payload[length + 2] end
-  return 0
-end
-
 local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
@@ -3523,7 +3595,7 @@ local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): T
     fd = udp.fd
   end
   local path = ((@*[0]*path_t)(conn.cnx.path))[0]
-  local error = send_nat_packet(conn,path,fd,&peer,nilptr,&raw[0],CHALLENGE_SIZE,now,nilptr)
+  local error = send_path_frame(conn,path,fd,&peer,nilptr,&raw[0],CHALLENGE_SIZE,0,now,nilptr)
   if error == EAGAIN or error == EINTR then return io_done(e,0) end
   if error ~= 0 then return io_fail(e,error,'could not send NAT traversal challenge') end
   available.peer = peer
@@ -3601,7 +3673,7 @@ local function advertise_nat(e:Env, conn:*Connection, value:Term): Term
   local path,fd = nat_control_route(conn,&peer,&source)
   if path == nilptr then return io_done(e,0) end
   local now = picoquic_current_time()
-  local error = send_nat_packet(conn,path,fd,&peer,&source,&raw.bytes[0],raw.size,now,&state.tracked_payload)
+  local error = send_path_frame(conn,path,fd,&peer,&source,&raw.bytes[0],raw.size,0,now,&state.tracked_payload)
   if error == 0 then
     state.tracked_at = now
     return io_done(e,0)
@@ -4097,7 +4169,8 @@ local function keepalive_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
   conn.keepalive_configured = true
-  if args[1] == 0 then picoquic_disable_keep_alive(conn.cnx)
+  conn.keepalive_disabled = args[1] == 0
+  if conn.keepalive_disabled then picoquic_disable_keep_alive(conn.cnx)
   else picoquic_enable_keep_alive(conn.cnx,args[1] * 1000) end
   return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
 end

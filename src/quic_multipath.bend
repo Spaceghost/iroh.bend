@@ -172,11 +172,14 @@ type IdleDuration is Data:
 def PathIdleSample() -> Type:
   U32 & (IdleDuration & (IdleDuration & IdleDuration))
 
+def PathTimers() -> Type:
+  List<&1,PathIdleSample()> & List<&1,U32 & U32>
+
 def read_multipath_step(conn: MultipathConnection, default_path_idle_ms: U32)
-    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>>):
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,PathTimers()>):
   import "./quic_multipath.c"
 
-def write_multipath_step(conn: MultipathConnection, expired: List<&1,U32>, reason: U32)
+def write_multipath_step(conn: MultipathConnection, expired: List<&1,U32>, reason: U32, heartbeats: List<&1,U32>)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
@@ -194,7 +197,7 @@ def reached_pto_floor(age: IdleDuration, pto: IdleDuration) -> Bool:
   (U32.is_lt(high,1431655765) || (U32.is_eq(high,1431655765) && U32.is_zero(carry))) &&
     idle_time_ge(age,IdleMicros{U32.add(U32.mul(high,3),carry),U32.or(U32.shln(top,16n),U32.and(bottom,65535))})
 
-def add_expired(path: U32, rest: List<&1,U32>, due: Bool) -> List<&1,U32>:
+def add_due_path(path: U32, rest: List<&1,U32>, due: Bool) -> List<&1,U32>:
   match due:
     case True{}:
       Con{path,rest}
@@ -206,14 +209,21 @@ def expired_multipath_samples(samples: List<&1,PathIdleSample()>) -> List<&1,U32
     case Nil{}:
       []
     case Con{(path,(limit,(+age,pto))),rest}:
-      add_expired(path,expired_multipath_samples(rest),idle_time_ge(age,limit) && reached_pto_floor(age,pto))
+      add_due_path(path,expired_multipath_samples(rest),idle_time_ge(age,limit) && reached_pto_floor(age,pto))
 
-def finish_multipath_step(progress: MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>>)
+def multipath_heartbeats(samples: List<&1,U32 & U32>) -> List<&1,U32>:
+  match samples:
+    case Nil{}:
+      []
+    case Con{(path,age_ms),rest}:
+      add_due_path(path,multipath_heartbeats(rest),U32.is_ge(age_ms,5000))
+
+def finish_multipath_step(progress: MultipathConnection & Result<&1,&1,U32 & String,PathTimers()>)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   match progress:
-    case (conn,Done{samples}):
+    case (conn,Done{(idle,activity)}):
       # PATH_UNSTABLE_OR_POOR is the Iroh wire code for local path expiry.
-      write_multipath_step(conn,expired_multipath_samples(samples),15990)
+      write_multipath_step(conn,expired_multipath_samples(idle),15990,multipath_heartbeats(activity))
     case (conn,Fail{error}):
       IO.pure(MultipathConnection & Result<&1,&1,U32 & String,U32>,(conn,Fail{error}))
 
@@ -221,7 +231,7 @@ def finish_multipath_step(progress: MultipathConnection & Result<&1,&1,U32 & Str
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection) -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   do IO<MultipathConnection & Result<&1,&1,U32 & String,U32>>:
-    progress : MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>> <-
+    progress : MultipathConnection & Result<&1,&1,U32 & String,PathTimers()> <-
       read_multipath_step(conn,15000)
     finish_multipath_step(progress)
 

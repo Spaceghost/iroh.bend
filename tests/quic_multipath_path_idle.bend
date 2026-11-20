@@ -103,22 +103,50 @@ def validated(conn: Q.MultipathConnection, +path: U32, mode: Bool) -> IO(Q.Multi
     case False{}:
       IO.pure(Q.MultipathConnection,conn)
 
-def dial_candidate(opened: Q.MultipathConnection & U32, idle_ms: U32, validate: Bool) -> IO(Unit):
+def active_original(fuel: Nat, conn: Q.MultipathConnection) -> IO(Q.MultipathConnection):
+  match fuel:
+    case 0n:
+      IO.pure(Q.MultipathConnection,conn)
+    case 1n+rest:
+      do IO<Q.MultipathConnection>:
+        alive : Q.MultipathConnection <- exchange(conn,0,11)
+        IO.sleep(25)
+        active_original(rest,alive)
+
+def check_heartbeat(conn: Q.MultipathConnection, +path: U32) -> IO(Unit):
+  do IO<Unit>:
+    result : Q.MultipathConnection & Result<&1,&1,U32 & String,Unit> <- Q.set_multipath_standby(conn,path,1)
+    standby : Q.MultipathConnection & Unit <- Peer.ok(Unit,result)
+    announce("CANDIDATE ",path)
+    active : Q.MultipathConnection <- active_original(410n,Peer.released(standby))
+    still_open : Q.MultipathConnection <- Peer.wait_path(1n,active,path)
+    original : Q.MultipathConnection & U32 <- check_path(still_open,0)
+    survival(original,c => exchange(c,0,77))
+
+def candidate_test(conn: Q.MultipathConnection, +path: U32, heartbeat: Bool) -> IO(Unit):
+  match heartbeat:
+    case True{}:
+      check_heartbeat(conn,path)
+    case False{}:
+      do IO<Unit>:
+        announce("CANDIDATE ",path)
+        await_expiry(1200n,conn,path,True{})
+
+def dial_candidate(opened: Q.MultipathConnection & U32, idle_ms: U32, +mode: U32) -> IO(Unit):
   (conn,+path) = opened
   do IO<Unit>:
-    ready : Q.MultipathConnection <- validated(conn,path,validate)
+    ready : Q.MultipathConnection <- validated(conn,path,U32.is_ne(mode,0))
     original : Q.MultipathConnection <- set_idle(ready,0,1200)
     configured : Q.MultipathConnection <- set_idle(original,path,idle_ms)
-    announce("CANDIDATE ",path)
-    await_expiry(1200n,configured,path,True{})
+    candidate_test(configured,path,U32.is_eq(mode,2))
 
-def dial(+host: String, port: U32, secondary: U32, idle_ms: U32, validate: Bool) -> IO(Unit):
+def dial(+host: String, port: U32, secondary: U32, idle_ms: U32, mode: U32) -> IO(Unit):
   do IO<Unit>:
     conn : Q.MultipathConnection <- IO.try(Q.MultipathConnection,
       Q.connect_multipath(host,port,List.replicate(U32,32n,73),Peer.fixture_key(0),"iroh-bend/compat/1",3000n))
     primed : Q.MultipathConnection <- exchange(conn,0,11)
     opened : Q.MultipathConnection & U32 <- Peer.probe(2000n,primed,host,secondary)
-    dial_candidate(opened,idle_ms,validate)
+    dial_candidate(opened,idle_ms,mode)
 
 def listen_candidate(ready: Q.MultipathConnection & U32, idle_ms: U32) -> IO(Unit):
   (conn,+path) = ready
@@ -150,10 +178,10 @@ def listen(host: String, idle_ms: U32) -> IO(Unit):
       Q.bind_multipath(host,0,List.replicate(U32,32n,73),Peer.fixture_key(0),"iroh-bend/compat/1"))
     wait_for_accept(bound,idle_ms)
 
-def dial_options(host: String, port: Maybe<&2,U32>, secondary: Maybe<&2,U32>, idle: Maybe<&2,U32>, validate: Bool) -> IO(Unit):
+def dial_options(host: String, port: Maybe<&2,U32>, secondary: Maybe<&2,U32>, idle: Maybe<&2,U32>, mode: U32) -> IO(Unit):
   match port secondary idle:
     case Some{primary} Some{alternate} Some{idle_ms}:
-      dial(host,primary,alternate,idle_ms,validate)
+      dial(host,primary,alternate,idle_ms,mode)
     case _ _ _:
       IO.die(Unit,2,"expected numeric ports and timeout")
 
@@ -223,8 +251,12 @@ def listen_options(host: String, idle: Maybe<&2,U32>) -> IO(Unit):
 
 def run(args: List<String>) -> IO(Unit):
   match args:
-    case [_,host,port,secondary,idle,mode]:
-      dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),String.eq(mode,"validated"))
+    case [_,host,port,secondary,idle,"heartbeat"]:
+      dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),2)
+    case [_,host,port,secondary,idle,"validated"]:
+      dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),1)
+    case [_,host,port,secondary,idle,"pending"]:
+      dial_options(host,U32.read(port),U32.read(secondary),U32.read(idle),0)
     case [_,host,port,mode]:
       one_path(host,U32.read(port),String.eq(mode,"last"))
     case [_,host,idle]:

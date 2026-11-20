@@ -37,7 +37,7 @@ class Peer:
         return self.match(lambda observed: observed == line, timeout)[0]
 
     def port(self):
-        return int(self.match(str.isdecimal, 5)[1])
+        return int(self.match(str.isdecimal, 15)[1])
 
     def done(self):
         assert self.proc.wait(timeout=3) == 0, (self.proc.args, self.lines)
@@ -166,6 +166,22 @@ def last_path(bend, reference, host):
     print(f"PASS {host} the last local path stayed open through its idle deadline")
 
 
+def heartbeat(bend, reference, host):
+    with Peer(reference, "listen-heartbeat", host) as upstream:
+        port = upstream.port()
+        with AlternateRoute(host, port, "both") as alternate:
+            with Peer(bend, host, str(port), str(alternate.port), "8000", "heartbeat") as local:
+                start = local.expect("CANDIDATE 1")
+                elapsed = local.expect("SURVIVOR 0", 25) - start
+                _, event = upstream.match(lambda line: line.startswith("HEARTBEATS "))
+                count = int(event.split()[1])
+                assert elapsed >= 10 and count >= 1, (elapsed, upstream.lines)
+                upstream.expect("SURVIVOR 0 true")
+                local.done()
+                upstream.done()
+    print(f"PASS {host} Noq received {count} PING frames on the reachable standby path")
+
+
 def single_path(bend, reference, host):
     with Peer(reference, "listen-base", host) as upstream:
         with Peer(bend, host, str(upstream.port()), "base") as local:
@@ -178,7 +194,7 @@ def single_path(bend, reference, host):
 
 def main():
     bend, reference = map(os.path.abspath, sys.argv[1:])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         cases = []
         for host in ("127.0.0.1", "::1"):
             cases.extend((
@@ -189,6 +205,7 @@ def main():
                 pool.submit(listen, bend, reference, host),
                 pool.submit(last_path, bend, reference, host),
                 pool.submit(single_path, bend, reference, host),
+                pool.submit(heartbeat, bend, reference, host),
             ))
         for case in cases:
             case.result()
