@@ -156,12 +156,54 @@ def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnecti
     second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,listener)
     serve_two(second,conn,mode)
 
+def updated(result: Quic.MultipathListener & Result<&1,&1,U32 & String,Unit>, expected: U32)
+    -> IO(Quic.MultipathListener):
+  match result expected:
+    case (listener,Done{_}) 0:
+      IO.pure(Quic.MultipathListener,listener)
+    case (listener,Fail{(22,_)}) 22:
+      IO.pure(Quic.MultipathListener,listener)
+    case (listener,_) _:
+      do IO<Quic.MultipathListener>:
+        Quic.close_multipath_listener(listener)
+        IO.die(Quic.MultipathListener,1,"unexpected result from ALPN update")
+
+def set_alpns(listener: Quic.MultipathListener, alpns: List<&2,List<&2,U32>>, expected: U32)
+    -> IO(Quic.MultipathListener):
+  do IO<Quic.MultipathListener>:
+    result : Quic.MultipathListener & Result<&1,&1,U32 & String,Unit> <- Quic.set_multipath_alpns(listener,alpns)
+    updated(result,expected)
+
+def pause_and_exchange(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection)
+    -> IO(Unit):
+  (listener,conn) = second
+  do IO<Unit>:
+    paused : Quic.MultipathListener <- set_alpns(listener,[],0)
+    old_protocol : Quic.MultipathConnection <- Fixture.require_alpn(first,Fixture.text_alpn())
+    new_protocol : Quic.MultipathConnection <- Fixture.require_alpn(conn,Fixture.binary_alpn())
+    IO.print("PAUSED")
+    exchange(old_protocol,55,11,22)
+    exchange(new_protocol,66,33,44)
+    Quic.close_multipath_listener(paused)
+    IO.print("PASS both connections survived live ALPN updates")
+
+def reconfigure(first: Quic.MultipathListener & Quic.MultipathConnection) -> IO(Unit):
+  (listener,conn) = first
+  do IO<Unit>:
+    enabled : Quic.MultipathListener <- set_alpns(listener,[Fixture.binary_alpn()],0)
+    unchanged : Quic.MultipathListener <- set_alpns(enabled,[[]],22)
+    IO.print("SWITCHED")
+    second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,unchanged)
+    pause_and_exchange(second,conn)
+
 def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
   match mode:
     case 0:
       serve_two_connections(first,0)
     case 3:
       serve_two_connections(first,3)
+    case 4:
+      reconfigure(first)
     case _:
       serve_affinity(first)
 
@@ -195,12 +237,26 @@ def listen_multiple(host: String) -> IO(Unit):
         [Fixture.binary_alpn(),Fixture.text_alpn()]))
     announce(bound,3)
 
+def enable_live(bound: Quic.MultipathListener & U32) -> IO(Unit):
+  (listener,port) = bound
+  do IO<Unit>:
+    enabled : Quic.MultipathListener <- set_alpns(listener,[Fixture.text_alpn()],0)
+    announce((enabled,port),4)
+
+def listen_live(host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_multipath_alpns(host,0,List.replicate(U32,32n,42),fixture_peer(),[]))
+    enable_live(bound)
+
 def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
   match mode:
     case Some{2}:
       listen_binary(host)
     case Some{3}:
       listen_multiple(host)
+    case Some{4}:
+      listen_live(host)
     case Some{number}:
       listen_text(host,number)
     case None{}:

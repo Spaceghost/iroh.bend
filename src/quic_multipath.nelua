@@ -201,7 +201,8 @@ local names = {
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'bind_multipath', 'bind_multipath_bytes', 'bind_multipath_alpns', 'accept_multipath', 'close_multipath_listener',
+  'bind_multipath', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram',
   'MultipathConnection', 'MultipathListener', 'MultipathReadPending', 'MultipathReadFin', 'MultipathReadBytes',
@@ -233,6 +234,7 @@ local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
+local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath_listener: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath_stream: uint32 <cimport,nodecl>
@@ -297,7 +299,7 @@ local Stream = @record{
   incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean
 }
 local Datagram = @record{next:pointer,size:csize}
-local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean}
+local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean, retained:boolean}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
@@ -391,7 +393,7 @@ end
 local VerifyCallback = @function(*verify_t,*tls_t,cstring,pointer,pointer,*iov_t,csize): cint
 local PinnedKey = @record{
   backend: pin_t, original: VerifyCallback, response: [4]ext_t, raw_type: uint8,
-  alpns: *Alpn, selected: *Alpn, check_alpn: extension_cb_t
+  alpns: *Alpn, retired: *Alpn, selected: *Alpn, check_alpn: extension_cb_t
 }
 
 local function pinned(quic: *quic_t): *PinnedKey
@@ -442,6 +444,7 @@ local function free_pin(verify: *verify_t)
   local pin = (@*PinnedKey)(verify)
   ptls_openssl_raw_pubkey_dispose_verify_certificate(&pin.backend)
   free_alpns(pin.alpns)
+  free_alpns(pin.retired)
   C.free(pin)
 end
 
@@ -1160,7 +1163,8 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32): Term
   local key: [32]uint8
   local seed_size = bytes_from_list(e,args[2],&seed[0],32)
   local key_size = bytes_from_list(e,args[3],&key[0],32)
-  if size == 0 or seed_size ~= 32 or key_size ~= 32 or alpns == nilptr then
+  local empty = mode == 2 and term_aux(args[4]) == iroh_mp_Nil
+  if size == 0 or seed_size ~= 32 or key_size ~= 32 or (alpns == nilptr and not empty) then
     return io_fail(e,EINVAL,'invalid numeric listen address, Ed25519 key, or ALPN')
   end
   local v4 = (@*addr_t)(&local_addr)
@@ -1234,6 +1238,58 @@ end
 
 local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return bind_listener(e,args,2)
+end
+
+local function used_alpns(listener: *Listener)
+  local cnx = picoquic_get_first_cnx(listener.quic)
+  while cnx ~= nilptr do
+    local callback = (@pointer)(picoquic_get_callback_function(cnx))
+    local ctx = picoquic_get_callback_context(cnx)
+    local name: *Alpn
+    if ctx ~= nilptr then
+      if callback == (@pointer)(server_event) and ctx ~= listener then
+        name = (@*Alpn)(ctx)
+      elseif callback == (@pointer)(on_event) then
+        name = ((@*Connection)(ctx)).selected_alpn
+      end
+    end
+    if name ~= nilptr then name.retained = true end
+    cnx = picoquic_get_next_cnx(cnx)
+  end
+end
+
+local function retain_alpns(first: *Alpn, kept: *Alpn): *Alpn
+  while first ~= nilptr do
+    local next = (@*Alpn)(first.next)
+    if first.retained then
+      first.retained = false
+      first.next = kept
+      kept = first
+    else
+      C.free(first)
+    end
+    first = next
+  end
+  return kept
+end
+
+local function replace_alpns(e: Env, listener: *Listener, term: Term): Term
+  if listener == nilptr then return io_fail(e,EBADF,'multipath listener closed') end
+  local alpns = read_alpns(e,term,2)
+  if alpns == nilptr and term_aux(term) ~= iroh_mp_Nil then
+    return io_fail(e,EINVAL,'invalid QUIC ALPN list')
+  end
+  -- Native listener operations are serialized. Keep entries referenced by
+  -- in-progress handshakes or active connections across configuration changes.
+  local pin = pinned(listener.quic)
+  used_alpns(listener)
+  pin.retired = retain_alpns(pin.alpns,retain_alpns(pin.retired,nilptr))
+  pin.alpns = alpns
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function set_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],replace_alpns(e,find_listener(e,args[0]),args[1]))
 end
 
 local function accept_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -1648,6 +1704,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
+  if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end
   if iroh_mp_accept_multipath ~= 0xffffffff then io_eff(iroh_mp_accept_multipath,accept_run) end
   if iroh_mp_close_multipath_listener ~= 0xffffffff then io_eff(iroh_mp_close_multipath_listener,close_listener_run) end
   if iroh_mp_accept_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_accept_multipath_stream,accept_stream_run) end

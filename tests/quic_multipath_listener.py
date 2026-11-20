@@ -1,4 +1,5 @@
 import os
+import selectors
 import subprocess
 import sys
 
@@ -11,12 +12,21 @@ def check(listener, fixture, host, mode, listener_mode="0"):
         command = ("env", "IROH_MULTIPATH_BINARY_ALPN=1", *command)
     if listener_mode == "3":
         command = ("env", "IROH_MULTIPATH_MULTIPLE_ALPNS=1", *command)
+    if listener_mode == "4":
+        command = ("env", "IROH_MULTIPATH_LIVE_ALPNS=1", *command)
     with process(*command) as iroh:
         read_address(iroh)
         with process(listener, host, listener_mode) as bend:
             port = read_address(bend)
             address = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
             iroh.stdin.write(f"{address}\n".encode())
+            if listener_mode == "4":
+                with selectors.DefaultSelector() as ready:
+                    ready.register(bend.stdout, selectors.EVENT_READ)
+                    for expected in (b"SWITCHED\n", b"PAUSED\n"):
+                        if not ready.select(10) or bend.stdout.readline() != expected:
+                            raise RuntimeError(f"Bend did not reach {expected.strip().decode()} on {host}")
+                        iroh.stdin.write(expected)
             output, _ = bend.communicate(timeout=25)
             print(output.decode(), end="", flush=True)
             report, _ = iroh.communicate(timeout=5)
@@ -48,3 +58,5 @@ if __name__ == "__main__":
             check(listener, fixture, host, mode, "2")
         if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":
             check(listener, fixture, host, mode, "3")
+        if os.environ.get("CHECK_LIVE_ALPNS") == "1":
+            check(listener, fixture, host, mode, "4")
