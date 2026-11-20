@@ -166,10 +166,68 @@ def open_multipath_nat_path(conn: MultipathConnection, ip: List<&2,U32>, port: U
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
   import "./quic_multipath.c"
 
+type IdleDuration is Data:
+  IdleMicros{high: U32, low: U32}
+
+def PathIdleSample() -> Type:
+  U32 & (IdleDuration & (IdleDuration & IdleDuration))
+
+def read_multipath_step(conn: MultipathConnection, default_path_idle_ms: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>>):
+  import "./quic_multipath.c"
+
+def write_multipath_step(conn: MultipathConnection, expired: List<&1,U32>, reason: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+def idle_time_ge(a: IdleDuration, b: IdleDuration) -> Bool:
+  IdleMicros{+a_high,a_low} = a
+  IdleMicros{+b_high,b_low} = b
+  U32.is_gt(a_high,b_high) || (U32.is_eq(a_high,b_high) && U32.is_ge(a_low,b_low))
+
+def reached_pto_floor(age: IdleDuration, pto: IdleDuration) -> Bool:
+  IdleMicros{+high,+low} = pto
+  # Multiply in 16-bit pieces to carry the low word into the high word.
+  +bottom = U32.mul(U32.and(low,65535),3)
+  +top = U32.add(U32.mul(U32.shrn(low,16n),3),U32.shrn(bottom,16n))
+  +carry = U32.shrn(top,16n)
+  (U32.is_lt(high,1431655765) || (U32.is_eq(high,1431655765) && U32.is_zero(carry))) &&
+    idle_time_ge(age,IdleMicros{U32.add(U32.mul(high,3),carry),U32.or(U32.shln(top,16n),U32.and(bottom,65535))})
+
+def add_expired(path: U32, rest: List<&1,U32>, due: Bool) -> List<&1,U32>:
+  match due:
+    case True{}:
+      Con{path,rest}
+    case False{}:
+      rest
+
+def expired_multipath_samples(samples: List<&1,PathIdleSample()>) -> List<&1,U32>:
+  match samples:
+    case Nil{}:
+      []
+    case Con{(path,(limit,(+age,pto))),rest}:
+      add_expired(path,expired_multipath_samples(rest),idle_time_ge(age,limit) && reached_pto_floor(age,pto))
+
+def finish_multipath_step(progress: MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>>)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  match progress:
+    case (conn,Done{samples}):
+      # PATH_UNSTABLE_OR_POOR is the Iroh wire code for local path expiry.
+      write_multipath_step(conn,expired_multipath_samples(samples),15990)
+    case (conn,Fail{error}):
+      IO.pure(MultipathConnection & Result<&1,&1,U32 & String,U32>,(conn,Fail{error}))
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
-def step_multipath(conn: MultipathConnection)
-    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+def step_multipath(conn: MultipathConnection) -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  do IO<MultipathConnection & Result<&1,&1,U32 & String,U32>>:
+    progress : MultipathConnection & Result<&1,&1,U32 & String,List<&1,PathIdleSample()>> <-
+      read_multipath_step(conn,15000)
+    finish_multipath_step(progress)
+
+# Override one path's local timer and rearm it. Zero disables the path timer.
+def set_multipath_path_idle_timeout(conn: MultipathConnection, path: U32, idle_ms: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_multipath.c"
 
 # Step the authenticated client connection until its peer sends a ticket.

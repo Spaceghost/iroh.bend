@@ -651,6 +651,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   have already selected a protocol keep it.
   Call `probe_multipath` to open a second
   UDP path on the same connection. Drive progress with `step_multipath`.
+  Each direct path has a 15-second local idle timeout.
+  `set_multipath_path_idle_timeout` rearms one path with a new limit in
+  milliseconds. Zero disables its local idle timer. The effective duration
+  is at least three of that path's probe timeouts.
   Once a path is available, use `assign_stream_path` on a locally
   opened stream. `clear_stream_path` restores Picoquic's scheduling.
   Build with the Picoquic and picotls settings used by `check-quic-multipath`.
@@ -902,8 +906,19 @@ maximum through the pinned direct dial and listen APIs and the endpoint route
 and lookup dialers. Iroh checked the negotiated value on direct IPv4 and IPv6
 and on relay-only WS and WSS routes. In one Bend process, a listener with a
 1,150 ms timeout expired while a second listener with a 4,294,967,419 ms
-timeout could still send an application close. Per-path idle timeout parity
-and configuring the specialized resumption and NAT constructors remain open.
+timeout could still send an application close. Picoquic applies independent
+idle timers to probing and validated paths over IPv4 and IPv6. With
+path zero active, Bend retires the silent alternate and the two peers
+exchange a new bidirectional stream on path zero. The pinned Noq 1.5.0
+peer receives `PATH_ABANDON` with code `0x3e76` and reports
+`RemoteAbandoned` if it already knows the path. The same suite checks the
+three-probe floor, the last local path, and expiry of a single-path QUIC
+connection. Run `make check-quic-path-idle` with `UPSTREAM_QUIC_PATH_IDLE`
+set to the pinned Noq peer. It uses Iroh 1.5.0's raw-key TLS code and
+accepts `listen HOST`, `listen-base HOST` or
+`dial PRIMARY SECONDARY IDLE_MS validated`. The endpoint's relay-specific
+path defaults and the connection idle options on specialized resumption
+and NAT constructors remain open.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
