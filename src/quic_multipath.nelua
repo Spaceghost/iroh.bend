@@ -120,6 +120,8 @@ local function picoquic_decode_datagram_frame_header(data:*uint8,limit:*uint8,ki
 local picoquic_packet_context_application:cint <cimport,nodecl>
 local picoquic_state_client_init:cint <cimport,nodecl>
 local picoquic_state_client_init_sent:cint <cimport,nodecl>
+local picoquic_tp_initial_max_streams_bidi:uint64 <cimport,nodecl>
+local picoquic_tp_initial_max_streams_uni:uint64 <cimport,nodecl>
 local picoquic_tp_max_datagram_frame_size:uint64 <cimport,nodecl>
 local picoquic_callback_datagram:cint <cimport,nodecl>
 local picoquic_callback_datagram_acked:cint <cimport,nodecl>
@@ -224,6 +226,9 @@ local function picoquic_get_cnx_state(cnx: *cnx_t): cint <cimport,nodecl> end
 local function picoquic_get_path_addr(cnx: *cnx_t, id: uint64, which: cint, addr: *storage_t): cint <cimport,nodecl> end
 local function picoquic_set_default_address_discovery_mode(quic:*quic_t, mode:cint) <cimport,nodecl> end
 local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
+local function picoquic_prepare_next_packet(quic:*quic_t, now:uint64, output:*uint8, capacity:csize,
+    used:*csize, to:*storage_t, source:*storage_t, iface:*cint, log_cid:pointer, last_cnx:pointer):cint
+    <cimport,nodecl> end
 local function picoquic_set_client_authentication(quic: *quic_t, required: cint) <cimport,nodecl> end
 local function picoquic_set_accept_0rtt(quic: *quic_t, enabled: cint) <cimport,nodecl> end
 local function picoquic_set_max_half_open_retry_threshold(quic: *quic_t, limit: uint32) <cimport,nodecl> end
@@ -283,6 +288,7 @@ local names = {
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
+  'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
   'MultipathConnection', 'MultipathListener', 'MultipathReadPending', 'MultipathReadFin', 'MultipathReadBytes',
@@ -294,6 +300,10 @@ for _, name in ipairs(names) do
     name,name,name,name))
 end
 ]]
+local iroh_mp_QadServer: uint32 <cimport,nodecl>
+local iroh_mp_bind_qad_server: uint32 <cimport,nodecl>
+local iroh_mp_step_qad_server: uint32 <cimport,nodecl>
+local iroh_mp_close_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer_bytes: uint32 <cimport,nodecl>
@@ -436,6 +446,11 @@ local Session = @record{
   max_data:uint64,stream_bidi_local:uint64,stream_bidi_remote:uint64,stream_uni:uint64,streams_bidi:uint64,streams_uni:uint64,
   active_connection_id_limit:uint32,max_packet_size:uint32
 }
+local QadServer = @record{
+  next:*QadServer, quic:*quic_t, id:uint32, fd:cint, local_addr:storage_t
+}
+local qad_servers: *QadServer
+local next_qad_server: uint32 = 1
 local AddressDiscovery = @record{
   quic:*quic_t, cnx:*cnx_t, peer:storage_t, ready:boolean, closed:boolean
 }
@@ -2349,6 +2364,119 @@ local function bind_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],bind_nat_source(e,find_connection(e,args[0]),args))
 end
 
+local function release_qad_server(server:*QadServer)
+  if server.quic ~= nilptr then picoquic_free(server.quic) end
+  if server.fd >= 0 then close(server.fd) end
+  C.free(server)
+end
+
+local function qad_server_event(cnx:*cnx_t, id:uint64, bytes:*uint8, size:csize, kind:cint, ctx:pointer,
+    stream_user:pointer): cint
+  -- Picoquic needs an application callback to accept the TLS handshake.
+  -- The transport itself generates all address reports.
+  return 0
+end
+
+local function bind_qad_server(e:Env, args:*[0]Term): Term
+  local addr: storage_t
+  local size = numeric_argument(e,args[0],args[1],&addr)
+  local cert_size: uint64, key_size: uint64
+  local cert = io_cstr(e,args[2],&cert_size)
+  defer C.free(cert) end
+  local key = io_cstr(e,args[3],&key_size)
+  defer C.free(key) end
+  if size == 0 or unspecified_address(&addr) or cert_size == 0 or key_size == 0 or
+      io_nul(cert,cert_size) or io_nul(key,key_size) then
+    return io_fail(e,EINVAL,'QAD requires a concrete UDP address and PEM certificate and key files')
+  end
+  if next_qad_server == 0 then return io_fail(e,ENOBUFS,'QAD server handles exhausted') end
+  local server = (@*QadServer)(C.calloc(1,#QadServer))
+  if server == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  server.fd = socket((@cint)(addr.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  local bound_size = IROH_MP_STORAGE_SIZE
+  if server.fd < 0 or bind(server.fd,&addr,size) ~= 0 or getsockname(server.fd,&server.local_addr,&bound_size) ~= 0 then
+    local error = (@uint32)(errno)
+    release_qad_server(server)
+    return io_fail(e,error,nilptr)
+  end
+  local now = picoquic_current_time()
+  server.quic = picoquic_create(LISTENER_LIMIT,cert,key,nilptr,'/iroh-qad/0',(@pointer)(qad_server_event),nilptr,nilptr,nilptr,nilptr,
+    now,nilptr,nilptr,nilptr,0)
+  if server.quic == nilptr or
+      picoquic_set_default_tp_value(server.quic,picoquic_tp_initial_max_streams_bidi,0) ~= 0 or
+      picoquic_set_default_tp_value(server.quic,picoquic_tp_initial_max_streams_uni,0) ~= 0 then
+    release_qad_server(server)
+    return io_fail(e,EIO,'could not configure the QAD TLS server')
+  end
+  picoquic_set_default_address_discovery_mode(server.quic,1)
+  picoquic_set_accept_0rtt(server.quic,0)
+  picoquic_set_max_half_open_retry_threshold(server.quic,LISTENER_LIMIT)
+  server.id = next_qad_server
+  next_qad_server = next_qad_server + 1
+  server.next = qad_servers
+  qad_servers = server
+  local port = addr.ss_family == AF_INET and ((@*addr_t)(&server.local_addr)).sin_port or
+    ((@*addr6_t)(&server.local_addr)).sin6_port
+  return io_done(e,io_tup(e,term_pak(iroh_mp_QadServer,server.id),ntohs(port)))
+end
+
+local function find_qad_server(e:Env, term:Term): *QadServer
+  local id = handle_id(e,term,iroh_mp_QadServer)
+  local server = qad_servers
+  while server ~= nilptr and server.id ~= id do server = server.next end
+  return server
+end
+
+local function pump_qad_server(server:*QadServer): uint32
+  local bytes: [65536]uint8
+  local peer: storage_t
+  local source: storage_t
+  local capacity = IROH_MP_STORAGE_SIZE
+  local now = picoquic_current_time()
+  local count = recvfrom(server.fd,&bytes[0],#bytes,0,&peer,&capacity)
+  if count > 0 then
+    picoquic_incoming_packet(server.quic,&bytes[0],(@csize)(count),&peer,&server.local_addr,0,0,now)
+  elseif count < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
+    return (@uint32)(errno)
+  end
+  local size: csize
+  local iface: cint
+  if picoquic_prepare_next_packet(server.quic,now,&bytes[0],IO_CAPACITY,&size,&peer,&source,&iface,nilptr,nilptr) ~= 0 then
+    return EIO
+  end
+  if size == 0 then return 0 end
+  count = sendto(server.fd,&bytes[0],size,0,&peer,address_size(&peer))
+  if count == (@isize)(size) then return 0 end
+  if count < 0 and (errno == EAGAIN or errno == EINTR or socket_unreachable(errno)) then return 0 end
+  return count < 0 and (@uint32)(errno) or EIO
+end
+
+local function bind_qad_server_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return bind_qad_server(e,args)
+end
+
+local function step_qad_server_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  local server = find_qad_server(e,args[0])
+  if server == nilptr then return io_tup(e,args[0],io_fail(e,EBADF,'QAD server closed')) end
+  local error = pump_qad_server(server)
+  if error ~= 0 then return io_tup(e,args[0],io_fail(e,error,'QAD server UDP I/O failed')) end
+  return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
+end
+
+local function close_qad_server_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  local server = find_qad_server(e,args[0])
+  if server ~= nilptr then
+    if qad_servers == server then qad_servers = server.next
+    else
+      local prev = qad_servers
+      while prev.next ~= server do prev = prev.next end
+      prev.next = server.next
+    end
+    release_qad_server(server)
+  end
+  return term_pak(iroh_mp_Unit,0)
+end
+
 local function discovery_event(cnx:*cnx_t, id:uint64, bytes:*uint8, size:csize, kind:cint, ctx:pointer,
     stream_user:pointer): cint
   local discovery = (@*AddressDiscovery)(ctx)
@@ -2974,6 +3102,9 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
   if iroh_mp_send_multipath_nat_address ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_address,advertise_nat_run) end
+  if iroh_mp_bind_qad_server ~= 0xffffffff then io_eff(iroh_mp_bind_qad_server,bind_qad_server_run) end
+  if iroh_mp_step_qad_server ~= 0xffffffff then io_eff(iroh_mp_step_qad_server,step_qad_server_run) end
+  if iroh_mp_close_qad_server ~= 0xffffffff then io_eff(iroh_mp_close_qad_server,close_qad_server_run) end
   if iroh_mp_start_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_start_multipath_qad,start_discovery_run) end
   if iroh_mp_poll_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_poll_multipath_qad,poll_discovery_run) end
   if iroh_mp_bind_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_source,bind_nat_source_run) end

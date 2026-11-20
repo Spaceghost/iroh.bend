@@ -422,3 +422,20 @@ def connect_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: L
   do IO<ConnectResult()>:
     started : ConnectResult() <- start_multipath_alpns(host,port,seed,peer,alpns)
     finish_connect(started,timeout_ms)
+
+
+type QadServer is Type:
+  QadServer{id: U32}
+
+# Serve /iroh-qad/0 on a UDP address using a PEM certificate chain and key.
+# Run this service alongside a WS or WSS relay.
+def bind_qad_server(host: String, port: U32, certificate: String, key: String)
+    -> IO(Result<&1,&1,U32 & String,QadServer & U32>):
+  import "./quic_multipath.c"
+
+# Pump one UDP packet and let QUIC report the observed client address.
+def step_qad_server(server: QadServer) -> IO(QadServer & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+def close_qad_server(server: QadServer) -> IO(Unit):
+  import "./quic_multipath.c"

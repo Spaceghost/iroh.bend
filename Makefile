@@ -461,6 +461,26 @@ $(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/qui
 		"$(abspath $(BUILD)/quic-multipath-listener-stage/src/quic_multipath.c)"
 	cd "$(BUILD)/quic-multipath-listener-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_listener.bend -o "$(abspath $@)"
 
+.PHONY: check-relay-qad
+UPSTREAM_QAD_CLIENT ?=
+QAD_SERVER_CERT ?=
+QAD_SERVER_KEY ?=
+QAD_TEST_CA_DER ?=
+
+check-relay-qad: $(BUILD)/iroh-bend-relay-qad
+	@test -x "$(UPSTREAM_QAD_CLIENT)" || { echo 'Set UPSTREAM_QAD_CLIENT to the Iroh relay address discovery client.' >&2; exit 2; }
+	python3 -B tests/relay_qad.py "$<" "$(UPSTREAM_QAD_CLIENT)" "$(QAD_SERVER_CERT)" "$(QAD_SERVER_KEY)" \
+		"$(QAD_TEST_TLS_NAME)" "$(QAD_TEST_CA_DER)"
+
+$(BUILD)/relay-qad.c: tests/relay_qad.bend src/quic_multipath.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp src/quic_multipath.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
+	cp tests/relay_qad.bend "$(@:.c=-stage)/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
+		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_qad.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-qad: $(BUILD)/relay-qad.c
 $(BUILD)/iroh-bend-quic-multipath: $(BUILD)/quic-multipath.c
 $(BUILD)/iroh-bend-quic-multipath-listener: $(BUILD)/quic-multipath-listener.c
 $(BUILD)/iroh-bend-quic-multipath-session: $(BUILD)/quic-multipath-session.c
@@ -473,7 +493,7 @@ $(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_mu
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_session.bend -o "$(abspath $@)"
 
-$(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session:
+$(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-relay-qad:
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }
