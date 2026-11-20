@@ -1,5 +1,6 @@
 import Base
 import ./relay_quic.bend as Relay
+import ./quic_nat.bend as Wire
 
 def Bridge() -> Type:
   Maybe<&1,Relay.Bridge>
@@ -15,6 +16,9 @@ def Started(-C: Type) -> Type:
 
 def Input(-C: Type) -> Type:
   C & (Socket & Result<&1,&1,Error(),U32>)
+
+def Starter(-C: Type) -> Type:
+  String -> U32 -> Packet() -> Packet() -> Packet() -> Wire.VarInt -> Started(C)
 
 type Backend<-C: Type> is Type:
   Backend{start: String -> U32 -> Packet() -> Packet() -> Packet() -> Started(C),
@@ -161,12 +165,12 @@ def opened(~C: Type, ~engine: Backend<C>, result: Result<&1,&1,Error(),Socket>, 
         stop(bridge)
         active(~C,~engine,conn,routes,flight,collecting,error)
 
-def open_route(~C: Type, ~engine: Backend<C>, state: State<C>, host: String, port: U32, info: RouteInfo, bridge: Bridge(), seed: Packet(), peer: Packet(),
+def open_route_using(~C: Type, ~engine: Backend<C>, ~launch: Starter(C), idle_ms: Wire.VarInt, state: State<C>, host: String, port: U32, info: RouteInfo, bridge: Bridge(), seed: Packet(), peer: Packet(),
     alpn: Packet()) -> IO(State<C>):
   match state:
     case Waiting{_}:
       do IO<State<C>>:
-        result : Result<&1,&1,Error(),C & Socket> <- begin(C,engine,host,port,seed,peer,alpn)
+        result : Result<&1,&1,Error(),C & Socket> <- launch(host,port,seed,peer,alpn,idle_ms)
         start(~C,~engine,result,info,bridge)
     case Racing{conn,routes,flight,collecting,last}:
       do IO<State<C>>:
@@ -177,13 +181,21 @@ def open_route(~C: Type, ~engine: Backend<C>, state: State<C>, host: String, por
         stop(bridge)
         return Connected{conn,chosen}
 
-def add(~C: Type, ~engine: Backend<C>, state: State<C>, +host: String, +port: U32, deadline: Nat, bridge: Bridge(), seed: Packet(), peer: Packet(),
+def open_route(~C: Type, ~engine: Backend<C>, state: State<C>, host: String, port: U32, info: RouteInfo, bridge: Bridge(), seed: Packet(), peer: Packet(),
+    alpn: Packet()) -> IO(State<C>):
+  open_route_using(~C,~engine,~(h => p => s => key => a => ms => begin(C,engine,h,p,s,key,a)),Wire.Var{0,0},state,host,port,info,bridge,seed,peer,alpn)
+
+def add_using(~C: Type, ~engine: Backend<C>, ~launch: Starter(C), idle_ms: Wire.VarInt, state: State<C>, +host: String, +port: U32, deadline: Nat, bridge: Bridge(), seed: Packet(), peer: Packet(),
     alpn: Packet()) -> IO(State<C>):
   match bridge:
     case None{}:
-      open_route(~C,~engine,state,host,port,RouteInfo{deadline,DirectKey{host,port}},None{},seed,peer,alpn)
+      open_route_using(~C,~engine,~launch,idle_ms,state,host,port,RouteInfo{deadline,DirectKey{host,port}},None{},seed,peer,alpn)
     case Some{+path}:
-      open_route(~C,~engine,state,host,port,RouteInfo{deadline,RelayKey{Relay.bridge_url(path)}},Some{path},seed,peer,alpn)
+      open_route_using(~C,~engine,~launch,idle_ms,state,host,port,RouteInfo{deadline,RelayKey{Relay.bridge_url(path)}},Some{path},seed,peer,alpn)
+
+def add(~C: Type, ~engine: Backend<C>, state: State<C>, +host: String, +port: U32, deadline: Nat, bridge: Bridge(), seed: Packet(), peer: Packet(),
+    alpn: Packet()) -> IO(State<C>):
+  add_using(~C,~engine,~(h => p => s => key => a => ms => begin(C,engine,h,p,s,key,a)),Wire.Var{0,0},state,host,port,deadline,bridge,seed,peer,alpn)
 
 def RouteList() -> Type:
   List<&1,Candidate> & List<&2,RouteKey>

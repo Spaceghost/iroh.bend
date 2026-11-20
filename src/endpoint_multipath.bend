@@ -50,6 +50,12 @@ def relay_only(bound: Result<&1,&1,U32 & String,RelayedListener & U32>) -> Resul
     case Fail{why}:
       Fail{why}
 
+def bind_with_idle_timeout(address: Endpoint.Address, identity: Endpoint.Identity, idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>):
+  Endpoint.IpAddress{host,port} = address
+  Endpoint.PeerKeys{seed,peer,alpn} = identity
+  Quic.bind_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,idle_ms)
+
 # Register before returning the relay-only listener. The bridge owns the route
 # from this relay to the local QUIC socket for all accepted peer connections.
 def bind_relay_identity(url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
@@ -289,10 +295,18 @@ def shared_handshake() -> Race.Backend<Quic.MultipathConnection>:
     Quic.read_multipath_handshake_socket,Quic.multipath_handshake_output,Quic.adopt_multipath_handshake_socket,
     Quic.close_multipath,"QUIC multipath handshake timed out"}
 
+def connect_with_lookup_and_idle_timeout(plan: Endpoint.Routes, +identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
+    sources: List<&2,Endpoint.AddressLookup>, idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  Endpoint.before_connect(Connection(),identity,u => Endpoint.start_dial_using(~Quic.MultipathConnection,~shared_handshake(),
+    ~Quic.start_multipath_route_handshake_with_idle_timeout,idle_ms,plan,identity,timeouts,sources))
+
+def connect_routes_with_idle_timeout(plan: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
+    idle_ms: NatWire.VarInt) -> IO(ConnectResult()):
+  connect_with_lookup_and_idle_timeout(plan,identity,timeouts,[],idle_ms)
+
 def connect_with_lookup(plan: Endpoint.Routes, +identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
     sources: List<&2,Endpoint.AddressLookup>) -> IO(ConnectResult()):
-  Endpoint.before_connect(Connection(),identity,u => Endpoint.start_dial_with(~Quic.MultipathConnection,
-    ~shared_handshake(),plan,identity,timeouts,sources))
+  connect_with_lookup_and_idle_timeout(plan,identity,timeouts,sources,Close.default_idle_timeout())
 
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
@@ -315,7 +329,8 @@ def dial_verified(result: Result<&1,&1,U32 & String,Endpoint.Routes>, identity: 
     timeouts: Endpoint.Timeouts) -> IO(ConnectResult()):
   match result:
     case Done{plan}:
-      Endpoint.start_dial_with(~Quic.MultipathConnection,~shared_handshake(),plan,identity,timeouts,[])
+      Endpoint.start_dial_using(~Quic.MultipathConnection,~shared_handshake(),~Quic.start_multipath_route_handshake_with_idle_timeout,
+        Close.default_idle_timeout(),plan,identity,timeouts,[])
     case Fail{error}:
       IO.pure(ConnectResult(),Fail{error})
 
