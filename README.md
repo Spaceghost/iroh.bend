@@ -711,14 +711,20 @@ Full drop-in compatibility remains open. Known differences include the following
 - Ticket dialing starts lookup after its supplied routes fail. Iroh can start
   lookup while it still has candidate addresses and no selected path. Timing
   parity for that case remains open. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
-- Ticket construction and decoding normalize relay URLs before sorting and
-  deduplication. The Bend codec handles default ports, IPv4 and IPv6 literals,
-  credentials, dot segments, percent encoding, query strings, and fragments.
-  Internationalized domain names and validation of Punycode labels remain open.
-  Run `make check-endpoint-ticket` for the upstream serialization examples. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
 - A listener can advertise its initial observed UDP address. Refreshing that
   advertisement after a live listener's NAT mapping changes is parked. The
   outbound routed connection has a separate passing address-refresh test below.
+
+Ticket construction and decoding normalize relay URLs before ordering and
+deduplicating addresses. Discovery uses the same parser when it joins the
+WebSocket path to a relay base. The pure Bend implementation includes Unicode
+18.0.0 nontransitional IDNA processing, Punycode, IPv4 and IPv6 literals, file
+and opaque URLs, and component-specific percent encoding.
+Run `make check-endpoint-ticket` for the checked-in examples. For a differential
+run, set `UPSTREAM_ENDPOINT_TICKET_CODEC` to the Iroh ticket decoder,
+`URL_TESTDATA` to the url crate’s `urltestdata.json`, and `IDNA_TESTDATA` to
+Unicode’s `IdnaTestV2.txt`. Both ticket construction and decoding are compared
+with Iroh’s serialized bytes. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
 
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |

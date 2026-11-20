@@ -2,6 +2,7 @@ import Base
 import ./url_text.bend as T
 import ./url_path.bend as P
 import ./url_ip.bend as Ip
+import ./idna.bend as Idna
 import ./relay.bend as Wire
 
 type Scheme is Data:
@@ -68,20 +69,18 @@ def scheme_ok(s: String) -> Bool:
     case SCon{c,t}:
       T.letter(Char.to_u32(c)) && T.all(~(n => scheme_byte(n)),t)
 
-def forbidden(+n: U32) -> Bool:
-  U32.is_eq(n,0) || U32.is_eq(n,9) || U32.is_eq(n,10) || U32.is_eq(n,13) || U32.is_eq(n,32) ||
-    U32.is_eq(n,35) || U32.is_eq(n,47) || U32.is_eq(n,58) || U32.is_eq(n,60) || U32.is_eq(n,62) ||
-    U32.is_eq(n,63) || U32.is_eq(n,64) || T.between(n,91,94) || U32.is_eq(n,124)
-
 def opaque_host_byte(n: U32) -> Bool:
-  Bool.not(forbidden(n))
+  Bool.not(T.forbidden(n))
 
-def domain_byte(+n: U32) -> Bool:
-  U32.is_gt(n,32) && U32.is_ne(n,127) && U32.is_ne(n,37) && Bool.not(forbidden(n))
+def valid_domain(s: String, valid: Bool) -> Maybe<&2,String>:
+  match valid:
+    case True{}:
+      Maybe.bind(&2,String,String,Idna.to_ascii(s),d => Ip.domain_or_ipv4(d))
+    case False{}:
+      None{}
 
 def domain(+s: String) -> Maybe<&2,String>:
-  Maybe.bind(&2,String,String,
-    Bool.pick(Maybe<&2,String>,Wire.utf8_scan(T.octets(s),Wire.Lead{}) && T.all(~(n => domain_byte(n)),s),Some{T.lower(s)},None{}),d => Ip.domain_or_ipv4(d))
+  valid_domain(s,Wire.utf8_scan(T.octets(s),Wire.Lead{}))
 
 def host(+s: String, scheme: Scheme) -> Maybe<&2,String>:
   match s scheme:

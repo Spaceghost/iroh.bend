@@ -2,6 +2,7 @@ import Base
 import ../src/endpoint_ticket.bend as Tickets
 import ../src/endpoint_id.bend as Id
 import ../src/url_text.bend as T
+import ./punycode.bend as Punycode
 
 def display(value: Maybe<&2,String>) -> String:
   match value:
@@ -46,6 +47,7 @@ def build_golden(key: Maybe<&2,List<&2,U32>>) -> String:
 
 def vectors() -> IO(Unit):
   do IO<Unit>:
+    Punycode.vectors()
     assert_ticket(golden(),golden())
     assert_ticket(mixed(),mixed())
     assert_ticket("Endpointacxfr74i","invalid")

@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -52,6 +53,39 @@ CASES = [
     ("https://", None),
     ("", None),
     ("//host/path", None),
+    ("https://BÜCHER.example", "https://xn--bcher-kva.example/"),
+    ("https://XN--BCHER-KVA", "https://xn--bcher-kva/"),
+    ("https://faß.de", "https://xn--fa-hia.de/"),
+    ("http://a\u00adb/", "http://ab/"),
+    ("https://ＦＯＯ。bar", "https://foo.bar/"),
+    ("https://%E2%84%AA.example", "https://k.example/"),
+    ("http://e\u0301", "http://xn--9ca/"),
+    ("http://é", "http://xn--9ca/"),
+    ("http://\u0301e", None),
+    ("http://Ⓐ\u200b.com", "http://a.com/"),
+    ("file://loC𝐀𝐋𝐇𝐨𝐬𝐭/p", "file:///p/"),
+    ("http://ا١٢", "http://xn--mgb0jd/"),
+    ("http://ا1٢", None),
+    ("http://1.א", None),
+    ("http://a-.א", None),
+    ("http://a1.אבּ", "http://a1.xn--kdb3bd/"),
+    ("http://\u200da", None),
+    ("http://a\u200cb", None),
+    ("http://क्\u200dष", "http://xn--11b2ezcw70k/"),
+    ("http://ب\u200cا", "http://xn--mgbb899q/"),
+    ("http://가", "http://xn--o39a/"),
+    ("http://가", "http://xn--o39a/"),
+    ("https://xn--ls8h", "https://xn--ls8h/"),
+    ("https://%EF%BF%BD", None),
+    ("http://xn--a", None),
+    ("http://xn--ascii-", None),
+    ("http://\u00ad", None),
+    ("http://faß。", "http://xn--fa-hia./"),
+    ("http://a。１２７", None),
+    ("foo://BÜCHER.example/q", "foo://B%C3%9CCHER.example/q/"),
+    ("https://www.🍕.example", "https://www.xn--vi8h.example/"),
+    ("http://a\u0341\u0327", "http://xn--1ca87i/"),
+    ("http://𝟏𝟐𝟕.𝟏", "http://127.0.0.1/"),
     (b"https://\xff.invalid/", None),
 ]
 
@@ -106,12 +140,28 @@ def check_urls(program, oracle, urls, canonical=None):
     print(f"PASS {len(urls)} relay URLs through ticket construction and decoding", flush=True)
 
 
+def idna_urls(testdata):
+    # The source column in IdnaTestV2 may contain escaped scalar values,
+    # including lone surrogates that should fail UTF-8 validation.
+    escapes = re.compile(r"\\u([0-9A-Fa-f]{4})|\\x\{([0-9A-Fa-f]+)\}")
+    names = {}
+    for line in testdata.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            name = line.split(";", 1)[0].strip()
+            name = escapes.sub(lambda m: chr(int(m[1] or m[2], 16)), name)
+            names[b"http://" + name.encode("utf-8", errors="surrogatepass") + b"/"] = None
+    return list(names)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("program", type=Path)
     parser.add_argument("--upstream", type=Path, help="Iroh ticket decoder that prints the re-encoded ticket or invalid")
     parser.add_argument("--url-testdata", type=Path, help="url crate's tests/urltestdata.json, compared as absolute URLs")
+    parser.add_argument("--idna-testdata", type=Path, help="Unicode IdnaTestV2.txt, compared as Iroh relay hosts")
     args = parser.parse_args()
+    if (args.url_testdata or args.idna_testdata) and not args.upstream:
+        parser.error("external corpora require --upstream")
     program = args.program.resolve()
     raw, canonical = zip(*CASES)
     check_urls(program, args.upstream, raw, canonical)
@@ -124,10 +174,11 @@ def main():
         if args.upstream:
             check([urls], output(args.upstream, packet), [expected], "upstream set")
     if args.url_testdata:
-        if not args.upstream:
-            parser.error("--url-testdata requires --upstream")
         rows = json.loads(args.url_testdata.read_text())
         check_urls(program, args.upstream, list(dict.fromkeys(row["input"] for row in rows if isinstance(row, dict))))
+
+    if args.idna_testdata:
+        check_urls(program, args.upstream, idna_urls(args.idna_testdata))
 
 
 if __name__ == "__main__":

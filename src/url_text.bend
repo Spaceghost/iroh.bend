@@ -157,3 +157,11 @@ def all(~test: U32 -> Bool, s: String) -> Bool:
       True{}
     case SCon{c,t}:
       test(Char.to_u32(c)) && all(~test,t)
+
+def forbidden(+n: U32) -> Bool:
+  U32.is_eq(n,0) || U32.is_eq(n,9) || U32.is_eq(n,10) || U32.is_eq(n,13) || U32.is_eq(n,32) ||
+    U32.is_eq(n,35) || U32.is_eq(n,47) || U32.is_eq(n,58) || U32.is_eq(n,60) || U32.is_eq(n,62) ||
+    U32.is_eq(n,63) || U32.is_eq(n,64) || between(n,91,94) || U32.is_eq(n,124)
+
+def domain_byte(+n: U32) -> Bool:
+  U32.is_gt(n,32) && U32.is_ne(n,127) && U32.is_ne(n,37) && Bool.not(forbidden(n))
