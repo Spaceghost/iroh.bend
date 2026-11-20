@@ -29,6 +29,20 @@ def quic_migration_status(conn: DatagramConnection)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"
 
+# Set a keepalive interval in milliseconds and start monitoring authenticated input.
+# Pass zero to disable path monitoring and keepalives.
+def monitor_quic_path(conn: DatagramConnection, interval: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_datagram.c"
+
+# Return time since authenticated input and the current probe timeout in milliseconds.
+def quic_path_timing(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32 & U32>):
+  import "./quic_datagram.c"
+
+def quic_millis() -> IO(U32):
+  import "./quic_datagram.c"
+
 # 1 means the QUIC stack accepted the datagram. 0 means retry after stepping.
 # Acceptance does not imply delivery. The stack never retransmits the frame.
 def write_quic_datagram(conn: DatagramConnection, payload: List<&2,U32>)

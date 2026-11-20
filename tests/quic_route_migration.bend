@@ -99,6 +99,83 @@ def dial_direct_then_relay(url: String, host: String, port: U32) -> IO(Unit):
       Quic.connect(host,port,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn(),6000n))
     open_direct(conn,url)
 
+def fail_routed(-T: Type, owner: Endpoint.RoutedConnection, code: U32, message: String) -> IO(T):
+  do IO<T>:
+    _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.close_routes(owner)
+    IO.die(T,code,message)
+
+def await_relay(progress: Endpoint.RouteStep(),
+    retry: Endpoint.RoutedConnection -> IO(Endpoint.RoutedConnection)) -> IO(Endpoint.RoutedConnection):
+  match progress:
+    case (owner,Done{Endpoint.RelayRoute{}}):
+      IO.pure(Endpoint.RoutedConnection,owner)
+    case (owner,Done{Endpoint.DirectRoute{}}):
+      do IO<Endpoint.RoutedConnection>:
+        IO.sleep(1)
+        retry(owner)
+    case (owner,Fail{(code,message)}):
+      fail_routed(Endpoint.RoutedConnection,owner,code,message)
+
+def wait_for_relay(fuel: Nat, owner: Endpoint.RoutedConnection) -> IO(Endpoint.RoutedConnection):
+  match fuel:
+    case 0n:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"direct outage did not recover via relay")
+    case 1n+left:
+      do IO<Endpoint.RoutedConnection>:
+        progress : Endpoint.RouteStep() <- Endpoint.step_routes(owner)
+        await_relay(progress,next => wait_for_relay(left,next))
+
+def finish_routed(owner: Endpoint.RoutedConnection, stream: U32) -> IO(Unit):
+  Endpoint.Routed{transport,_} = owner
+  switch_to_relay(transport,stream)
+
+def still_direct(progress: Endpoint.RouteStep(), expired: Bool,
+    next: Endpoint.RoutedConnection -> IO(Endpoint.RoutedConnection)) -> IO(Endpoint.RoutedConnection):
+  match progress expired:
+    case (Endpoint.Routed{conn,Endpoint.Watching{plan}},Done{Endpoint.DirectRoute{}}) True{}:
+      IO.pure(Endpoint.RoutedConnection,Endpoint.Routed{conn,Endpoint.Watching{plan}})
+    case (Endpoint.Routed{conn,Endpoint.Watching{plan}},Done{Endpoint.DirectRoute{}}) False{}:
+      do IO<Endpoint.RoutedConnection>:
+        IO.sleep(1)
+        next(Endpoint.Routed{conn,Endpoint.Watching{plan}})
+    case (owner,Fail{(code,message)}) _:
+      fail_routed(Endpoint.RoutedConnection,owner,code,message)
+    case (owner,Done{_}) _:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"healthy idle QUIC connection tried the relay")
+
+def observe_healthy(fuel: Nat, owner: Endpoint.RoutedConnection, +since: U32) -> IO(Endpoint.RoutedConnection):
+  match fuel:
+    case 0n:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"the healthy path observation window did not elapse")
+    case 1n+left:
+      do IO<Endpoint.RoutedConnection>:
+        progress : Endpoint.RouteStep() <- Endpoint.step_routes(owner)
+        now : U32 <- Quic.quic_millis()
+        still_direct(progress,U32.is_ge(U32.sub(now,since),4250),next => observe_healthy(left,next,since))
+
+def cut_direct(primed: Endpoint.RoutedConnection & U32) -> IO(Unit):
+  (owner,stream) = primed
+  do IO<Unit>:
+    now : U32 <- Quic.quic_millis()
+    healthy : Endpoint.RoutedConnection <- observe_healthy(7000n,owner,now)
+    IO.print("CUT_DIRECT")
+    recovered : Endpoint.RoutedConnection <- wait_for_relay(12500n,healthy)
+    finish_routed(recovered,stream)
+
+def prime_routed(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection & U32):
+  do IO<Quic.DatagramConnection & U32>:
+    opened : Quic.DatagramConnection & U32 <- Fixture.poll_stream(2500n,conn,Fixture.OpenStream{0})
+    Migration.prime_stream(opened)
+
+def recover_via_relay(url: String, host: String, port: U32) -> IO(Unit):
+  do IO<Unit>:
+    owner : Endpoint.RoutedConnection <- IO.try(Endpoint.RoutedConnection,
+      Endpoint.connect_routed(Endpoint.DialRoutes{[Endpoint.IpAddress{host,port}],["invalid-relay",url]},
+        Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn()},
+        Endpoint.HandshakeTimeouts{3500,6000}))
+    primed : Endpoint.RoutedConnection & U32 <- Endpoint.use_routed_connection(U32,owner,prime_routed)
+    cut_direct(primed)
+
 def route(url: String, host: String, port: Maybe<&2,U32>, mode: Maybe<&2,U32>) -> IO(Unit):
   match port mode:
     case Some{direct_port} Some{0}:
@@ -110,6 +187,8 @@ def route(url: String, host: String, port: Maybe<&2,U32>, mode: Maybe<&2,U32>) -
         exercise(conn,host,direct_port)
     case Some{direct_port} Some{1}:
       dial_direct_then_relay(url,host,direct_port)
+    case Some{direct_port} Some{2}:
+      recover_via_relay(url,host,direct_port)
     case _ _:
       IO.die(Unit,2,"expected a direct peer port and a migration direction")
 

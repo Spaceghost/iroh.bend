@@ -90,6 +90,7 @@ local ngtcp2_transport_params <cimport,nodecl> = @record{
   original_dcid: ngtcp2_cid, original_dcid_present: cuchar
 }
 local ngtcp2_pkt_info <cimport,nodecl> = @record{ecn: uint32}
+local ngtcp2_conn_info <cimport,nodecl> = @record{pkt_recv: uint64}
 local ngtcp2_ccerr <cimport,nodecl> = @record{}
 local ngtcp2_vec <cimport,nodecl> = @record{base: *cuchar, len: csize}
 local ngtcp2_callbacks <cimport,nodecl> = @record{
@@ -178,6 +179,9 @@ local function ngtcp2_conn_read_pkt(conn: *ngtcp2_conn, path: *ngtcp2_path, info
   data: *cuchar, n: csize, time: uint64): cint <cimport,nodecl> end
 local function ngtcp2_conn_handle_expiry(conn: *ngtcp2_conn, time: uint64): cint <cimport,nodecl> end
 local function ngtcp2_conn_get_expiry2(conn: *ngtcp2_conn): uint64 <cimport,nodecl> end
+local function ngtcp2_conn_get_conn_info2(conn: *ngtcp2_conn, info: *ngtcp2_conn_info) <cimport,nodecl> end
+local function ngtcp2_conn_get_pto2(conn: *ngtcp2_conn): uint64 <cimport,nodecl> end
+local function ngtcp2_conn_set_keep_alive_timeout(conn: *ngtcp2_conn, interval: uint64) <cimport,nodecl> end
 local function ngtcp2_conn_update_pkt_tx_time(conn: *ngtcp2_conn, time: uint64) <cimport,nodecl> end
 local function ngtcp2_conn_encode_0rtt_transport_params2(conn: *ngtcp2_conn, data: *cuchar,
   limit: csize): isize <cimport,nodecl> end
@@ -225,6 +229,7 @@ local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 
 ##[[
 for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram','start_quic_migration','start_quic_path_migration','quic_migration_status',
+    'monitor_quic_path','quic_path_timing','quic_millis',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
@@ -252,6 +257,9 @@ local iroh_dgram_step_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_migration: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_path_migration: uint32 <cimport,nodecl>
 local iroh_dgram_quic_migration_status: uint32 <cimport,nodecl>
+local iroh_dgram_monitor_quic_path: uint32 <cimport,nodecl>
+local iroh_dgram_quic_path_timing: uint32 <cimport,nodecl>
+local iroh_dgram_quic_millis: uint32 <cimport,nodecl>
 local iroh_dgram_write_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_read_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_datagram_acks: uint32 <cimport,nodecl>
@@ -371,6 +379,9 @@ local Connection = @record{
   candidate_peer: iroh_datagram_address,
   candidate_peer_size: cuint,
   migration_state: uint32,
+  path_monitor: boolean,
+  last_path_input: uint64,
+  path_packets_received: uint64,
   confirmed: boolean,
   output: [PACKET_CAPACITY]cuchar,
   output_path: ngtcp2_path,
@@ -1196,7 +1207,7 @@ local function network_unreachable(code: cint): boolean
 end
 
 local function migration_can_lose(conn: *Connection, candidate: boolean): boolean
-  if conn.candidate_fd < 0 then return false end
+  if conn.candidate_fd < 0 then return conn.path_monitor end
   if conn.migration_state == 1 then return true end
   return (conn.migration_state == 2) ~= candidate
 end
@@ -1409,6 +1420,49 @@ end
 
 local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],step(e,find(e,args[0])))
+end
+
+local function monitor_path_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn.listener ~= nilptr or not authenticated(conn) then
+    return io_tup(e,args[0],io_fail(e,ENOTSUP,'QUIC path monitoring requires an authenticated dialer'))
+  end
+  local interval = args[1]
+  local disabled: uint64 = 0xffffffffffffffff
+  ngtcp2_conn_set_keep_alive_timeout(conn.engine,interval == 0 and disabled or interval * 1000000)
+  conn.path_monitor = interval ~= 0
+  if conn.path_monitor then
+    local info: ngtcp2_conn_info
+    ngtcp2_conn_get_conn_info2(conn.engine,&info)
+    conn.path_packets_received = info.pkt_recv
+    conn.last_path_input = io_tick()
+  end
+  return io_tup(e,args[0],io_done(e,term_pak(iroh_dgram_Unit,0)))
+end
+
+local function path_timing_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if not conn.path_monitor then
+    return io_tup(e,args[0],io_fail(e,ENOTSUP,'QUIC path monitoring is disabled'))
+  end
+  local info: ngtcp2_conn_info
+  ngtcp2_conn_get_conn_info2(conn.engine,&info)
+  local now = io_tick()
+  if info.pkt_recv ~= conn.path_packets_received then
+    conn.path_packets_received = info.pkt_recv
+    conn.last_path_input = now
+  end
+  local idle = (now - conn.last_path_input) // 1000000
+  local duration = ngtcp2_conn_get_pto2(conn.engine)
+  local pto = duration // 1000000 + (duration % 1000000 == 0 and 0 or 1)
+  local timings = io_tup(e,idle > 0xffffffff and 0xffffffff or idle,pto > 0xffffffff and 0xffffffff or pto)
+  return io_tup(e,args[0],io_done(e,timings))
+end
+
+local function millis_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return (@uint32)(io_tick() // 1000000)
 end
 
 local function early_status(conn: *Connection): uint32
@@ -1843,6 +1897,9 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_start_quic_migration ~= 0xffffffff then io_eff(iroh_dgram_start_quic_migration,start_migration_run) end
   if iroh_dgram_start_quic_path_migration ~= 0xffffffff then io_eff(iroh_dgram_start_quic_path_migration,start_path_migration_run) end
   if iroh_dgram_quic_migration_status ~= 0xffffffff then io_eff(iroh_dgram_quic_migration_status,migration_status_run) end
+  if iroh_dgram_monitor_quic_path ~= 0xffffffff then io_eff(iroh_dgram_monitor_quic_path,monitor_path_run) end
+  if iroh_dgram_quic_path_timing ~= 0xffffffff then io_eff(iroh_dgram_quic_path_timing,path_timing_run) end
+  if iroh_dgram_quic_millis ~= 0xffffffff then io_eff(iroh_dgram_quic_millis,millis_run) end
   if iroh_dgram_write_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_quic_datagram,write_run) end
   if iroh_dgram_read_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_read_quic_datagram,read_run) end
   if iroh_dgram_quic_datagram_acks ~= 0xffffffff then io_eff(iroh_dgram_quic_datagram_acks,acks_run) end

@@ -377,6 +377,219 @@ def disconnect(connected: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
         Quic.drop_quic_datagram(conn)
         Path.stop(path)
 
+type RecoveryPlan is Data:
+  RelayFallback{identity: Identity, urls: List<&2,String>, probe_ms: U32}
+
+type RecoveryState is Data:
+  DirectOnly{}
+  Watching{plan: RecoveryPlan}
+  DialingRelay{plan: RecoveryPlan, remaining: List<&2,String>}
+  ProbingRelay{plan: RecoveryPlan, remaining: List<&2,String>, port: U32, since: U32}
+  ValidatingRelay{plan: RecoveryPlan, remaining: List<&2,String>}
+  OnRelay{}
+
+type RoutedConnection is Type:
+  Routed{transport: Connection(), recovery: RecoveryState}
+
+type SelectedRoute is Data:
+  DirectRoute{}
+  RelayRoute{}
+
+def RoutedResult() -> Type:
+  Result<&1,&1,U32 & String,RoutedConnection>
+
+def RouteStep() -> Type:
+  RoutedConnection & Result<&1,&1,U32 & String,SelectedRoute>
+
+def route_step(conn: Connection(), state: RecoveryState, route: SelectedRoute) -> IO(RouteStep()):
+  IO.pure(RouteStep(),(Routed{conn,state},Done{route}))
+
+def route_error(conn: Connection(), state: RecoveryState, error: U32 & String) -> IO(RouteStep()):
+  IO.pure(RouteStep(),(Routed{conn,state},Fail{error}))
+
+def arm_recovery(conn: Connection()) -> IO(Connection() & Result<&1,&1,U32 & String,Unit>):
+  use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.monitor_quic_path(c,1000))
+
+def start_watching(monitored: Connection() & Result<&1,&1,U32 & String,Unit>, plan: RecoveryPlan)
+    -> IO(RoutedResult()):
+  match monitored:
+    case (conn,Done{_}):
+      IO.pure(RoutedResult(),Done{Routed{conn,Watching{plan}}})
+    case (conn,Fail{error}):
+      do IO<RoutedResult()>:
+        _ : Result<&1,&1,U32 & String,Unit> <- disconnect(conn)
+        return Fail{error}
+
+def routed_dial(result: ConnectResult(), urls: List<&2,String>, identity: Identity, timeouts: Timeouts)
+    -> IO(RoutedResult()):
+  match result urls:
+    case Fail{error} _:
+      IO.pure(RoutedResult(),Fail{error})
+    case Done{(conn,Some{bridge})} _:
+      IO.pure(RoutedResult(),Done{Routed{(conn,Some{bridge}),OnRelay{}}})
+    case Done{(conn,None{})} Nil{}:
+      IO.pure(RoutedResult(),Done{Routed{(conn,None{}),DirectOnly{}}})
+    case Done{(conn,None{})} Con{url,rest}:
+      HandshakeTimeouts{_,probe_ms} = timeouts
+      do IO<RoutedResult()>:
+        monitored : Connection() & Result<&1,&1,U32 & String,Unit> <- arm_recovery((conn,None{}))
+        start_watching(monitored,RelayFallback{identity,Con{url,rest},probe_ms})
+
+# Dial using the normal route order and retain relays for later recovery.
+def connect_routed(+routes: Routes, +identity: Identity, +timeouts: Timeouts) -> IO(RoutedResult()):
+  DialRoutes{_,urls} = routes
+  do IO<RoutedResult()>:
+    connected : ConnectResult() <- connect_routes(routes,identity,timeouts)
+    routed_dial(connected,urls,identity,timeouts)
+
+def restarted_monitor(monitored: Connection() & Result<&1,&1,U32 & String,Unit>, plan: RecoveryPlan) -> IO(RouteStep()):
+  match monitored:
+    case (conn,Done{_}):
+      route_step(conn,Watching{plan},DirectRoute{})
+    case (conn,Fail{error}):
+      route_error(conn,Watching{plan},error)
+
+def skip_relay(conn: Connection(), plan: RecoveryPlan, remaining: List<&2,String>) -> IO(RouteStep()):
+  (quic,bridge) = conn
+  match bridge:
+    case None{}:
+      route_step((quic,None{}),DialingRelay{plan,remaining},DirectRoute{})
+    case Some{path}:
+      do IO<RouteStep()>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Path.stop(path)
+        route_step((quic,None{}),DialingRelay{plan,remaining},DirectRoute{})
+
+def opened_relay(conn: Quic.DatagramConnection, attachment: Result<&1,&1,U32 & String,Path.Bridge & U32>,
+    plan: RecoveryPlan, rest: List<&2,String>) -> IO(RouteStep()):
+  match attachment:
+    case Done{(bridge,port)}:
+      do IO<RouteStep()>:
+        now : U32 <- Quic.quic_millis()
+        route_step((conn,Some{bridge}),ProbingRelay{plan,rest,port,now},DirectRoute{})
+    case Fail{_}:
+      route_step((conn,None{}),DialingRelay{plan,rest},DirectRoute{})
+
+def start_standby(conn: Connection(), +plan: RecoveryPlan, url: String, rest: List<&2,String>) -> IO(RouteStep()):
+  (quic,_) = conn
+  RelayFallback{PeerKeys{seed,peer,_},_,_} = plan
+  do IO<RouteStep()>:
+    bridge : Result<&1,&1,U32 & String,Path.Bridge & U32> <- Path.start(url,seed,peer,0)
+    opened_relay(quic,bridge,plan,rest)
+
+def dial_standby(conn: Connection(), plan: RecoveryPlan, remaining: List<&2,String>) -> IO(RouteStep()):
+  match remaining:
+    case Con{url,rest}:
+      start_standby(conn,plan,url,rest)
+    case Nil{}:
+      do IO<RouteStep()>:
+        monitored : Connection() & Result<&1,&1,U32 & String,Unit> <- arm_recovery(conn)
+        restarted_monitor(monitored,plan)
+
+def watch_path(conn: Connection(), +plan: RecoveryPlan, stalled: Bool) -> IO(RouteStep()):
+  RelayFallback{_,urls,_} = plan
+  match stalled:
+    case True{}:
+      dial_standby(conn,plan,urls)
+    case False{}:
+      route_step(conn,Watching{plan},DirectRoute{})
+
+def watch_input(input: Connection() & Result<&1,&1,U32 & String,U32 & U32>, plan: RecoveryPlan) -> IO(RouteStep()):
+  match input:
+    case (conn,Done{(+idle,pto)}):
+      watch_path(conn,plan,U32.is_ge(idle,3500) && U32.is_ge(U32.div(idle,3),pto))
+    case (conn,Fail{error}):
+      route_error(conn,Watching{plan},error)
+
+def after_relay_probe(result: Connection() & Result<&1,&1,U32 & String,U32>, plan: RecoveryPlan,
+    remaining: List<&2,String>, port: U32, since: U32, expired: Bool) -> IO(RouteStep()):
+  match result expired:
+    case (conn,Done{0}) False{}:
+      route_step(conn,ProbingRelay{plan,remaining,port,since},DirectRoute{})
+    case (conn,Done{0}) True{}:
+      skip_relay(conn,plan,remaining)
+    case (conn,Done{_}) _:
+      route_step(conn,ValidatingRelay{plan,remaining},DirectRoute{})
+    case (conn,Fail{_}) _:
+      skip_relay(conn,plan,remaining)
+
+def completed_relay(result: Connection() & Result<&1,&1,U32 & String,Unit>) -> IO(RouteStep()):
+  match result:
+    case (conn,Done{_}):
+      route_step(conn,OnRelay{},RelayRoute{})
+    case (conn,Fail{error}):
+      route_error(conn,OnRelay{},error)
+
+def observe_relay(result: Connection() & Result<&1,&1,U32 & String,U32>, plan: RecoveryPlan,
+    remaining: List<&2,String>) -> IO(RouteStep()):
+  match result:
+    case (conn,Done{2}):
+      do IO<RouteStep()>:
+        unmonitored : Connection() & Result<&1,&1,U32 & String,Unit> <-
+          use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.monitor_quic_path(c,0))
+        completed_relay(unmonitored)
+    case (conn,Done{1}):
+      route_step(conn,ValidatingRelay{plan,remaining},DirectRoute{})
+    case (conn,Done{_}):
+      skip_relay(conn,plan,remaining)
+    case (conn,Fail{error}):
+      route_error(conn,ValidatingRelay{plan,remaining},error)
+
+def advance_recovery(conn: Connection(), state: RecoveryState) -> IO(RouteStep()):
+  match state:
+    case DirectOnly{}:
+      route_step(conn,DirectOnly{},DirectRoute{})
+    case OnRelay{}:
+      route_step(conn,OnRelay{},RelayRoute{})
+    case Watching{plan}:
+      do IO<RouteStep()>:
+        timing : Connection() & Result<&1,&1,U32 & String,U32 & U32> <-
+          use_connection(Result<&1,&1,U32 & String,U32 & U32>,conn,Quic.quic_path_timing)
+        watch_input(timing,plan)
+    case DialingRelay{plan,rest}:
+      dial_standby(conn,plan,rest)
+    case ProbingRelay{+plan,rest,+port,+since}:
+      RelayFallback{_,_,timeout} = plan
+      do IO<RouteStep()>:
+        now : U32 <- Quic.quic_millis()
+        candidate : Connection() & Result<&1,&1,U32 & String,U32> <-
+          start_path_migration(conn,IpAddress{"127.0.0.1",0},IpAddress{"127.0.0.1",port})
+        after_relay_probe(candidate,plan,rest,port,since,U32.is_ge(U32.sub(now,since),timeout))
+    case ValidatingRelay{plan,rest}:
+      do IO<RouteStep()>:
+        validation : Connection() & Result<&1,&1,U32 & String,U32> <-
+          use_connection(Result<&1,&1,U32 & String,U32>,conn,Quic.quic_migration_status)
+        observe_relay(validation,plan,rest)
+
+def recovery_progress(result: Connection() & Result<&1,&1,U32 & String,U32>, state: RecoveryState) -> IO(RouteStep()):
+  match result:
+    case (conn,Done{_}):
+      advance_recovery(conn,state)
+    case (conn,Fail{error}):
+      route_error(conn,state,error)
+
+# Drive QUIC and migrate the same connection to a relay after a direct outage.
+def step_routes(owner: RoutedConnection) -> IO(RouteStep()):
+  Routed{conn,state} = owner
+  do IO<RouteStep()>:
+    progress : Connection() & Result<&1,&1,U32 & String,U32> <-
+      use_connection(Result<&1,&1,U32 & String,U32>,conn,Quic.step_quic_datagram)
+    recovery_progress(progress,state)
+
+def keep_routes(-R: Type, pair: Connection() & R, state: RecoveryState) -> RoutedConnection & R:
+  (conn,value) = pair
+  (Routed{conn,state},value)
+
+def use_routed_connection(-R: Type, owner: RoutedConnection,
+    operation: Quic.DatagramConnection -> IO(Quic.DatagramConnection & R)) -> IO(RoutedConnection & R):
+  Routed{conn,state} = owner
+  do IO<RoutedConnection & R>:
+    result : Connection() & R <- use_connection(R,conn,operation)
+    return keep_routes(R,result,state)
+
+def close_routes(owner: RoutedConnection) -> IO(Result<&1,&1,U32 & String,Unit>):
+  Routed{conn,_} = owner
+  disconnect(conn)
+
 def bind(address: Address, identity: Identity) -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
   IpAddress{host,port} = address
   PeerKeys{seed,peer,alpn} = identity
