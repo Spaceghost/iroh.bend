@@ -721,6 +721,12 @@ check-quic-close-control:
 	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
+UPSTREAM_QUIC_IDLE ?=
+.PHONY: check-quic-idle-control
+check-quic-idle-control:
+	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$(UPSTREAM_QUIC_IDLE)" "$(UPSTREAM_QUIC_IDLE)" --control
+
 .PHONY: check-quic-relay-close check-quic-datagram-relay-close check-quic-multipath-relay-close check-quic-relay-close-control
 .NOTPARALLEL: check-quic-relay-close
 check-quic-relay-close: check-quic-datagram-relay-close check-quic-multipath-relay-close

@@ -93,6 +93,13 @@ client requires a libcurl build with WebSocket support.
    The optional `control` argument exchanges the fixture's local and expected peer
    identities for `make check-quic-close-control`.
    See the [Iroh graceful-close test](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L3161-L3198).
+   Run `make check-quic-idle-control UPSTREAM_QUIC_IDLE=/path/to/peer` to compare
+   two Iroh 1.5.0 endpoints after an 800 ms negotiated idle timeout. The peer accepts
+   `listen|listen6 idle|activity [control]` or `dial ADDRESS idle|activity [control]`,
+   using the same identity and ALPN as the close fixture. The dialer sends datagram
+   byte 10 and receives 20. In the activity case it repeats four times at 300 ms
+   intervals, incrementing both bytes each time. Both endpoints check `TimedOut`
+   after the last exchange and print `PASS CASE timed out`.
    For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
    registers with the supplied Iroh relay, and prints `READY relay` when ready to accept.
