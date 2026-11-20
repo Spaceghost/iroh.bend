@@ -289,10 +289,10 @@ def release_lookup(gate: Maybe<&2,U32>, outcome: Endpoint.ConnectResult()) -> IO
         barrier_ack(pair)
         check_endpoint(outcome,False{})
 
-def lookup_ticket(ticket: String, sources: List<&2,Endpoint.AddressLookup>, gate: Maybe<&2,U32>) -> IO(Unit):
+def lookup_ticket(timeout: U32, ticket: String, sources: List<&2,Endpoint.AddressLookup>, gate: Maybe<&2,U32>) -> IO(Unit):
   do IO<Unit>:
     outcome : Endpoint.ConnectResult() <- Endpoint.connect_ticket_with_lookup(ticket,List.replicate(U32,32n,73),
-      Fixture.alpn(),Endpoint.HandshakeTimeouts{700,6000},sources)
+      Fixture.alpn(),Endpoint.HandshakeTimeouts{timeout,6000},sources)
     release_lookup(gate,outcome)
 
 def prepend_lookup(source: Maybe<&2,Endpoint.AddressLookup>, tail: Maybe<&2,List<&2,Endpoint.AddressLookup>>)
@@ -321,10 +321,10 @@ def lookup_sources(args: List<&1,String>) -> Maybe<&2,List<&2,Endpoint.AddressLo
     case _:
       None{}
 
-def lookup_args(ticket: String, sources: Maybe<&2,List<&2,Endpoint.AddressLookup>>, gate: Maybe<&2,U32>) -> IO(Unit):
+def lookup_args(timeout: U32, ticket: String, sources: Maybe<&2,List<&2,Endpoint.AddressLookup>>, gate: Maybe<&2,U32>) -> IO(Unit):
   match sources:
     case Some{configured}:
-      lookup_ticket(ticket,configured,gate)
+      lookup_ticket(timeout,ticket,configured,gate)
     case None{}:
       IO.die(Unit,2,"expected DNS ports or Pkarr relay URLs")
 
@@ -687,9 +687,11 @@ def run(args: List<String>) -> IO(Unit):
     case Con{_,Con{"lookup-events",Con{ticket,sources}}}:
       LookupStream.run(ticket,lookup_sources(sources))
     case Con{_,Con{"lookup-ticket",Con{ticket,sources}}}:
-      lookup_args(ticket,lookup_sources(sources),None{})
+      lookup_args(700,ticket,lookup_sources(sources),None{})
+    case Con{_,Con{"lookup-ticket-racing",Con{ticket,sources}}}:
+      lookup_args(12000,ticket,lookup_sources(sources),None{})
     case Con{_,Con{"lookup-ticket-barrier",Con{port,Con{ticket,sources}}}}:
-      lookup_args(ticket,lookup_sources(sources),U32.read(port))
+      lookup_args(700,ticket,lookup_sources(sources),U32.read(port))
     case [_, "dial-ticket", ticket, "direct"]:
       dial_ticket(ticket,False{})
     case [_, "dial-ticket", ticket, "relay"]:

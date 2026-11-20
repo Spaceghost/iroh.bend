@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
 from urllib.request import Request, urlopen
 
-from endpoint_candidate_lookup import check_supplied_route
+from endpoint_candidate_lookup import check_discovered_route, check_supplied_route
 from endpoint_lookup_events import check_events
 from endpoint_lookup_race import check_race, check_stale_record, dns_proxy
 from endpoint_ticket_dial import read_ticket
@@ -52,6 +52,9 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if response.status != 204:
                 raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
 
+        if source in ("discovered-dns", "discovered-pkarr"):
+            check_discovered_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("discovered-"))
+            return
         if source in ("supplied-dns", "supplied-pkarr"):
             check_supplied_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("supplied-"))
             return
@@ -110,7 +113,7 @@ def main(client, fixture, pkarr, dns_port):
                     check(client, fixture, family, mode, source, pkarr, dns_port)
                 check(client, fixture, family, "wrong-id", source, pkarr, dns_port,
                       expected_error=b"peer endpoint key mismatch")
-            for kind in ("supplied-dns", "supplied-pkarr"):
+            for kind in ("supplied-dns", "supplied-pkarr", "discovered-dns", "discovered-pkarr"):
                 check(client, fixture, family, "direct", kind, pkarr, dns_port)
             check(client, fixture, family, "direct", "pkarr", pkarr, dns_port, invalid)
             check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,

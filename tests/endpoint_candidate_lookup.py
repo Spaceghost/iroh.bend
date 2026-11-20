@@ -1,4 +1,4 @@
-"""Hold the supplied UDP route until the configured address lookup starts."""
+"""Exercise supplied and discovered routes during a single live QUIC handshake."""
 
 import base64
 import socket
@@ -23,7 +23,7 @@ def direct_ticket(ticket, family, proxy_port):
 
 
 @contextmanager
-def supplied_route(ticket, family, release):
+def supplied_route(ticket, family, release, observed=None):
     af, host = (socket.AF_INET, "127.0.0.1") if family == "listen" else (socket.AF_INET6, "::1")
     done = Event()
     with socket.socket(af, socket.SOCK_DGRAM) as proxy:
@@ -44,6 +44,8 @@ def supplied_route(ticket, family, release):
                         proxy.sendto(packet, client)
                 else:
                     client = addr
+                    if observed is not None and not first_packet.is_set():
+                        observed.append(packet)
                     first_packet.set()
                     if release.wait(2) and not done.is_set():
                         proxy.sendto(packet, target)
@@ -84,3 +86,47 @@ def check_supplied_route(client, ticket, peer, pkarr, dns_port, family, kind):
         finally:
             release.set()
     print(f"PASS {family} supplied direct handshake with {kind} lookup pending", flush=True)
+
+def initial_ids(packet):
+    if len(packet) < 1200 or packet[0] & 0xf0 != 0xc0 or int.from_bytes(packet[1:5], "big") != 1:
+        raise AssertionError("Expected a QUIC v1 Initial")
+    start = 6 + packet[5]
+    return packet[6:start], packet[start+1:start+1+packet[start]]
+
+
+def check_discovered_route(client, ticket, peer, pkarr, dns_port, family, kind):
+    ipv6 = family == "listen6"
+    observed, original = [], []
+    released = Event()
+    with ExitStack() as stack:
+        stale = stack.enter_context(socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_DGRAM))
+        stale.bind(("::1" if ipv6 else "127.0.0.1", 0))
+        stale.settimeout(3)
+        changed, _ = direct_ticket(ticket, family, stale.getsockname()[1])
+
+        def after_initial(*_):
+            packet = stale.recv(65535)
+            original.append(initial_ids(packet))
+            released.set()
+            return True
+
+        if kind == "dns":
+            ready = Event()
+            ready.set()
+            forwarded, _ = stack.enter_context(supplied_route(ticket, family, ready, observed))
+            _, (host, port) = direct_ticket(forwarded, family, 1)
+            address = f"[{host}]:{port}" if ipv6 else f"{host}:{port}"
+            args = dns_proxy(stack, dns_port, after_initial, address=address)
+        else:
+            args = relay_proxy(stack, pkarr.rstrip("/"), after_initial)
+        # The supplied address holds its packet for the full 12-second deadline.
+        # Discovery must complete the authenticated exchange while it is silent.
+        result = subprocess.run([client, "lookup-ticket-racing", changed, *args], capture_output=True, timeout=6)
+        if result.returncode or not released.is_set():
+            raise AssertionError(f"Discovered {kind} route did not win: {result.stderr!r}")
+        transcript, _ = peer.communicate(timeout=3)
+        if peer.returncode:
+            raise AssertionError(f"Iroh rejected the discovered {kind} exchange: {transcript!r}")
+        if kind == "dns" and (not observed or initial_ids(observed[0]) != original[0]):
+            raise AssertionError("The discovered path started a separate QUIC connection")
+    print(f"PASS {family} discovered {kind} route connects during the supplied handshake", flush=True)
