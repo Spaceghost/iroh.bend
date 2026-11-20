@@ -124,7 +124,20 @@ client requires a libcurl build with WebSocket support.
    own maximum to zero except in `peer-limit`, where it supplies 800 ms. It
    checks the exact negotiated value in Iroh. Finite short cases check expiry.
    In `wide` and `no-limit`, the observer waits 1.5 s before sending byte 31,
-   verifies byte 32 and closes with code zero and an empty reason.
+   verifies byte 32 and closes with code zero and an empty reason. The same
+   Bend target checks each backend's maximum timer and the next millisecond
+   above it. It also binds two listeners in one Bend process, accepts a peer on
+   each, and checks that their different timers apply independently. In this
+   test the Iroh dialers take a final argument `pair`. The short connection
+   expires and the wide one receives application close code 123.
+   Use `make check-quic-idle-config-routes` to run the dialer cases through
+   the public endpoint route-selection API. The Iroh observer accepts the
+   final argument `route`, checks the negotiated duration, sends byte 31,
+   verifies byte 32 and closes with code zero. For the same cases on a relay,
+   run `make check-quic-idle-config-relay` with `RELAY_URL` and
+   `UPSTREAM_IROH_RELAY_URL` as below. The observer accepts
+   `listen-relay RELAY_BASE CASE route`, disables IP transports, prints
+   `READY relay` after registration and checks the datagram arrived by relay.
 
    For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
@@ -497,6 +510,12 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   durations in nanoseconds and Picoquic uses microseconds. The bindings
   report `EOVERFLOW` for milliseconds above 18,446,744,073,709 and
   18,446,744,073,709,551 respectively.
+- In the endpoint modules, `bind_with_idle_timeout` configures a pinned
+  listener. `connect_routes_with_idle_timeout` accepts the same millisecond
+  value after its handshake timeouts. For address lookup, use
+  `connect_with_lookup_and_idle_timeout` with the value after the list of
+  sources. The setting belongs to the QUIC handshake and applies to the
+  connection whichever candidate wins.
 - After an explicit local reset, step the connection and poll `quic_stream_reset_acked`
   (ngtcp2) or `multipath_stream_reset_acked` (Picoquic). The result is 0 before
   a reset and while it is pending, and 1 when the peer has acknowledged it.
@@ -865,9 +884,13 @@ They also check expiry under one-way packet loss and verify that later datagram
 and stream operations report the timeout. With default settings, Iroh observes
 a 30-second negotiated idle timeout and a heartbeat after five seconds from each
 backend. Both connections exchange fresh data after the heartbeat. These checks
-cover the connection-wide timers. The pinned direct dial and listen APIs also
-accept a caller-selected maximum idle timeout. Per-path idle timeout parity
-remains open.
+cover the connection-wide timers. Both backends accept a caller-selected
+maximum through the pinned direct dial and listen APIs and the endpoint route
+and lookup dialers. Iroh checked the negotiated value on direct IPv4 and IPv6
+and on relay-only WS and WSS routes. In one Bend process, a listener with a
+1,150 ms timeout expired while a second listener with a 4,294,967,419 ms
+timeout could still send an application close. Per-path idle timeout parity
+and configuring the specialized resumption and NAT constructors remain open.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
