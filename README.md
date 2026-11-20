@@ -328,6 +328,11 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 
 ## Library interfaces
 
+- [Endpoint ID text](src/endpoint_id.bend) parses Iroh's lowercase hexadecimal
+  and case-insensitive unpadded base32 IDs. `parse` validates the compressed
+  Ed25519 point and returns the 32 bytes used by `PeerKeys`. `decode` checks
+  the spelling and length. `format` emits lowercase hexadecimal from 32 bytes.
+  Run `make check-endpoint-id` for the Iroh 1.5.0 vectors.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
@@ -674,7 +679,7 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
-| Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
+| Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. The endpoint ID codec matched Iroh 1.5.0 on 4,711 hexadecimal and base32 inputs, including malformed strings and invalid curve points. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits charge challenge proofs, binary WebSocket data, fragment overhead, and masked Pong frames before message delivery. Tests cover post-confirmation notices before application traffic, notices on incomplete messages, and live updates. The HTTP and HTTPS relay routes pass the same latency, health, robots, and index checks as Iroh 1.5.0. Plain HTTP also passes the upstream captive portal challenge checks. The default listener uses Bend HTTP and WebSocket framing. It exposes ordered repeated custom headers and charges post-upgrade transport reads before decoding, including partial and control frames. Ordinary HTTP requests support reuse and pipelining on both cleartext and TLS connections. |
 | Inbound peer identity | A single listener accepts distinct Ed25519 identities and reports the authenticated key on each accepted connection. The ngtcp2 and Picoquic listeners passed IPv4 and IPv6 tests with two Iroh 1.5.0 peers per listener, including recovery of both remote IDs on 0-RTT resumption. |

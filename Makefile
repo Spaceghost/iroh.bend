@@ -114,6 +114,22 @@ $(BUILD)/iroh-bend-relay-auth: $(BUILD)/relay-auth.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
 
+.PHONY: check-endpoint-id
+check-endpoint-id: $(BUILD)/iroh-bend-endpoint-id
+	$<
+
+$(BUILD)/endpoint-id.c: tests/endpoint_id.bend src/endpoint_id.bend src/ed25519.bend src/ed25519.nelua tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp src/endpoint_id.bend src/ed25519.bend "$(@:.c=-stage)/src/"
+	cp tests/endpoint_id.bend "$(@:.c=-stage)/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
+		"$(abspath $(@:.c=-stage))/src/ed25519.c"
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/endpoint_id.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-endpoint-id: $(BUILD)/endpoint-id.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) "$<" \
+		-o "$@" -pthread -lm $$($(PKG_CONFIG) --libs openssl)
+
 .PHONY: check-relay-live
 RELAY_URL ?= ws://127.0.0.1:3340/relay
 RELAY_SOURCES = $(AUTH_SOURCES) src/relay_client.bend src/relay_exporter.bend src/relay_socket.bend

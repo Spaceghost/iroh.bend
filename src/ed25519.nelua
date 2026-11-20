@@ -2,11 +2,12 @@
 ## pragmas.noentrypoint = true
 ## pragmas.nogc = true
 ## cinclude '<openssl/evp.h>'
+## cinclude '<openssl/bn.h>'
 ## cinclude '<errno.h>'
 require 'C.stdlib'
 
 ##[[
-for _, name in ipairs{'public_key','sign','verify','sha1_public_key','Con','True','False'} do
+for _, name in ipairs{'public_key','sign','verify','valid_public_key','sha1_public_key','Con','True','False'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_ed_%s CID(%s)\n#else\n#define iroh_ed_%s UINT32_MAX\n#endif',
     name, name, name, name))
@@ -15,6 +16,7 @@ end
 local iroh_ed_sign: uint32 <cimport,nodecl>
 local iroh_ed_public_key: uint32 <cimport,nodecl>
 local iroh_ed_verify: uint32 <cimport,nodecl>
+local iroh_ed_valid_public_key: uint32 <cimport,nodecl>
 local iroh_ed_sha1_public_key: uint32 <cimport,nodecl>
 local iroh_ed_Con: uint32 <cimport,nodecl>
 local iroh_ed_True: uint32 <cimport,nodecl>
@@ -132,6 +134,64 @@ local function verify(e: Env, f: *[0]Term, work: *IoWork): Term
   return term_pak(iroh_ed_False, 0)
 end
 
+local BIGNUM <cimport,nodecl> = @record{}
+local BN_CTX <cimport,nodecl> = @record{}
+local function BN_CTX_new(): *BN_CTX <cimport,nodecl> end
+local function BN_CTX_free(ctx:*BN_CTX) <cimport,nodecl> end
+local function BN_CTX_start(ctx:*BN_CTX) <cimport,nodecl> end
+local function BN_CTX_get(ctx:*BN_CTX): *BIGNUM <cimport,nodecl> end
+local function BN_CTX_end(ctx:*BN_CTX) <cimport,nodecl> end
+local function BN_hex2bn(n:**BIGNUM, text:cstring): cint <cimport,nodecl> end
+local function BN_lebin2bn(bytes:*cuchar, size:cint, n:*BIGNUM): *BIGNUM <cimport,nodecl> end
+local function BN_value_one(): *BIGNUM <cimport,nodecl> end
+local function BN_mod_sqr(out:*BIGNUM, value:*BIGNUM, p:*BIGNUM, ctx:*BN_CTX):cint <cimport,nodecl> end
+local function BN_mod_add(out:*BIGNUM, a:*BIGNUM, b:*BIGNUM, p:*BIGNUM, ctx:*BN_CTX):cint <cimport,nodecl> end
+local function BN_mod_sub(out:*BIGNUM, a:*BIGNUM, b:*BIGNUM, p:*BIGNUM, ctx:*BN_CTX):cint <cimport,nodecl> end
+local function BN_mod_mul(out:*BIGNUM, a:*BIGNUM, b:*BIGNUM, p:*BIGNUM, ctx:*BN_CTX):cint <cimport,nodecl> end
+local function BN_mod_exp(out:*BIGNUM, base:*BIGNUM, exp:*BIGNUM, p:*BIGNUM, ctx:*BN_CTX):cint <cimport,nodecl> end
+local function BN_is_zero(n:*BIGNUM):cint <cimport,nodecl> end
+local function BN_is_one(n:*BIGNUM):cint <cimport,nodecl> end
+
+-- RFC 8032 decompression needs a square root of (y²-1)/(d*y²+1).
+-- Test the equivalent product for quadratic residuosity. As in the
+-- Iroh verifier, decode y in the field and ignore the sign for this test.
+local function decompressible(public:*[32]cuchar): boolean
+  local ctx = BN_CTX_new()
+  if ctx == nilptr then return false end
+  defer BN_CTX_free(ctx) end
+  BN_CTX_start(ctx)
+  defer BN_CTX_end(ctx) end
+  local p = BN_CTX_get(ctx)
+  local d = BN_CTX_get(ctx)
+  local exponent = BN_CTX_get(ctx)
+  local y = BN_CTX_get(ctx)
+  local numerator = BN_CTX_get(ctx)
+  local denominator = BN_CTX_get(ctx)
+  if denominator == nilptr then return false end
+  ($public)[31] = ($public)[31] & 127
+  local one = BN_value_one()
+  return BN_hex2bn(&p,'7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed') ~= 0 and
+    BN_hex2bn(&exponent,'3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6') ~= 0 and
+    BN_hex2bn(&d,'52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3') ~= 0 and
+    BN_lebin2bn(&($public)[0],32,y) ~= nilptr and
+    BN_mod_sqr(y,y,p,ctx) == 1 and
+    BN_mod_sub(numerator,y,one,p,ctx) == 1 and
+    BN_mod_mul(denominator,d,y,p,ctx) == 1 and
+    BN_mod_add(denominator,denominator,one,p,ctx) == 1 and
+    BN_is_zero(denominator) == 0 and
+    BN_mod_mul(y,numerator,denominator,p,ctx) == 1 and
+    BN_mod_exp(y,y,exponent,p,ctx) == 1 and
+    (BN_is_zero(y) ~= 0 or BN_is_one(y) ~= 0)
+end
+
+local function valid_public_key(e:Env, f:*[0]Term, work:*IoWork): Term
+  local public:[32]cuchar
+  if read(e,f[0],(@*[0]cuchar)(&public[0]),32) == 32 and decompressible(&public) then
+    return term_pak(iroh_ed_True,0)
+  end
+  return term_pak(iroh_ed_False,0)
+end
+
 local function sha1_public_key(e: Env, f: *[0]Term, work: *IoWork): Term
   local key: [32]cuchar
   if read(e,f[0],(@*[0]cuchar)(&key[0]),32) ~= 32 then
@@ -149,5 +209,6 @@ local function register() <cexport,codename 'iroh_register_ed25519',cattribute '
   if iroh_ed_public_key ~= 0xffffffff then io_eff(iroh_ed_public_key, public_key) end
   if iroh_ed_sign ~= 0xffffffff then io_eff(iroh_ed_sign, sign) end
   if iroh_ed_verify ~= 0xffffffff then io_eff(iroh_ed_verify, verify) end
+  if iroh_ed_valid_public_key ~= 0xffffffff then io_eff(iroh_ed_valid_public_key, valid_public_key) end
   if iroh_ed_sha1_public_key ~= 0xffffffff then io_eff(iroh_ed_sha1_public_key, sha1_public_key) end
 end
