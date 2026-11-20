@@ -333,6 +333,14 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   Ed25519 point and returns the 32 bytes used by `PeerKeys`. `decode` checks
   the spelling and length. `format` emits lowercase hexadecimal from 32 bytes.
   Run `make check-endpoint-id` for the Iroh 1.5.0 vectors.
+- [Endpoint tickets](src/endpoint_ticket.bend) encode and decode the
+  [iroh-tickets 1.0.0 format](https://github.com/n0-computer/iroh-tickets/blob/v1.0.0/src/endpoint.rs)
+  with Iroh 1.5.0 endpoint IDs, relay URLs, IPv4, IPv6, and custom transport
+  addresses. `encode` produces the `endpoint`-prefixed string. `encode_bytes`
+  produces the Postcard payload. Supply canonical relay URL bytes when
+  constructing a ticket. The codec preserves them as UTF-8. Run
+  `make check-endpoint-ticket` for the upstream snapshot and mixed-address
+  round-trip checks.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
