@@ -641,13 +641,33 @@ $(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_mu
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_session.bend -o "$(abspath $@)"
 
-$(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-quic-multipath-early-listener $(BUILD)/iroh-bend-relay-qad:
+$(BUILD)/iroh-bend-quic-multipath-cancel $(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-quic-multipath-early-listener $(BUILD)/iroh-bend-relay-qad:
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }
 	$(CLANG) -std=gnu11 -O2 $(PICOQUIC_FLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $$($(PKG_CONFIG) --libs openssl)
+
+.PHONY: check-quic-stream-cancel check-quic-datagram-cancel check-quic-multipath-cancel
+UPSTREAM_QUIC_STREAM_CANCEL ?=
+check-quic-stream-cancel: check-quic-datagram-cancel check-quic-multipath-cancel
+
+check-quic-datagram-cancel check-quic-multipath-cancel: check-%: $(BUILD)/iroh-bend-%
+	@test -x "$(UPSTREAM_QUIC_STREAM_CANCEL)" || { echo 'Set UPSTREAM_QUIC_STREAM_CANCEL to the Iroh stream cancellation fixture.' >&2; exit 2; }
+	python3 -B tests/quic_stream_cancel.py "$<" "$(UPSTREAM_QUIC_STREAM_CANCEL)"
+
+$(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
+$(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
+$(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend src/quic_stream.bend src/quic_nat.bend tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
+	cp $(filter tests/%.bend,$^) "$(@:.c=-stage)/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" $(filter %.nelua,$^) "$(abspath $(@:.c=-stage))/src/$(subst -,_,$*).c"
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/$(subst -,_,$*)_cancel.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-datagram-cancel: $(BUILD)/quic-datagram-cancel.c
+$(BUILD)/iroh-bend-quic-multipath-cancel: $(BUILD)/quic-multipath-cancel.c
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_stream.bend src/quic_nat.bend src/quic_datagram.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"
@@ -658,6 +678,7 @@ $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/qu
 	cd "$(BUILD)/quic-datagram-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_datagram.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-quic-datagram: $(BUILD)/quic-datagram.c
+$(BUILD)/iroh-bend-quic-datagram $(BUILD)/iroh-bend-quic-datagram-cancel:
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS)) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS))
 
