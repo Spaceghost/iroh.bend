@@ -38,7 +38,7 @@ local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
   is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64,cnx_state:cint,tls_stream:[4]native_stream_t,tls_ctx:pointer,
   remote_parameters:transport_t,first_datagram:*frame_t,
   max_early_data_size:csize,zero_rtt_data_accepted:cuint,first_misc_frame:*frame_t,last_misc_frame:*frame_t,
-  maxdata_remote:uint64,max_streams_bidir_remote:uint64,max_streams_unidir_remote:uint64,data_sent:uint64,
+  nb_packets_received:uint64,maxdata_remote:uint64,max_streams_bidir_remote:uint64,max_streams_unidir_remote:uint64,data_sent:uint64,
   next_stream_id:[4]uint64,pkt_ctx:[3]packet_context_t,queue_data_repeat_tree:tree_t,crypto_context:[4]crypto_context_t
 }
 local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
@@ -184,6 +184,7 @@ local function ptls_openssl_raw_pubkey_init_verify_certificate(pin:*pin_t, pubke
 local function ptls_openssl_raw_pubkey_dispose_verify_certificate(pin:*pin_t) <cimport,nodecl> end
 local function socket(domain:cint,kind:cint,protocol:cint):cint <cimport,nodecl> end
 local function connect(fd:cint, addr:pointer, size:cuint):cint <cimport,nodecl> end
+local function getpeername(fd:cint, addr:pointer, size:*cuint):cint <cimport,nodecl> end
 local function getsockname(fd:cint, addr:pointer, size:*cuint):cint <cimport,nodecl> end
 local function close(fd:cint):cint <cimport,nodecl> end
 local function recv(fd:cint, data:pointer,size:csize,flags:cint):isize <cimport,nodecl> end
@@ -290,6 +291,8 @@ local QUIC_TRANSPORT_EXTENSION: uint16 <comptime> = 57
 
 ##[[
 local names = {
+  'start_multipath_route_handshake', 'start_multipath_nat_route_handshake', 'open_multipath_handshake_socket',
+  'read_multipath_handshake_socket', 'multipath_handshake_output', 'adopt_multipath_handshake_socket',
   'start_multipath', 'start_multipath_nat_offer', 'start_multipath_nat_offer_bytes', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
@@ -316,6 +319,12 @@ local iroh_mp_QadServer: uint32 <cimport,nodecl>
 local iroh_mp_bind_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_step_qad_server: uint32 <cimport,nodecl>
 local iroh_mp_close_qad_server: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_route_handshake: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_route_handshake: uint32 <cimport,nodecl>
+local iroh_mp_open_multipath_handshake_socket: uint32 <cimport,nodecl>
+local iroh_mp_read_multipath_handshake_socket: uint32 <cimport,nodecl>
+local iroh_mp_multipath_handshake_output: uint32 <cimport,nodecl>
+local iroh_mp_adopt_multipath_handshake_socket: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_nat_offer_bytes: uint32 <cimport,nodecl>
@@ -407,6 +416,8 @@ local function io_cstr(e: Env, term: Term, size: *uint64): cstring <cimport,node
 local function io_nul(value: cstring, size: uint64): boolean <cimport,nodecl> end
 local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
 local function io_fail(e: Env, code: uint32, message: cstring): Term <cimport,nodecl> end
+local function io_hand(fd: uint64): Term <cimport,nodecl> end
+local function io_hand_v(handle: Term): uint64 <cimport,nodecl> end
 local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
 local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
 local function io_list(e: Env, bytes: cstring, size: uint64): Term <cimport,nodecl> end
@@ -456,6 +467,9 @@ local function SSL_set_quic_tls_transport_params(ssl:*mp_ssl,bytes:*uint8,len:cs
 local function SSL_set_quic_tls_early_data_enabled(ssl:*mp_ssl,mode:cint):cint <cimport,nodecl> end
 local function SSL_do_handshake(ssl:*mp_ssl):cint <cimport,nodecl> end
 local function SSL_get_error(ssl:*mp_ssl,status:cint):cint <cimport,nodecl> end
+local picoquic_state_handshake_failure:cint <cimport,nodecl>
+local picoquic_state_handshake_failure_resend:cint <cimport,nodecl>
+local picoquic_state_disconnecting:cint <cimport,nodecl>
 local picoquic_state_server_false_start:cint <cimport,nodecl>
 local picoquic_state_server_handshake:cint <cimport,nodecl>
 local function SSL_get0_peer_rpk(ssl:*mp_ssl):*evp_t <cimport,nodecl> end
@@ -516,9 +530,10 @@ local ADD_ADDRESS_V6: uint64 <comptime> = 0x3d7f91
 local REMOVE_ADDRESS: uint64 <comptime> = 0x3d7f94
 local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
+local BootstrapTuple = @record{local_addr:storage_t,peer:storage_t}
 local Path = @record{
   next: pointer, fd: cint, local_addr: storage_t, peer: storage_t,
-  id: uint32, status: uint32, unconnected: boolean
+  id: uint32, status: uint32, unconnected: boolean, bootstrap: *BootstrapTuple
 }
 local Stream = @record{
   next: pointer, id: uint32, rx: *[0]uint8, size: csize,
@@ -571,7 +586,7 @@ local Connection = @record{
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, output_source:storage_t, output_iface:cint, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
-  selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
+  selected_alpn: *Alpn, peer_parameters: PeerParameters, detached: boolean, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
@@ -1363,6 +1378,7 @@ end
 
 local function release_path(path: *Path)
   if path.fd >= 0 then close(path.fd) end
+  C.free(path.bootstrap)
   C.free(path)
 end
 
@@ -1621,6 +1637,14 @@ local function remember_shared_path(conn: *Connection, id: uint64): *Path
   return path
 end
 
+-- The QUIC engine sees one path while Bend tries the same handshake on
+-- several sockets. Keep that tuple for path zero when a different socket wins.
+local function bootstrap_tuple(path:*Path, source:*storage_t, peer:*storage_t):boolean
+  return path.bootstrap ~= nilptr and (source.ss_family == 0 or
+    picoquic_compare_addr(source,&path.bootstrap.local_addr) == 0) and
+    picoquic_compare_addr(peer,&path.bootstrap.peer) == 0
+end
+
 local function update_path(conn: *Connection, id: uint64, kind: cint)
   local path = find_path(conn,id)
   if path == nilptr and conn.listener ~= nilptr and kind == picoquic_callback_path_available then
@@ -1638,7 +1662,9 @@ local function update_path(conn: *Connection, id: uint64, kind: cint)
     while path ~= nilptr do
       if path.id == id then
         local same_local = picoquic_compare_addr(&path.local_addr,&local_addr) == 0
-        if same_local and path.unconnected then
+        if bootstrap_tuple(path,&local_addr,&peer) then
+          path.status = 1
+        elseif same_local and path.unconnected then
           path.peer = peer
           path.status = 1
         else
@@ -2023,7 +2049,7 @@ local function early_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,io_box(e,iroh_mp_Some,accepted)))
 end
 
-local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean, advertise_nat: boolean): Term
+local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean, advertise_nat: boolean, detached: boolean): Term
   defer free_session(session) end
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
@@ -2045,7 +2071,9 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
   local conn = (@*Connection)(C.calloc(1,#Connection))
   if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
   local initial: *Path, error: uint32
-  if advertise_nat then initial,error = open_nat_path(&peer,peer_size)
+  -- Routed endpoints bind separate IPv4 and IPv6 sockets for NAT probes.
+  -- Explicit fixed-socket NAT dials also receive off-path probes on path zero.
+  if advertise_nat and not detached then initial,error = open_nat_path(&peer,peer_size)
   else initial,error = open_path(&peer,peer_size,nilptr,0) end
   if initial == nilptr then
     destroy(conn)
@@ -2093,33 +2121,48 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
   end
   picoquic_enable_path_callbacks(conn.cnx,1)
   register_connection(conn)
-  return io_done(e,term_pak(iroh_mp_MultipathConnection,conn.id))
+  local handle = term_pak(iroh_mp_MultipathConnection,conn.id)
+  if detached then
+    local fd = initial.fd
+    initial.fd = -1
+    conn.detached = true
+    return io_done(e,io_tup(e,handle,io_hand((@uint64)(fd))))
+  end
+  return io_done(e,handle)
+end
+
+local function start_multipath_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,1,nilptr,false,false,true)
+end
+
+local function start_multipath_nat_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,1,nilptr,false,true,true)
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false,false)
+  return start_client(e,args,0,nilptr,false,false,false)
 end
 
 local function start_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false,true)
+  return start_client(e,args,0,nilptr,false,true,false)
 end
 
 local function start_nat_offer_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,true)
+  return start_client(e,args,1,nilptr,false,true,false)
 end
 
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false,false)
+  return start_client(e,args,1,nilptr,false,false,false)
 end
 
 local function start_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,2,nilptr,false,false)
+  return start_client(e,args,2,nilptr,false,false,false)
 end
 
 local function start_resume(e: Env, args: *[0]Term, early: boolean): Term
   local session = remove_session(handle_id(e,args[5],iroh_mp_MultipathSession))
   if session == nilptr then return io_fail(e,EBADF,'multipath session is no longer available') end
-  return start_client(e,args,1,session,early,false)
+  return start_client(e,args,1,session,early,false,false)
 end
 
 local function start_resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2235,6 +2278,7 @@ local function route_packet(conn: *Connection, src: *storage_t, dst: *storage_t)
   local path = conn.paths
   local candidate: *Path
   while path ~= nilptr do
+    if path.status ~= 3 and bootstrap_tuple(path,src,dst) then return path end
     if path.status ~= 3 and (src.ss_family == 0 and path.id == 0 or
         picoquic_compare_addr(&path.local_addr,src) == 0) then
       if picoquic_compare_addr(&path.peer,dst) == 0 then return path end
@@ -2274,11 +2318,127 @@ local function write_packet(conn: *Connection, now: uint64): uint32
   local path = route_packet(conn,&from,&to)
   if path == nilptr and conn.listener == nilptr then return 0 end
   conn.output_path = path
-  conn.output_peer = to
+  if path ~= nilptr and bootstrap_tuple(path,&from,&to) then
+    conn.output_peer = path.peer
+  else
+    conn.output_peer = to
+  end
   conn.output_source = from
   conn.output_iface = iface
   conn.output_size = size
   return flush_output(conn)
+end
+
+local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t): cuint
+  if port > 65535 then return 0 end
+  local size: uint64
+  local host = io_cstr(e,item,&size)
+  defer C.free(host) end
+  if io_nul(host,size) then return 0 end
+  return address(host,(@uint16)(port),out)
+end
+
+local function open_multipath_handshake_socket_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local peer:storage_t
+  local size = numeric_argument(e,args[0],args[1],&peer)
+  if size == 0 or args[1] == 0 then return io_fail(e,EINVAL,'invalid numeric peer address') end
+  local path,error = open_path(&peer,size,nilptr,0)
+  if path == nilptr then return io_fail(e,error,nilptr) end
+  local fd = path.fd
+  path.fd = -1
+  release_path(path)
+  return io_done(e,io_hand((@uint64)(fd)))
+end
+
+local function handshake_failed(conn:*Connection):boolean
+  local state = conn.cnx.cnx_state
+  return conn.closed or state == picoquic_state_handshake_failure or
+    state == picoquic_state_handshake_failure_resend or state >= picoquic_state_disconnecting
+end
+
+local function prepare_handshake(conn:*Connection, bytes:*uint8, length:*csize):cint
+  local source:storage_t, peer:storage_t
+  local iface:cint
+  return picoquic_prepare_packet(conn.cnx,picoquic_current_time(),bytes,IO_CAPACITY,length,&peer,&source,&iface)
+end
+
+local function handshake_input(e:Env, conn:*Connection, fd:cint):Term
+  if conn == nilptr or not conn.detached then return io_fail(e,EBADF,'no pending multipath handshake') end
+  if handshake_failed(conn) then return closed_error(e,conn) end
+  local bytes:[65536]uint8
+  local n = recv(fd,&bytes[0],#bytes,0)
+  if n < 0 and errno ~= EAGAIN and errno ~= EINTR then return io_fail(e,(@uint32)(errno),nilptr) end
+  if n <= 0 then return io_done(e,0) end
+  local count = conn.cnx.nb_packets_received
+  picoquic_incoming_packet(conn.quic,&bytes[0],(@csize)(n),&conn.paths.peer,&conn.paths.local_addr,0,0,picoquic_current_time())
+  if handshake_failed(conn) then
+    -- Deliver the TLS alert on the socket that supplied the peer's flight.
+    local length:csize
+    if prepare_handshake(conn,&bytes[0],&length) == 0 and length > 0 then
+      send(fd,&bytes[0],length,0)
+    end
+    return closed_error(e,conn)
+  end
+  if not conn.ready or count == conn.cnx.nb_packets_received then return io_done(e,0) end
+  if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
+  return io_done(e,1)
+end
+
+local function read_multipath_handshake_socket_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local result = handshake_input(e,find_connection(e,args[0]),(@cint)(io_hand_v(args[1])))
+  return io_tup(e,args[0],io_tup(e,args[1],result))
+end
+
+local function multipath_handshake_output_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local conn = find_connection(e,args[0])
+  local result:Term
+  if conn == nilptr or not conn.detached then
+    result = io_fail(e,EBADF,'no pending multipath handshake')
+  elseif handshake_failed(conn) then
+    result = closed_error(e,conn)
+  else
+    local bytes:[IO_CAPACITY]uint8
+    local size:csize
+    if prepare_handshake(conn,&bytes[0],&size) ~= 0 then
+      result = closed_error(e,conn)
+    else
+      result = io_done(e,io_list(e,(@cstring)(&bytes[0]),size))
+    end
+  end
+  return io_tup(e,args[0],result)
+end
+
+local function adopt_handshake(e:Env, conn:*Connection, fd:cint):Term
+  defer if fd >= 0 then close(fd) end end
+  if conn == nilptr or not conn.detached or not conn.ready or handshake_failed(conn) then
+    return io_fail(e,EBADF,'no authenticated multipath handshake')
+  end
+  local path = conn.paths
+  local actual:storage_t, peer:storage_t
+  local size = IROH_MP_STORAGE_SIZE
+  local peer_size = IROH_MP_STORAGE_SIZE
+  if getsockname(fd,&actual,&size) ~= 0 or getpeername(fd,&peer,&peer_size) ~= 0 then
+    return io_fail(e,(@uint32)(errno),nilptr)
+  end
+  if picoquic_compare_addr(&actual,&path.local_addr) ~= 0 or picoquic_compare_addr(&peer,&path.peer) ~= 0 then
+    path.bootstrap = (@*BootstrapTuple)(C.malloc(#BootstrapTuple))
+    if path.bootstrap == nilptr then return io_fail(e,ENOMEM,nilptr) end
+    path.bootstrap.local_addr = path.local_addr
+    path.bootstrap.peer = path.peer
+  end
+  path.peer = peer
+  path.local_addr = actual
+  path.fd = fd
+  fd = -1
+  conn.detached = false
+  local error = write_packet(conn,picoquic_current_time())
+  if error ~= 0 then return io_fail(e,error,'QUIC packet I/O failed') end
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function adopt_multipath_handshake_socket_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local result = adopt_handshake(e,find_connection(e,args[0]),(@cint)(io_hand_v(args[1])))
+  return io_tup(e,args[0],result)
 end
 
 local function close_retired_sockets(conn: *Connection)
@@ -2330,11 +2490,15 @@ local function read_from_path(conn: *Connection, path: *Path, bytes: *uint8, cap
   end
   if size > 0 then
     local quic = conn.quic
+    local destination = &path.local_addr
     local discovery = path_discovery(conn,path)
     if discovery ~= nilptr and picoquic_compare_addr(name,&discovery.peer) == 0 then
       quic = discovery.quic
+    elseif path.bootstrap ~= nilptr and picoquic_compare_addr(name,&path.peer) == 0 then
+      name = &path.bootstrap.peer
+      destination = &path.bootstrap.local_addr
     end
-    picoquic_incoming_packet(quic,bytes,(@csize)(size),name,&path.local_addr,0,0,now)
+    picoquic_incoming_packet(quic,bytes,(@csize)(size),name,destination,0,0,now)
   elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
     return (@uint32)(errno)
   end
@@ -2610,14 +2774,6 @@ local function read_nat_frame_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],optional_id(e,bytes))
 end
 
-local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t): cuint
-  if port > 65535 then return 0 end
-  local size: uint64
-  local host = io_cstr(e,item,&size)
-  defer C.free(host) end
-  if io_nul(host,size) then return 0 end
-  return address(host,(@uint16)(port),out)
-end
 
 local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean, dual:boolean): Term
   local local_addr: storage_t
@@ -3981,13 +4137,19 @@ end
 local function close_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn ~= nilptr then
-    if not conn.closed and picoquic_close(conn.cnx,0) == 0 then write_packet(conn,picoquic_current_time()) end
+    if not conn.detached and not conn.closed and picoquic_close(conn.cnx,0) == 0 then write_packet(conn,picoquic_current_time()) end
     remove_connection(conn)
   end
   return term_pak(iroh_mp_Unit,0)
 end
 
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
+  if iroh_mp_start_multipath_route_handshake ~= 0xffffffff then io_eff(iroh_mp_start_multipath_route_handshake,start_multipath_route_handshake_run) end
+  if iroh_mp_start_multipath_nat_route_handshake ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_route_handshake,start_multipath_nat_route_handshake_run) end
+  if iroh_mp_open_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_open_multipath_handshake_socket,open_multipath_handshake_socket_run) end
+  if iroh_mp_read_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_read_multipath_handshake_socket,read_multipath_handshake_socket_run) end
+  if iroh_mp_multipath_handshake_output ~= 0xffffffff then io_eff(iroh_mp_multipath_handshake_output,multipath_handshake_output_run) end
+  if iroh_mp_adopt_multipath_handshake_socket ~= 0xffffffff then io_eff(iroh_mp_adopt_multipath_handshake_socket,adopt_multipath_handshake_socket_run) end
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
   if iroh_mp_start_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer,start_nat_offer_run) end
   if iroh_mp_start_multipath_nat_offer_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer_bytes,start_nat_offer_bytes_run) end

@@ -18,6 +18,29 @@ type MultipathRead is Data:
   MultipathReadFin{}
   MultipathReadBytes{bytes: List<&2,U32>}
 
+# Bend owns every candidate socket until the pinned TLS handshake selects one.
+def start_multipath_route_handshake(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
+  import "./quic_multipath.c"
+
+def start_multipath_nat_route_handshake(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection & Socket>):
+  import "./quic_multipath.c"
+
+def open_multipath_handshake_socket(host: String, port: U32) -> IO(Result<&1,&1,U32 & String,Socket>):
+  import "./quic_multipath.c"
+
+def read_multipath_handshake_socket(conn: MultipathConnection, socket: Socket)
+    -> IO(MultipathConnection & (Socket & Result<&1,&1,U32 & String,U32>)):
+  import "./quic_multipath.c"
+
+def multipath_handshake_output(conn: MultipathConnection) -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_multipath.c"
+
+def adopt_multipath_handshake_socket(conn: MultipathConnection, socket: Socket)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
 def start_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String)
     -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
