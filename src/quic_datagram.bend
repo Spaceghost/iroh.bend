@@ -1,6 +1,7 @@
 import Base
 import ./quic_stream.bend as Stream
 import ./quic_close.bend as Close
+import ./quic_close_wire.bend as CloseWire
 import ./quic_nat.bend as NatWire
 
 type DatagramConnection is Type:
@@ -310,5 +311,10 @@ def close_quic_connection(conn: DatagramConnection, code: NatWire.VarInt, reason
     -> IO(DatagramConnection & Close.WriteResult()):
   Close.close(DatagramConnection,conn,code,reason,send_quic_application_close)
 
+def quic_close_packet(conn: DatagramConnection) -> IO(DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_datagram.c"
+
 def quic_close_reason(conn: DatagramConnection) -> IO(DatagramConnection & Close.ReadResult()):
-  Close.observe(DatagramConnection,conn,read_quic_application_close)
+  do IO<DatagramConnection & Close.ReadResult()>:
+    raw : DatagramConnection & Close.ReadResult() <- Close.observe(DatagramConnection,conn,read_quic_application_close)
+    CloseWire.expand(DatagramConnection,raw,quic_close_packet)

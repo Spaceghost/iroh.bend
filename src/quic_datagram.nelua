@@ -260,7 +260,10 @@ local ngtcp2_crypto_recv_client_initial_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_client_initial_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_recv_crypto_data_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_encrypt_cb: pointer <cimport,nodecl>
-local ngtcp2_crypto_decrypt_cb: pointer <cimport,nodecl>
+local ngtcp2_crypto_aead <cimport,nodecl> = @record{max_overhead:csize}
+local ngtcp2_crypto_aead_ctx <cimport,nodecl> = @record{}
+local function ngtcp2_crypto_decrypt_cb(dst:*cuchar, aead:*ngtcp2_crypto_aead, ctx:*ngtcp2_crypto_aead_ctx,
+    ciphertext:*cuchar, size:csize, nonce:*cuchar, nonce_size:csize, aad:*cuchar, aad_size:csize):cint <cimport,nodecl> end
 local ngtcp2_crypto_hp_mask_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_recv_retry_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_update_key_cb: pointer <cimport,nodecl>
@@ -277,7 +280,7 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
     'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
-    'send_quic_application_close','read_quic_application_close','cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
+    'send_quic_application_close','read_quic_application_close','quic_close_packet','cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -325,6 +328,7 @@ local iroh_dgram_quic_stream_fin_acked: uint32 <cimport,nodecl>
 local iroh_dgram_quic_stream_reset_acked: uint32 <cimport,nodecl>
 local iroh_dgram_peer_quic_stream_code: uint32 <cimport,nodecl>
 local iroh_dgram_send_quic_application_close: uint32 <cimport,nodecl>
+local iroh_dgram_quic_close_packet: uint32 <cimport,nodecl>
 local iroh_dgram_read_quic_application_close: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_QuicStreamPending: uint32 <cimport,nodecl>
@@ -466,6 +470,7 @@ local Connection = @record{
   streams: *Stream, tracked_resets: csize, reset_ack_seen: boolean,
   pin_status: cint,
   failed: boolean, locally_closed: boolean,
+  plaintext: *cuchar, plaintext_size: csize, close_packet: *cuchar, close_packet_size: csize,
   listener: *Listener,
   original_id: ngtcp2_cid,
   accepted: boolean,
@@ -476,6 +481,9 @@ local Connection = @record{
   early_attempted: boolean,
   early_accepted: boolean
 }
+-- ngtcp2's decrypt callback has no user data. Bind the synchronous read
+-- to its connection, including the engine's per-frame log callbacks.
+local reading: *Connection <threadlocal>
 local connections: *Connection
 local listeners: *Listener
 local sessions: *Session
@@ -607,15 +615,41 @@ local function forget_reset_packets(conn: *Connection, stream: *Stream)
   stream.reset_ack_seen = false
 end
 
-local function observe_reset_frames(user: pointer, msg: cstring, size: csize)
+local function decrypt_packet(dst:*cuchar, aead:*ngtcp2_crypto_aead, ctx:*ngtcp2_crypto_aead_ctx,
+    ciphertext:*cuchar, size:csize, nonce:*cuchar, nonce_size:csize, aad:*cuchar, aad_size:csize):cint
+  local status = ngtcp2_crypto_decrypt_cb(dst,aead,ctx,ciphertext,size,nonce,nonce_size,aad,aad_size)
+  local conn = reading
+  if conn ~= nilptr then
+    conn.plaintext_size = 0
+    if status == 0 and aad_size > 0 and (($aad) & 0x80) == 0 and size >= aead.max_overhead then
+      conn.plaintext = dst
+      conn.plaintext_size = size - aead.max_overhead
+    end
+  end
+  return status
+end
+
+local function observe_frames(user: pointer, msg: cstring, size: csize)
   local conn = (@*Connection)(user)
-  if conn.tracked_resets == 0 then return end
+  if conn.tracked_resets == 0 and conn.plaintext_size <= 1024 then return end
   -- The header (timestamp and source CID) precedes the event and direction.
   -- Match from the start so text inside a peer's close reason is never a frame.
   local event = (@*[0]cchar)(C.strchr(msg,32))
   if event == nilptr then return end
   event = (@*[0]cchar)(C.strchr(&event[1],32))
   if event == nilptr then return end
+  if conn.plaintext_size > 1024 and C.strncmp(event,' frm rx ',8) == 0 then
+    local kind:cuint
+    if C.sscanf(&event[8],'%*[0-9] 1RTT CONNECTION_CLOSE(%x)',&kind) == 1 and kind == 0x1d then
+      -- The engine still owns the decrypted frame during this callback.
+      -- Make a copy only for an actual application close.
+      C.free(conn.close_packet)
+      conn.close_packet = (@*cuchar)(C.malloc(conn.plaintext_size))
+      conn.close_packet_size = conn.plaintext_size
+      if conn.close_packet ~= nilptr then C.memcpy(conn.close_packet,conn.plaintext,conn.plaintext_size) end
+    end
+  end
+  if conn.tracked_resets == 0 then return end
   if C.strncmp(event,' frm tx ',8) == 0 then
     local packet: culonglong, id: culonglong
     local kind: [5]cchar
@@ -653,7 +687,12 @@ end
 
 local function read_packet(conn: *Connection, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
     bytes: *cuchar, size: csize, now: uint64): cint
+  local previous = reading
+  reading = conn
   local status = ngtcp2_conn_read_pkt(conn.engine,path,info,bytes,size,now)
+  reading = previous
+  conn.plaintext = nilptr
+  conn.plaintext_size = 0
   -- Publish observed ACKs only after ngtcp2 accepts the incoming packet.
   if conn.reset_ack_seen then
     conn.reset_ack_seen = false
@@ -1048,7 +1087,7 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
     client_initial = initial == nilptr and ngtcp2_crypto_client_initial_cb or nilptr,
     recv_client_initial = initial ~= nilptr and ngtcp2_crypto_recv_client_initial_cb or nilptr,
     recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb,
-    encrypt = ngtcp2_crypto_encrypt_cb, decrypt = ngtcp2_crypto_decrypt_cb, hp_mask = ngtcp2_crypto_hp_mask_cb,
+    encrypt = ngtcp2_crypto_encrypt_cb, decrypt = (@pointer)(ngtcp2_crypto_decrypt_cb), hp_mask = ngtcp2_crypto_hp_mask_cb,
     recv_retry = ngtcp2_crypto_recv_retry_cb, rand = (@pointer)(quic_random), update_key = ngtcp2_crypto_update_key_cb,
     delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
     delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
@@ -1065,7 +1104,10 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
   local settings: ngtcp2_settings
   ngtcp2_settings_default(&settings)
   settings.initial_ts = now
-  if iroh_dgram_quic_stream_reset_acked ~= 0xffffffff then settings.log_write = (@pointer)(observe_reset_frames) end
+  if iroh_dgram_quic_stream_reset_acked ~= 0xffffffff or iroh_dgram_quic_close_packet ~= 0xffffffff then
+    settings.log_write = (@pointer)(observe_frames)
+  end
+  if iroh_dgram_quic_close_packet ~= 0xffffffff then callbacks.decrypt = (@pointer)(decrypt_packet) end
   local params: ngtcp2_transport_params
   ngtcp2_transport_params_default(&params)
   params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
@@ -1105,6 +1147,7 @@ local function release_listener(listener: *Listener)
 end
 
 local function destroy(conn: *Connection)
+  C.free(conn.close_packet)
   C.free(conn.initial_path)
   if conn.engine ~= nilptr then ngtcp2_conn_del(conn.engine) end
   if conn.ssl ~= nilptr then SSL_set_app_data(conn.ssl,nilptr) end
@@ -2499,6 +2542,19 @@ local function application_close_reason(e: Env, conn: *Connection): Term
   return closed(e)
 end
 
+local function close_packet_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local conn = find(e,args[0])
+  local result: Term
+  if conn == nilptr or conn.locally_closed or conn.read_failure ~= NGTCP2_ERR_DRAINING then
+    result = closed(e)
+  elseif conn.close_packet == nilptr then
+    result = io_fail(e,conn.close_packet_size > 0 and ENOMEM or EIO,'QUIC close packet unavailable')
+  else
+    result = io_done(e,io_list(e,(@cstring)(conn.close_packet),conn.close_packet_size))
+  end
+  return io_tup(e,args[0],result)
+end
+
 local function application_close_reason_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],application_close_reason(e,find(e,args[0])))
 end
@@ -2564,6 +2620,7 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_peer_quic_stream_code ~= 0xffffffff then io_eff(iroh_dgram_peer_quic_stream_code,peer_code_run) end
   if iroh_dgram_drop_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_stream,drop_stream_run) end
   if iroh_dgram_send_quic_application_close ~= 0xffffffff then io_eff(iroh_dgram_send_quic_application_close,application_close_run) end
+  if iroh_dgram_quic_close_packet ~= 0xffffffff then io_eff(iroh_dgram_quic_close_packet,close_packet_run) end
   if iroh_dgram_read_quic_application_close ~= 0xffffffff then io_eff(iroh_dgram_read_quic_application_close,application_close_reason_run) end
   if iroh_dgram_drop_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_datagram,drop_run) end
 end

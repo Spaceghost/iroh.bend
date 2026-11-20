@@ -1,6 +1,7 @@
 import Base
 import ../src/relay.bend as Relay
 import ./punycode.bend as Punycode
+import ./quic_close_wire.bend as CloseWire
 
 def outcome(+expected: U32, decoded: Relay.Frame) -> U32:
   match decoded:
@@ -45,11 +46,12 @@ def idna_pairs(+depth: Nat, +i: U32) -> U32:
 def require(success: Bool) -> IO(Unit):
   match success:
     case True{}:
-      IO.print("PASS 16384 relay ping decodes and 4 Punycode encode/decode vectors on CUDA")
+      IO.print("PASS 16384 relay ping decodes, 4 Punycode vectors, and 4 application close vectors on CUDA")
     case False{}:
       IO.die(Unit, 1, "CUDA conformance vector mismatch")
 
 def main() -> IO(Unit):
   +passed = batch!(14n, 0, 16384)
   +labels = idna_pairs!(2n,0)
-  require(U32.is_eq(passed,16384) && U32.is_eq(labels,4))
+  +closes = CloseWire.count!(2n,0)
+  require(U32.is_eq(passed,16384) && U32.is_eq(labels,4) && U32.is_eq(closes,4))
