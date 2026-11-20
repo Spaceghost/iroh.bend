@@ -1,6 +1,7 @@
 import Base
 import ../src/quic_nat.bend as NatWire
 import ../src/quic_nat_state.bend as State
+import ../src/quic_nat_send.bend as Send
 
 def bytes_equal(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
   match a b:
@@ -226,6 +227,103 @@ def ipv4_probes() -> Bool:
     Incoming{NatWire.ReachOut{first,mapped,2},State.Probe{first,State.Socket{v4,2},True{}}}
   ],State.start(State.Server{False{}},True{},Some{2},Some{1}))
 
+type LocalStep is Data:
+  Add{candidate: State.Candidate, expected: Send.LocalEvent}
+  Remove{candidate: State.Candidate, expected: Send.LocalEvent}
+
+def check_local(expected: Send.LocalEvent, actual: Send.LocalEvent) -> Bool:
+  match expected actual:
+    case Send.Unchanged{} Send.Unchanged{}:
+      True{}
+    case Send.Updated{} Send.Updated{}:
+      True{}
+    case Send.AddressLimit{} Send.AddressLimit{}:
+      True{}
+    case Send.InvalidAddress{} Send.InvalidAddress{}:
+      True{}
+    case Send.NotNegotiated{} Send.NotNegotiated{}:
+      True{}
+    case Send.Send{frame} Send.Send{other}:
+      same_frame(frame,other)
+    case _ _:
+      False{}
+
+def local_transition(expected: Send.LocalEvent, actual: Send.Change, next: Send.LocalState -> Bool) -> Bool:
+  Send.Changed{state,event} = actual
+  check_local(expected,event) && next(state)
+
+def local_steps(steps: List<&2,LocalStep>, state: Send.LocalState, finish: Send.LocalState -> Bool) -> Bool:
+  match steps:
+    case Nil{}:
+      finish(state)
+    case Con{Add{candidate,expected},rest}:
+      local_transition(expected,Send.add(state,candidate),next => local_steps(rest,next,finish))
+    case Con{Remove{candidate,expected},rest}:
+      local_transition(expected,Send.remove(state,candidate),next => local_steps(rest,next,finish))
+
+def server_send() -> Bool:
+  +ip = {NatWire.IPv4{[127,0,0,1]} : NatWire.Address}
+  +mapped = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1]} : NatWire.Address}
+  +first = {State.Socket{ip,1} : State.Candidate}
+  +second = {State.Socket{ip,2} : State.Candidate}
+  +same = {State.Socket{mapped,1} : State.Candidate}
+  local_steps([
+    Add{State.Socket{ip,65536},Send.InvalidAddress{}},
+    Add{State.Socket{NatWire.IPv4{[127,0,1]},1},Send.InvalidAddress{}},
+    Add{same,Send.Send{NatWire.AddAddress{NatWire.Var{0,0},ip,1}}},
+    Add{first,Send.Unchanged{}},
+    Add{second,Send.AddressLimit{}},
+    Remove{second,Send.Unchanged{}},
+    Remove{first,Send.Send{NatWire.RemoveAddress{NatWire.Var{0,0}}}},
+    Add{second,Send.Send{NatWire.AddAddress{NatWire.Var{0,1},ip,2}}}
+  ],Send.start(State.Server{True{}},True{},Some{5},Some{1}),_ => True{}) &&
+  local_steps([
+    Add{first,Send.NotNegotiated{}}
+  ],Send.start(State.Server{True{}},False{},Some{5},Some{1}),_ => True{})
+
+def verify_round(id: NatWire.VarInt, expected: NatWire.Frame, target: State.Candidate, result: Send.RoundResult,
+    next: Send.LocalState -> Bool) -> Bool:
+  match result:
+    case Send.Round{state,Send.RoundStarted{round,[actual],[remote]}}:
+      same_frame(expected,actual) && State.equal_socket(target,remote) &&
+        same_integer(id,round) && next(state)
+    case _:
+      False{}
+
+def verify_empty(result: Send.RoundResult) -> Bool:
+  match result:
+    case Send.Round{_,Send.NoLocalCandidates{}}:
+      True{}
+    case _:
+      False{}
+
+def client_send() -> Bool:
+  +ip = {NatWire.IPv4{[127,0,0,1]} : NatWire.Address}
+  +v6 = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]} : NatWire.Address}
+  +remote = {State.Socket{NatWire.IPv4{[1,1,1,1]},2} : State.Candidate}
+  +mapped = {State.Socket{NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,1,1,1,1]},2} : State.Candidate}
+  +start = Send.start(State.Client{},True{},Some{5},Some{1})
+  +peer = {State.ClientState{5,[
+    State.Advertised{NatWire.Var{0,5},State.Socket{v6,3}},
+    State.Advertised{NatWire.Var{0,6},remote},
+    State.Advertised{NatWire.Var{0,7},remote}
+  ]} : State.PeerState}
+  +peer_v4 = {State.ClientState{5,[State.Advertised{NatWire.Var{0,6},remote}]} : State.PeerState}
+  verify_empty(Send.begin(start,peer,False{})) &&
+  local_steps([
+    Add{State.Socket{ip,1},Send.Updated{}},
+    Add{State.Socket{ip,1},Send.Unchanged{}},
+    Add{State.Socket{ip,2},Send.AddressLimit{}}
+  ],start,ready =>
+    verify_round(NatWire.Var{0,1},NatWire.ReachOut{NatWire.Var{0,1},ip,1},remote,Send.begin(ready,peer,False{}),step =>
+      verify_round(NatWire.Var{0,2},NatWire.ReachOut{NatWire.Var{0,2},ip,1},mapped,Send.begin(step,peer_v4,True{}),active =>
+        local_steps([Remove{State.Socket{ip,1},Send.Updated{}}],active,
+          empty => verify_empty(Send.begin(empty,peer,False{}))))))
+
+def sequence_rollover() -> Bool:
+  same_integer(NatWire.Var{1,0},Send.next(NatWire.Var{0,4294967295})) &&
+  same_integer(NatWire.Var{1073741823,4294967295},Send.next(NatWire.Var{1073741823,4294967295}))
+
 def require(message: String, ok: Bool) -> IO(Unit):
   match ok:
     case True{}:
@@ -242,4 +340,7 @@ def main() -> IO(Unit):
     require("QUIC NAT traversal client candidate updates and role checks",client_addresses())
     require("QUIC NAT traversal server rounds and duplicate suppression",server_reach_out())
     require("QUIC NAT traversal IPv4 socket address mapping",ipv4_probes())
+    require("QUIC NAT traversal server advertisements and withdrawals",server_send())
+    require("QUIC NAT traversal client probe round generation",client_send())
+    require("QUIC NAT traversal sequence rollover",sequence_rollover())
     return Unit{}
