@@ -351,8 +351,9 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   service as it begins dialing the ticket. A new direct address or an opened
   relay bridge joins the ongoing QUIC handshake as soon as it becomes available.
   The dialer sends its Initial flight to newly discovered paths and adopts the
-  socket on which the peer authenticates. It closes the losing sockets and
-  cancels outstanding lookups. Pkarr records and the TLS handshake must verify
+  socket on which the peer authenticates. Repeated records reuse an active path.
+  A later record can retry an address whose earlier attempt has expired. On
+  success the dialer closes the losing sockets and cancels outstanding lookups. Pkarr records and the TLS handshake must verify
   under the endpoint ID in the ticket. For a caller-supplied route list and identity, use
   `Endpoint.connect_with_lookup(plan, identity, timeouts, sources)`.
   `Endpoint.with_ticket` accepts a route dialer such as

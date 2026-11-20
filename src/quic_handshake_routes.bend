@@ -11,8 +11,15 @@ def Error() -> Type:
 def Packet() -> Data:
   List<&2,U32>
 
+type RouteKey is Data:
+  DirectKey{host: String, port: U32}
+  RelayKey{url: String}
+
+type RouteInfo is Data:
+  RouteInfo{deadline: Nat, key: RouteKey}
+
 type Candidate is Type:
-  Route{socket: Socket, deadline: Nat, bridge: Bridge()}
+  Route{socket: Socket, info: RouteInfo, bridge: Bridge()}
 
 type State is Type:
   Waiting{last: Error()}
@@ -52,10 +59,10 @@ def active(conn: Quic.DatagramConnection, routes: List<&1,Candidate>, flight: Li
     case Con{route,rest}:
       IO.pure(State,Racing{conn,Con{route,rest},flight,collecting,last})
 
-def start(result: Result<&1,&1,Error(),Quic.DatagramConnection & Socket>, deadline: Nat, bridge: Bridge()) -> IO(State):
+def start(result: Result<&1,&1,Error(),Quic.DatagramConnection & Socket>, info: RouteInfo, bridge: Bridge()) -> IO(State):
   match result:
     case Done{(conn,sock)}:
-      IO.pure(State,Racing{conn,[Route{sock,deadline,bridge}],[],True{},(110,"QUIC datagram handshake timed out")})
+      IO.pure(State,Racing{conn,[Route{sock,info,bridge}],[],True{},(110,"QUIC datagram handshake timed out")})
     case Fail{error}:
       do IO<State>:
         stop(bridge)
@@ -92,53 +99,96 @@ def replay(flight: List<&2,Packet()>, previous: Sent()) -> IO(Sent()):
     case Nil{}:
       IO.pure(Sent(),previous)
 
-def added(result: Sent(), deadline: Nat, bridge: Bridge(), conn: Quic.DatagramConnection,
+def added(result: Sent(), info: RouteInfo, bridge: Bridge(), conn: Quic.DatagramConnection,
     routes: List<&1,Candidate>, flight: List<&2,Packet()>, collecting: Bool, last: Error()) -> IO(State):
   match result:
     case (sock,Done{_}):
-      IO.pure(State,Racing{conn,Con{Route{sock,deadline,bridge},routes},flight,collecting,last})
+      IO.pure(State,Racing{conn,Con{Route{sock,info,bridge},routes},flight,collecting,last})
     case (sock,Fail{error}):
       do IO<State>:
         Socket.close(sock)
         stop(bridge)
         active(conn,routes,flight,collecting,error)
 
-def opened(result: Result<&1,&1,Error(),Socket>, deadline: Nat, bridge: Bridge(), conn: Quic.DatagramConnection,
+def opened(result: Result<&1,&1,Error(),Socket>, info: RouteInfo, bridge: Bridge(), conn: Quic.DatagramConnection,
     routes: List<&1,Candidate>, +flight: List<&2,Packet()>, collecting: Bool, last: Error()) -> IO(State):
   match result:
     case Done{sock}:
       do IO<State>:
         result : Sent() <- replay(List.reverse(&2,Packet(),flight),(sock,Done{Unit{}}))
-        added(result,deadline,bridge,conn,routes,flight,collecting,last)
+        added(result,info,bridge,conn,routes,flight,collecting,last)
     case Fail{error}:
       do IO<State>:
         stop(bridge)
         active(conn,routes,flight,collecting,error)
 
-def add(state: State, host: String, port: U32, deadline: Nat, bridge: Bridge(), seed: Packet(), peer: Packet(),
+def open_route(state: State, host: String, port: U32, info: RouteInfo, bridge: Bridge(), seed: Packet(), peer: Packet(),
     alpn: Packet()) -> IO(State):
   match state:
     case Waiting{_}:
       do IO<State>:
         result : Result<&1,&1,Error(),Quic.DatagramConnection & Socket> <- Quic.start_route_handshake(host,port,seed,peer,alpn)
-        start(result,deadline,bridge)
+        start(result,info,bridge)
     case Racing{conn,routes,flight,collecting,last}:
       do IO<State>:
         result : Result<&1,&1,Error(),Socket> <- Quic.open_handshake_socket(host,port)
-        opened(result,deadline,bridge,conn,routes,flight,collecting,last)
+        opened(result,info,bridge,conn,routes,flight,collecting,last)
     case Connected{conn,chosen}:
       do IO<State>:
         stop(bridge)
         return Connected{conn,chosen}
 
+def add(state: State, +host: String, +port: U32, deadline: Nat, bridge: Bridge(), seed: Packet(), peer: Packet(),
+    alpn: Packet()) -> IO(State):
+  match bridge:
+    case None{}:
+      open_route(state,host,port,RouteInfo{deadline,DirectKey{host,port}},None{},seed,peer,alpn)
+    case Some{+path}:
+      open_route(state,host,port,RouteInfo{deadline,RelayKey{Relay.bridge_url(path)}},Some{path},seed,peer,alpn)
+
+def RouteList() -> Type:
+  List<&1,Candidate> & List<&2,RouteKey>
+
+def catalog_entry(route: Candidate, tail: RouteList()) -> RouteList():
+  Route{socket,RouteInfo{deadline,+key},bridge} = route
+  (routes,keys) = tail
+  (Con{Route{socket,RouteInfo{deadline,key},bridge},routes},Con{key,keys})
+
+def route_list(routes: List<&1,Candidate>) -> RouteList():
+  match routes:
+    case Nil{}:
+      ([],[])
+    case Con{route,tail}:
+      catalog_entry(route,route_list(tail))
+
+def Catalog() -> Type:
+  State & List<&2,RouteKey>
+
+def racing_routes(list: RouteList(), conn: Quic.DatagramConnection, flight: List<&2,Packet()>,
+    collecting: Bool, last: Error()) -> Catalog():
+  (routes,keys) = list
+  (Racing{conn,routes,flight,collecting,last},keys)
+
+# Only an open socket suppresses a later discovery of the same address.
+def catalog(state: State) -> Catalog():
+  match state:
+    case Racing{conn,routes,flight,collecting,last}:
+      racing_routes(route_list(routes),conn,flight,collecting,last)
+    case _:
+      (state,[])
+
+def expired(info: RouteInfo, now: Nat) -> Bool:
+  RouteInfo{deadline,_} = info
+  Nat.is_ge(now,deadline)
+
 def RoutesResult() -> Type:
   List<&1,Candidate> & Error()
 
-def sent_to(result: Sent(), deadline: Nat, bridge: Bridge(), tail: RoutesResult()) -> IO(RoutesResult()):
+def sent_to(result: Sent(), info: RouteInfo, bridge: Bridge(), tail: RoutesResult()) -> IO(RoutesResult()):
   match result:
     case (sock,Done{_}):
       (routes,last) = tail
-      IO.pure(RoutesResult(),(Con{Route{sock,deadline,bridge},routes},last))
+      IO.pure(RoutesResult(),(Con{Route{sock,info,bridge},routes},last))
     case (sock,Fail{error}):
       (routes,_) = tail
       do IO<RoutesResult()>:
@@ -150,11 +200,11 @@ def broadcast(routes: List<&1,Candidate>, +packet: Packet(), last: Error()) -> I
   match routes:
     case Nil{}:
       IO.pure(RoutesResult(),([],last))
-    case Con{Route{sock,deadline,bridge},rest}:
+    case Con{Route{sock,info,bridge},rest}:
       do IO<RoutesResult()>:
         result : Write() <- TCP.try_send_bytes(sock,packet,0)
         tail : RoutesResult() <- broadcast(rest,packet,last)
-        sent_to(sent(result),deadline,bridge,tail)
+        sent_to(sent(result),info,bridge,tail)
 
 def cache_initial(collecting: Bool, packet: Packet(), flight: List<&2,Packet()>) -> List<&2,Packet()>:
   match collecting:
@@ -204,7 +254,7 @@ def Input() -> Type:
 def Remaining() -> Type:
   Quic.DatagramConnection -> List<&1,Candidate> -> List<&1,Candidate> -> Error() -> IO(State)
 
-def received(result: Input(), deadline: Nat, bridge: Bridge(), rest: List<&1,Candidate>, kept: List<&1,Candidate>,
+def received(result: Input(), info: RouteInfo, bridge: Bridge(), rest: List<&1,Candidate>, kept: List<&1,Candidate>,
     last: Error(), resume: Remaining()) -> IO(State):
   match result:
     case (conn,(sock,Done{1})):
@@ -214,14 +264,14 @@ def received(result: Input(), deadline: Nat, bridge: Bridge(), rest: List<&1,Can
         close_routes(kept)
         adopted(committed,bridge)
     case (conn,(sock,Done{_})):
-      resume(conn,rest,Con{Route{sock,deadline,bridge},kept},last)
+      resume(conn,rest,Con{Route{sock,info,bridge},kept},last)
     case (conn,(sock,Fail{error})):
       do IO<State>:
         Socket.close(sock)
         stop(bridge)
         resume(conn,rest,kept,error)
 
-def examine(expired: Bool, conn: Quic.DatagramConnection, sock: Socket, deadline: Nat, bridge: Bridge(),
+def examine(expired: Bool, conn: Quic.DatagramConnection, sock: Socket, info: RouteInfo, bridge: Bridge(),
     rest: List<&1,Candidate>, kept: List<&1,Candidate>, last: Error(), resume: Remaining()) -> IO(State):
   match expired:
     case True{}:
@@ -232,15 +282,15 @@ def examine(expired: Bool, conn: Quic.DatagramConnection, sock: Socket, deadline
     case False{}:
       do IO<State>:
         result : Input() <- Quic.read_handshake_socket(conn,sock)
-        received(result,deadline,bridge,rest,kept,last,resume)
+        received(result,info,bridge,rest,kept,last,resume)
 
 @unsafe def poll(conn: Quic.DatagramConnection, routes: List<&1,Candidate>, kept: List<&1,Candidate>, +now: Nat,
     flight: List<&2,Packet()>, collecting: Bool, last: Error()) -> IO(State):
   match routes:
     case Nil{}:
       output(conn,List.reverse(&1,Candidate,kept),flight,collecting,last)
-    case Con{Route{sock,+deadline,bridge},rest}:
-      examine(Nat.is_ge(now,deadline),conn,sock,deadline,bridge,rest,kept,last,
+    case Con{Route{sock,+info,bridge},rest}:
+      examine(expired(info,now),conn,sock,info,bridge,rest,kept,last,
         c => todo => done => error => poll(c,todo,done,now,flight,collecting,error))
 
 def step(state: State) -> IO(State):

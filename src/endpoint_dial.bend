@@ -9,7 +9,7 @@ def Offer() -> Type:
 
 type DialEvent<-A: Data> is Type:
   Lookup{answer: A}
-  Relay{offer: Offer()}
+  Relay{url: String, offer: Offer()}
 
 type Workers<-A: Data> is Data:
   Workers{events: Chan(DialEvent<A>), stop: Chan(Unit), lookup_done: Chan(Unit), lookup_count: Nat}
@@ -23,15 +23,15 @@ def release(offer: Offer()) -> IO(Unit):
 
 def transferred(-A: Data, result: Result<&1,&1,DialEvent<A>,Unit>) -> IO(Unit):
   match result:
-    case Fail{Relay{offer}}:
+    case Fail{Relay{_,offer}}:
       release(offer)
     case _:
       IO.pure(Unit,Unit{})
 
-def open_relay(~A: Data, url: String, seed: List<&2,U32>, peer: List<&2,U32>, events: Chan(DialEvent<A>)) -> IO(Unit):
+def open_relay(~A: Data, +url: String, seed: List<&2,U32>, peer: List<&2,U32>, events: Chan(DialEvent<A>)) -> IO(Unit):
   do IO<Unit>:
     offer : Offer() <- Path.start(url,seed,peer,0)
-    sent : Result<&1,&1,DialEvent<A>,Unit> <- Chan.send(DialEvent<A>,events,Relay{offer})
+    sent : Result<&1,&1,DialEvent<A>,Unit> <- Chan.send(DialEvent<A>,events,Relay{url,offer})
     transferred(A,sent)
 
 def start_relays(~A: Data, urls: List<&2,String>, +seed: List<&2,U32>, +peer: List<&2,U32>, +events: Chan(DialEvent<A>)) -> IO(Unit):

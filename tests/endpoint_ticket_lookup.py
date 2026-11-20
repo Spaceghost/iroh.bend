@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
 from urllib.request import Request, urlopen
 
-from endpoint_candidate_lookup import check_discovered_route, check_supplied_route
+from endpoint_candidate_lookup import check_discovered_route, check_restored_candidate, check_supplied_route
 from endpoint_lookup_events import check_events
 from endpoint_lookup_race import check_race, check_stale_record, dns_proxy
 from endpoint_ticket_dial import read_ticket, require_handshake_rejection
@@ -59,6 +59,9 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             return
         if source in ("supplied-dns", "supplied-pkarr"):
             check_supplied_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("supplied-"))
+            return
+        if source == "restored":
+            check_restored_candidate(client, ticket, family, peer)
             return
         if source == "stale-record":
             check_stale_record(client, ticket, peer, pkarr, dns_port, family)
@@ -117,6 +120,7 @@ def main(client, fixture, pkarr, dns_port):
                     check(client, fixture, family, mode, source, pkarr, dns_port)
                 check(client, fixture, family, "wrong-id", source, pkarr, dns_port,
                       expected_error=b"peer endpoint key mismatch")
+            check(client, fixture, family, "direct", "restored", pkarr, dns_port)
             for kind in ("supplied-dns", "supplied-pkarr", "discovered-dns", "discovered-pkarr",
                          "cross-dns", "cross-pkarr", "migrate-pkarr"):
                 check(client, fixture, family, "direct", kind, pkarr, dns_port)

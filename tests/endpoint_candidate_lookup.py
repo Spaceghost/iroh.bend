@@ -1,8 +1,10 @@
 """Exercise supplied and discovered routes during a single live QUIC handshake."""
 
 import base64
+import errno
 import socket
 import subprocess
+import time
 from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
@@ -28,7 +30,7 @@ def direct_ticket(ticket, family, proxy_port):
 
 
 @contextmanager
-def supplied_route(ticket, family, release, observed=None):
+def supplied_route(ticket, family, release, observed=None, hold=True, clients=None):
     af, host = (socket.AF_INET, "127.0.0.1") if family == "listen" else (socket.AF_INET6, "::1")
     done = Event()
     with socket.socket(af, socket.SOCK_DGRAM) as proxy:
@@ -49,10 +51,12 @@ def supplied_route(ticket, family, release, observed=None):
                         proxy.sendto(packet, client)
                 else:
                     client = addr
+                    if clients is not None and not first_packet.is_set():
+                        clients.append(addr)
                     if observed is not None and not first_packet.is_set():
                         observed.append(packet)
                     first_packet.set()
-                    if release.wait(2) and not done.is_set():
+                    if (release.wait(2) if hold else release.is_set()) and not done.is_set():
                         proxy.sendto(packet, target)
 
         thread = Thread(target=forward)
@@ -258,3 +262,37 @@ def check_pending_relay(client, ticket, family, peer):
         finally:
             release.set()
     print(f"PASS {family} DNS supplies a working direct path during a relay upgrade", flush=True)
+
+def check_restored_candidate(client, ticket, family, peer):
+    # Hold back DNS until the original attempt has closed its local socket.
+    # The newly returned address is identical and is now reachable.
+    restored, callers = Event(), []
+    with ExitStack() as stack:
+        changed, initial = stack.enter_context(supplied_route(ticket, family, restored, hold=False, clients=callers))
+        _, (host, port) = direct_ticket(changed, family, 1)
+        ipv6 = family == "listen6"
+        address = f"[{host}]:{port}" if ipv6 else f"{host}:{port}"
+
+        def after_retirement(*_):
+            if not initial.wait(3):
+                return False
+            end = time.monotonic() + 3
+            while time.monotonic() < end:
+                with socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_DGRAM) as reopened:
+                    try:
+                        reopened.bind(callers[0])
+                    except OSError as error:
+                        if error.errno != errno.EADDRINUSE:
+                            raise
+                    else:
+                        restored.set()
+                        return True
+                time.sleep(.005)
+            return False
+
+        args = dns_proxy(stack, 0, after_retirement, address=address)
+        result = subprocess.run([client, "lookup-ticket", changed, *args], capture_output=True, timeout=6)
+        if result.returncode or not restored.is_set():
+            raise AssertionError(f"Could not retry the recovered socket address from DNS: {result.stderr!r}")
+        require_exchange(peer)
+    print(f"PASS {family} DNS reintroduces a previously expired route", flush=True)
