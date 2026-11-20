@@ -3,6 +3,9 @@ import Base
 type MultipathConnection is Type:
   MultipathConnection{id: U32}
 
+type MultipathListener is Type:
+  MultipathListener{id: U32}
+
 type MultipathRead is Data:
   MultipathReadPending{}
   MultipathReadFin{}
@@ -18,7 +21,7 @@ def step_multipath(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
-# Port zero chooses a free local port. None means retry after stepping.
+# On a dialed connection, port zero chooses a free local port. None means retry after stepping.
 # A returned path ID can be used after its state becomes available.
 def probe_multipath(conn: MultipathConnection, bind_host: String, bind_port: U32, peer: String, peer_port: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
@@ -30,8 +33,18 @@ def multipath_status(conn: MultipathConnection, path: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
+# Find the next available path after the given ID, including paths opened by the peer.
+def next_multipath_path(conn: MultipathConnection, after: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  import "./quic_multipath.c"
+
 # Direction zero is bidirectional. Direction one is send-only.
 def open_multipath_stream(conn: MultipathConnection, direction: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  import "./quic_multipath.c"
+
+# Poll for a peer-initiated bidirectional or receive-only stream.
+def accept_multipath_stream(conn: MultipathConnection, direction: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
   import "./quic_multipath.c"
 
@@ -57,6 +70,19 @@ def drop_multipath_stream(conn: MultipathConnection, stream: U32)
   import "./quic_multipath.c"
 
 def close_multipath(conn: MultipathConnection) -> IO(Unit):
+  import "./quic_multipath.c"
+
+def bind_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
+# Drive the listener and poll for an authenticated connection.
+def accept_multipath(listener: MultipathListener)
+    -> IO(MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,MultipathConnection>>):
+  import "./quic_multipath.c"
+
+# Stop accepting new connections. Accepted connections keep their UDP socket.
+def close_multipath_listener(listener: MultipathListener) -> IO(Unit):
   import "./quic_multipath.c"
 
 def ConnectResult() -> Type:
