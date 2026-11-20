@@ -79,6 +79,11 @@ def send_multipath_nat_address(conn: MultipathConnection, frame: List<&2,U32>)
   import "./quic_multipath.c"
 
 # Return the numeric IP bytes and port of the socket used for NAT probes.
+# Bind an independent UDP source for an opted-in dial through a relay bridge.
+def bind_multipath_nat_source(conn: MultipathConnection, host: String, port: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
 def multipath_nat_local_candidate(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"

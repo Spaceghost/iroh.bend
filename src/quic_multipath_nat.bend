@@ -496,6 +496,34 @@ def connect(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alp
     result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,limit,timeout)
     connected(result,limit)
 
+def from_source(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit>, limit: U32)
+    -> IO(ConnectResult()):
+  match result:
+    case (conn,Done{_}):
+      connected(Done{conn},limit)
+    case (conn,Fail{error}):
+      do IO<ConnectResult()>:
+        Quic.close_multipath(conn)
+        return Fail{error}
+
+def with_source(result: Quic.ConnectResult(), source: String, port: U32, limit: U32) -> IO(ConnectResult()):
+  match result:
+    case Done{conn}:
+      do IO<ConnectResult()>:
+        bound : Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit> <-
+          Quic.bind_multipath_nat_source(conn,source,port)
+        from_source(bound,limit)
+    case Fail{error}:
+      IO.pure(ConnectResult(),Fail{error})
+
+# Use a separate UDP socket for off-path probes while control frames use the
+# initial QUIC path. The source must be reachable at the address advertised.
+def connect_from(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    source: String, source_port: U32, +limit: U32, timeout: Nat) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    result : Quic.ConnectResult() <- Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,limit,timeout)
+    with_source(result,source,source_port,limit)
+
 def driven(pair: Quic.MultipathConnection & DialerResult(), previous: Dialer)
     -> (Connection() & NewPathResult()):
   match pair:

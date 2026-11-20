@@ -279,7 +279,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -333,6 +333,7 @@ local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_address: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_nat_source: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
@@ -438,7 +439,7 @@ local Connection = @record{
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
-  nat_inbox: *NatInbox,
+  nat_inbox: *NatInbox, nat_source: *Path,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
 }
@@ -1041,6 +1042,7 @@ local function destroy(conn: *Connection)
   free_session(conn.resume)
   C.free(conn.peer_parameters.bytes)
   C.free(conn.nat_inbox)
+  if conn.nat_source ~= nilptr then release_path(conn.nat_source) end
   C.free(conn)
 end
 
@@ -1309,9 +1311,14 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   return on_event(cnx,id,bytes,size,kind,conn,stream_user)
 end
 
+local function nat_probe_socket(conn:*Connection): *Path
+  if conn.nat_source ~= nilptr then return conn.nat_source end
+  return find_path(conn,0)
+end
+
 local function nat_local_address(conn:*Connection): *storage_t
   if conn.listener ~= nilptr then return &conn.listener.local_addr end
-  local path = find_path(conn,0)
+  local path = nat_probe_socket(conn)
   if path == nilptr or not path.unconnected then return nilptr end
   return &path.local_addr
 end
@@ -1723,28 +1730,36 @@ local function close_retired_sockets(conn: *Connection)
   end
 end
 
+local function read_from_path(conn: *Connection, path: *Path, bytes: *uint8, capacity: csize, now: uint64): uint32
+  if path.status == 3 or path.fd < 0 then return 0 end
+  local size: isize
+  local source: storage_t
+  local name = &path.peer
+  if path.unconnected then
+    local length = IROH_MP_STORAGE_SIZE
+    size = recvfrom(path.fd,bytes,capacity,0,&source,&length)
+    name = &source
+  else
+    size = recv(path.fd,bytes,capacity,0)
+  end
+  if size > 0 then
+    picoquic_incoming_packet(conn.quic,bytes,(@csize)(size),name,&path.local_addr,0,0,now)
+  elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
+    return (@uint32)(errno)
+  end
+  return 0
+end
+
 local function read_packets(conn: *Connection, now: uint64): uint32
   local bytes: [65536]uint8
   local path = conn.paths
   while path ~= nilptr and not conn.closed do
-    if path.status ~= 3 and path.fd >= 0 then
-      local size: isize
-      local source: storage_t
-      local name = &path.peer
-      if path.unconnected then
-        local capacity = IROH_MP_STORAGE_SIZE
-        size = recvfrom(path.fd,&bytes[0],#bytes,0,&source,&capacity)
-        name = &source
-      else
-        size = recv(path.fd,&bytes[0],#bytes,0)
-      end
-      if size > 0 then
-        picoquic_incoming_packet(conn.quic,&bytes[0],(@csize)(size),name,&path.local_addr,0,0,now)
-      elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
-        return (@uint32)(errno)
-      end
-    end
+    local error = read_from_path(conn,path,&bytes[0],#bytes,now)
+    if error ~= 0 then return error end
     path = (@*Path)(path.next)
+  end
+  if conn.nat_source ~= nilptr and not conn.closed then
+    return read_from_path(conn,conn.nat_source,&bytes[0],#bytes,now)
   end
   return 0
 end
@@ -1855,6 +1870,12 @@ local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t)
   return address(host,(@uint16)(port),out)
 end
 
+local function unspecified_address(addr:*storage_t): boolean
+  local zero: [16]uint8
+  if addr.ss_family == AF_INET then return ((@*addr_t)(addr)).sin_addr.s_addr == 0 end
+  return C.memcmp(&((@*addr6_t)(addr)).sin6_addr,&zero[0],16) == 0
+end
+
 local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
@@ -1868,11 +1889,7 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat
   if size == 0 or seed_size ~= 32 or key_size ~= 32 or (alpns == nilptr and not empty) then
     return io_fail(e,EINVAL,'invalid numeric listen address, Ed25519 key, or ALPN')
   end
-  local v4 = (@*addr_t)(&local_addr)
-  local v6 = (@*addr6_t)(&local_addr)
-  local zero: [16]uint8
-  if (local_addr.ss_family == AF_INET and v4.sin_addr.s_addr == 0) or
-      (local_addr.ss_family == AF_INET6 and C.memcmp(&v6.sin6_addr,&zero[0],16) == 0) then
+  if unspecified_address(&local_addr) then
     return io_fail(e,EINVAL,'multipath listener requires a concrete IP address')
   end
   if next_listener == 0 then return io_fail(e,ENOMEM,'multipath listener handles exhausted') end
@@ -2137,7 +2154,7 @@ local function send_nat_packet(conn:*Connection, peer:*storage_t, frame:*uint8, 
   local fd: cint
   if conn.listener ~= nilptr then fd = conn.listener.fd
   else
-    local udp = find_path(conn,0)
+    local udp = tracking == nilptr and nat_probe_socket(conn) or find_path(conn,0)
     if udp == nilptr or not udp.unconnected then return ENOTSUP end
     fd = udp.fd
   end
@@ -2277,6 +2294,40 @@ local function advertise_nat_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],advertise_nat(e,find_connection(e,args[0]),args[1]))
 end
 
+local function bind_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if conn.listener ~= nilptr or not conn.ready then
+    return io_fail(e,ENOTSUP,'NAT source requires an authenticated QUIC dial')
+  end
+  if conn.nat_inbox == nilptr then return io_done(e,term_pak(iroh_mp_Unit,0)) end
+  if conn.nat_source ~= nilptr then return io_fail(e,EINVAL,'NAT source is already bound') end
+  local addr: storage_t
+  local size = numeric_argument(e,args[1],args[2],&addr)
+  if size == 0 or unspecified_address(&addr) then
+    return io_fail(e,EINVAL,'NAT source requires a concrete numeric address')
+  end
+  local path = (@*Path)(C.calloc(1,#Path))
+  if path == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  path.fd = socket((@cint)(addr.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  local bound_size = IROH_MP_STORAGE_SIZE
+  if path.fd < 0 or bind(path.fd,&addr,size) ~= 0 or getsockname(path.fd,&path.local_addr,&bound_size) ~= 0 then
+    local error = (@uint32)(errno)
+    release_path(path)
+    return io_fail(e,error,'could not bind the direct NAT source')
+  end
+  path.unconnected = true
+  -- Responses tied to the old socket cannot authorize a path on this one.
+  for i = 0,<NAT_PROBE_CAPACITY do
+    conn.nat_inbox.probes[i].expires = 0
+  end
+  conn.nat_source = path
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function bind_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],bind_nat_source(e,find_connection(e,args[0]),args))
+end
+
 local function local_nat_candidate_run(e:Env, args:*[0]Term, work:*IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
@@ -2309,7 +2360,7 @@ local function open_nat_candidate(e:Env, conn:*Connection, args:*[0]Term): Term
   if conn.listener ~= nilptr or conn.nat_inbox == nilptr or not conn.ready then
     return io_fail(e,ENOTSUP,'a negotiated NAT traversal dialer is required')
   end
-  local source = find_path(conn,0)
+  local source = nat_probe_socket(conn)
   if source == nilptr or not source.unconnected or source.status == 3 then
     return io_fail(e,ENOTSUP,'the UDP probe socket is unavailable')
   end
@@ -2813,6 +2864,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
   if iroh_mp_send_multipath_nat_address ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_address,advertise_nat_run) end
+  if iroh_mp_bind_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_source,bind_nat_source_run) end
   if iroh_mp_multipath_nat_local_candidate ~= 0xffffffff then io_eff(iroh_mp_multipath_nat_local_candidate,local_nat_candidate_run) end
   if iroh_mp_open_multipath_nat_path ~= 0xffffffff then io_eff(iroh_mp_open_multipath_nat_path,open_nat_path_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end

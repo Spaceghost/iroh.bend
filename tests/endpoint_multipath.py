@@ -31,6 +31,16 @@ def check(client, fixture, host, mode, family, relay, peer_relay, binary=False):
             print(f"PASS Bend endpoint dialed Iroh with a 255-byte binary ALPN on {host}", flush=True)
 
 
+def check_relay_nat(client, fixture, host, mode, relay, peer_relay):
+    with process(fixture, mode, peer_relay) as server:
+        read_address(server)
+        subprocess.run((client, host, relay), timeout=24, check=True)
+        transcript, _ = server.communicate(timeout=5)
+        print(transcript.decode(), end="", flush=True)
+        if server.returncode:
+            raise RuntimeError(f"Iroh rejected the relay-to-NAT exchange on {host}")
+
+
 def check_routed(client, fixture, host, mode, family, relay, peer_relay):
     with ExitStack() as stack:
         server = stack.enter_context(process(fixture, mode, peer_relay))
@@ -144,14 +154,18 @@ if __name__ == "__main__":
     client, fixture, relay, peer_relay, *flags = sys.argv[1:]
     restore = flags == ["--restore-direct"]
     recovery = restore or flags == ["--recovery"]
+    relay_nat = flags == ["--relay-nat"]
     if bool(relay) != bool(peer_relay):
         raise SystemExit("Set both RELAY_URL and UPSTREAM_IROH_RELAY_URL for relay cases")
-    if recovery and not relay:
-        raise SystemExit("Relay recovery requires RELAY_URL and UPSTREAM_IROH_RELAY_URL")
+    if (recovery or relay_nat) and not relay:
+        raise SystemExit("Relay tests require RELAY_URL and UPSTREAM_IROH_RELAY_URL")
     for host, mode, family in (
         ("127.0.0.1", "listen", socket.AF_INET),
         ("::1", "listen6", socket.AF_INET6),
     ):
+        if relay_nat:
+            check_relay_nat(client, fixture, host, mode, relay, peer_relay)
+            continue
         if recovery:
             check_recovery(client, fixture, host, mode, family, relay, peer_relay, restore)
             continue

@@ -25,6 +25,45 @@ def connect_nat_direct(address: Endpoint.Address, identity: Endpoint.Identity, t
 def step_nat_direct(connection: Nat.Connection()) -> IO(Nat.Connection() & Nat.NewPathResult()):
   Nat.step(connection)
 
+def NatRelayConnection() -> Type:
+  Endpoint.Transport(Nat.Connection())
+
+def NatRelayResult() -> Type:
+  Endpoint.TransportResult(Nat.Connection())
+
+def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, identity: Endpoint.Identity,
+    source: Endpoint.Address, limit: U32, timeout: U32) -> IO(NatRelayResult()):
+  match result:
+    case Done{(bridge,port)}:
+      Endpoint.PeerKeys{seed,peer,alpn} = identity
+      Endpoint.IpAddress{local_ip,local_port} = source
+      do IO<NatRelayResult()>:
+        connected : Nat.ConnectResult() <-
+          Nat.connect_from("127.0.0.1",port,seed,peer,alpn,local_ip,local_port,limit,U32.to_nat(timeout))
+        Endpoint.attach_connection(Nat.Connection(),connected,bridge)
+    case Fail{error}:
+      IO.pure(NatRelayResult(),Fail{error})
+
+# Bootstrap through an authenticated relay and probe with a separate UDP
+# socket. Supply a reachable local address and use port 0 for ephemeral bind.
+def connect_nat_relay(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32) -> IO(NatRelayResult()):
+  Endpoint.PeerKeys{seed,peer,_} = identity
+  do IO<NatRelayResult()>:
+    result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
+    attach_nat_relay(result,identity,source,limit,timeout)
+
+def keep_nat_relay(result: Nat.Connection() & Nat.NewPathResult(), relay: Maybe<&1,Relay.Bridge>)
+    -> NatRelayConnection() & Nat.NewPathResult():
+  (connection,path) = result
+  ((connection,relay),path)
+
+def step_nat_relay(owner: NatRelayConnection()) -> IO(NatRelayConnection() & Nat.NewPathResult()):
+  (connection,relay) = owner
+  do IO<NatRelayConnection() & Nat.NewPathResult()>:
+    result : Nat.Connection() & Nat.NewPathResult() <- Nat.step(connection)
+    return keep_nat_relay(result,relay)
+
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
   Endpoint.dial_plan(~Quic.MultipathConnection,~dial,routes,identity,timeouts)
@@ -73,6 +112,10 @@ def disconnect(connection: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
   do IO<Result<&1,&1,U32 & String,Unit>>:
     Quic.close_multipath(conn)
     stop_bridge(bridge)
+
+def disconnect_nat_relay(owner: NatRelayConnection()) -> IO(Result<&1,&1,U32 & String,Unit>):
+  ((conn,_),relay) = owner
+  disconnect((conn,relay))
 
 type BackupPlan is Data:
   BackupRoutes{identity: Endpoint.Identity, urls: List<&2,String>, timeout: U32}
