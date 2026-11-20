@@ -629,11 +629,11 @@ type DialProgress is Data:
 type DialContext is Data:
   DialContext{identity: Identity, timeouts: Timeouts, workers: Dial.Workers<LookupAnswer>}
 
-def Attempts() -> Type:
-  Race.State & DialProgress
+def Attempts(-C: Type) -> Type:
+  Race.State<C> & DialProgress
 
-def ResumeDial() -> Type:
-  Attempts() -> IO(ConnectResult())
+def ResumeDial(-C: Type) -> Type:
+  Attempts(C) -> IO(TransportResult(C))
 
 def observe_sources(sources: List<&2,AddressLookup>, +key: List<&2,U32>, +workers: Dial.Workers<LookupAnswer>) -> IO(Unit):
   match sources:
@@ -649,15 +649,15 @@ def same_ip(left: Address, right: Address) -> Bool:
   IpAddress{b,q} = right
   U32.is_eq(p,q) && String.eq(a,b)
 
-def add_direct(ips: List<&2,Address>, state: Race.State, +identity: Identity, +deadline: Nat) -> IO(Race.State):
+def add_direct(~C: Type, ~engine: Race.Backend<C>, ips: List<&2,Address>, state: Race.State<C>, +identity: Identity, +deadline: Nat) -> IO(Race.State<C>):
   match ips:
     case Nil{}:
-      IO.pure(Race.State,state)
+      IO.pure(Race.State<C>,state)
     case Con{IpAddress{host,port},tail}:
       PeerKeys{seed,peer,alpn} = identity
-      do IO<Race.State>:
-        next : Race.State <- Race.add(state,host,port,deadline,None{},seed,peer,alpn)
-        add_direct(tail,next,identity,deadline)
+      do IO<Race.State<C>>:
+        next : Race.State<C> <- Race.add(~C,~engine,state,host,port,deadline,None{},seed,peer,alpn)
+        add_direct(~C,~engine,tail,next,identity,deadline)
 
 def start_relay_candidates(identity: Identity, urls: List<&2,String>, events: Chan(Dial.DialEvent<LookupAnswer>)) -> IO(Unit):
   PeerKeys{seed,peer,_} = identity
@@ -672,7 +672,7 @@ def known_routes(keys: List<&2,Race.RouteKey>, opening: List<&2,String>) -> Rout
     case Con{Race.RelayKey{url},rest}:
       add_relay(Some{url},known_routes(rest,opening))
 
-def schedule_candidates(plan: Routes, known: Routes, state: Race.State, progress: DialProgress, context: DialContext) -> IO(Attempts()):
+def schedule_candidates(~C: Type, ~engine: Race.Backend<C>, plan: Routes, known: Routes, state: Race.State<C>, progress: DialProgress, context: DialContext) -> IO(Attempts(C)):
   DialRoutes{ips,urls} = plan
   DialRoutes{known_ips,known_urls} = known
   DialProgress{pending,opening,yielded,errors} = progress
@@ -680,19 +680,19 @@ def schedule_candidates(plan: Routes, known: Routes, state: Race.State, progress
   added_ips = Dial.fresh(~Address,~same_ip,ips,known_ips)
   +added_urls = Dial.fresh(~String,~String.eq,urls,known_urls)
   count = Nat.add(pending,List.length(&2,String,added_urls))
-  do IO<Attempts()>:
+  do IO<Attempts(C)>:
     now : Nat <- IO.now()
-    started : Race.State <- add_direct(added_ips,state,identity,Nat.add(now,U32.to_nat(direct_timeout(timeouts))))
+    started : Race.State<C> <- add_direct(~C,~engine,added_ips,state,identity,Nat.add(now,U32.to_nat(direct_timeout(timeouts))))
     start_relay_candidates(identity,added_urls,events)
     return (started,DialProgress{count,List.append(&2,String,added_urls,opening),yielded,errors})
 
-def schedule_discovery(catalog: Race.Catalog(), plan: Routes, progress: DialProgress, context: DialContext) -> IO(Attempts()):
+def schedule_discovery(~C: Type, ~engine: Race.Backend<C>, catalog: Race.Catalog(C), plan: Routes, progress: DialProgress, context: DialContext) -> IO(Attempts(C)):
   (state,keys) = catalog
   DialProgress{pending,+opening,yielded,errors} = progress
-  schedule_candidates(plan,known_routes(keys,opening),state,DialProgress{pending,opening,yielded,errors},context)
+  schedule_candidates(~C,~engine,plan,known_routes(keys,opening),state,DialProgress{pending,opening,yielded,errors},context)
 
-def add_candidates(plan: Routes, state: Race.State, progress: DialProgress, context: DialContext) -> IO(Attempts()):
-  schedule_discovery(Race.catalog(state),plan,progress,context)
+def add_candidates(~C: Type, ~engine: Race.Backend<C>, plan: Routes, state: Race.State<C>, progress: DialProgress, context: DialContext) -> IO(Attempts(C)):
+  schedule_discovery(~C,~engine,Race.catalog(C,state),plan,progress,context)
 
 def remove_opening(+url: String, opening: List<&2,String>) -> List<&2,String>:
   match opening:
@@ -701,7 +701,7 @@ def remove_opening(+url: String, opening: List<&2,String>) -> List<&2,String>:
     case Con{+head,+tail}:
       Bool.pick(List<&2,String>,String.eq(url,head),tail,Con{head,remove_opening(url,tail)})
 
-def race_error(state: Race.State, reason: U32 & String) -> Race.State:
+def race_error(-C: Type, state: Race.State<C>, reason: U32 & String) -> Race.State<C>:
   match state:
     case Race.Waiting{_}:
       Race.Waiting{reason}
@@ -710,38 +710,38 @@ def race_error(state: Race.State, reason: U32 & String) -> Race.State:
     case _:
       state
 
-def relay_offer(offer: Dial.Offer(), state: Race.State, context: DialContext) -> IO(Race.State):
+def relay_offer(~C: Type, ~engine: Race.Backend<C>, offer: Dial.Offer(), state: Race.State<C>, context: DialContext) -> IO(Race.State<C>):
   match offer:
     case Fail{error}:
-      IO.pure(Race.State,race_error(state,error))
+      IO.pure(Race.State<C>,race_error(C,state,error))
     case Done{(bridge,port)}:
       DialContext{PeerKeys{seed,peer,alpn},HandshakeTimeouts{_,ms},_} = context
-      do IO<Race.State>:
+      do IO<Race.State<C>>:
         now : Nat <- IO.now()
-        Race.add(state,"127.0.0.1",port,Nat.add(now,U32.to_nat(ms)),Some{bridge},seed,peer,alpn)
+        Race.add(~C,~engine,state,"127.0.0.1",port,Nat.add(now,U32.to_nat(ms)),Some{bridge},seed,peer,alpn)
 
-def dial_event(event: Dial.DialEvent<LookupAnswer>, state: Race.State, progress: DialProgress,
-    context: DialContext, resume: ResumeDial()) -> IO(ConnectResult()):
+def dial_event(~C: Type, ~engine: Race.Backend<C>, event: Dial.DialEvent<LookupAnswer>, state: Race.State<C>, progress: DialProgress,
+    context: DialContext, resume: ResumeDial(C)) -> IO(TransportResult(C)):
   match event:
     case Dial.Lookup{FoundItem{LookupItem{_,_,records}}}:
       DialProgress{pending,opening,_,errors} = progress
-      do IO<ConnectResult()>:
-        next : Attempts() <- add_candidates(routes(records),state,DialProgress{Nat.sub(pending,1n),opening,True{},errors},context)
+      do IO<TransportResult(C)>:
+        next : Attempts(C) <- add_candidates(~C,~engine,routes(records),state,DialProgress{Nat.sub(pending,1n),opening,True{},errors},context)
         resume(next)
     case Dial.Lookup{SourceError{error}}:
       DialProgress{pending,opening,yielded,errors} = progress
       resume((state,DialProgress{Nat.sub(pending,1n),opening,yielded,Con{error,errors}}))
     case Dial.Relay{url,offer}:
       DialProgress{pending,opening,yielded,errors} = progress
-      do IO<ConnectResult()>:
-        next : Race.State <- relay_offer(offer,state,context)
+      do IO<TransportResult(C)>:
+        next : Race.State<C> <- relay_offer(~C,~engine,offer,state,context)
         resume((next,DialProgress{Nat.sub(pending,1n),remove_opening(url,opening),yielded,errors}))
 
-def dial_poll(event: Poll<&1,&1,Maybe<&1,Dial.DialEvent<LookupAnswer>>,Unit>, state: Race.State,
-    progress: DialProgress, context: DialContext, resume: ResumeDial()) -> IO(ConnectResult()):
+def dial_poll(~C: Type, ~engine: Race.Backend<C>, event: Poll<&1,&1,Maybe<&1,Dial.DialEvent<LookupAnswer>>,Unit>, state: Race.State<C>,
+    progress: DialProgress, context: DialContext, resume: ResumeDial(C)) -> IO(TransportResult(C)):
   match event:
     case Ready{Some{item}}:
-      dial_event(item,state,progress,context,resume)
+      dial_event(~C,~engine,item,state,progress,context,resume)
     case _:
       resume((state,progress))
 
@@ -752,49 +752,56 @@ def terminal_dial(yielded: Bool, errors: List<&2,LookupError>, last: U32 & Strin
     case False{}:
       lookup_failure(List.reverse(&2,LookupError,errors),last)
 
-def await_candidate(reason: U32 & String, progress: DialProgress, +context: DialContext, resume: ResumeDial()) -> IO(ConnectResult()):
+def await_candidate(~C: Type, ~engine: Race.Backend<C>, reason: U32 & String, progress: DialProgress, +context: DialContext, resume: ResumeDial(C)) -> IO(TransportResult(C)):
   match progress:
     case DialProgress{0n,_,yielded,errors}:
       DialContext{_,_,workers} = context
-      do IO<ConnectResult()>:
+      do IO<TransportResult(C)>:
         Dial.close(~LookupAnswer,workers)
         return Fail{terminal_dial(yielded,errors,reason)}
     case DialProgress{1n+k,opening,yielded,errors}:
       DialContext{_,_,Dial.Workers{events,_,_,_}} = context
-      do IO<ConnectResult()>:
+      do IO<TransportResult(C)>:
         event : Maybe<&1,Dial.DialEvent<LookupAnswer>> <- Chan.recv(Dial.DialEvent<LookupAnswer>,events)
-        dial_poll(Ready{event},Race.Waiting{reason},DialProgress{1n+k,opening,yielded,errors},context,resume)
+        dial_poll(~C,~engine,Ready{event},Race.Waiting{reason},DialProgress{1n+k,opening,yielded,errors},context,resume)
 
-def progress_dial(state: Race.State, progress: DialProgress, +context: DialContext, resume: ResumeDial()) -> IO(ConnectResult()):
+def progress_dial(~C: Type, ~engine: Race.Backend<C>, state: Race.State<C>, progress: DialProgress, +context: DialContext, resume: ResumeDial(C)) -> IO(TransportResult(C)):
   match state:
     case Race.Connected{conn,bridge}:
       DialContext{_,_,workers} = context
-      do IO<ConnectResult()>:
+      do IO<TransportResult(C)>:
         Dial.close(~LookupAnswer,workers)
         return Done{(conn,bridge)}
     case Race.Waiting{last}:
-      await_candidate(last,progress,context,resume)
+      await_candidate(~C,~engine,last,progress,context,resume)
     case Race.Racing{conn,routes,flight,collecting,last}:
       DialContext{_,_,Dial.Workers{events,_,_,_}} = context
-      do IO<ConnectResult()>:
+      do IO<TransportResult(C)>:
         event : Poll<&1,&1,Maybe<&1,Dial.DialEvent<LookupAnswer>>,Unit> <- Chan.try_recv(Dial.DialEvent<LookupAnswer>,events,1)
-        dial_poll(event,Race.Racing{conn,routes,flight,collecting,last},progress,context,resume)
+        dial_poll(~C,~engine,event,Race.Racing{conn,routes,flight,collecting,last},progress,context,resume)
 
-@unsafe def drive_dial(attempts: Attempts(), +context: DialContext) -> IO(ConnectResult()):
+@unsafe def drive_dial(~C: Type, ~engine: Race.Backend<C>, attempts: Attempts(C), +context: DialContext) -> IO(TransportResult(C)):
   (state,progress) = attempts
-  do IO<ConnectResult()>:
-    next : Race.State <- Race.step(state)
-    progress_dial(next,progress,context,more => drive_dial(more,context))
+  do IO<TransportResult(C)>:
+    next : Race.State<C> <- Race.step(~C,~engine,state)
+    progress_dial(~C,~engine,next,progress,context,more => drive_dial(~C,~engine,more,context))
 
-def start_lookup_dial(plan: Routes, +identity: Identity, +timeouts: Timeouts, +sources: List<&2,AddressLookup>) -> IO(ConnectResult()):
+def start_dial_with(~C: Type, ~engine: Race.Backend<C>, plan: Routes, +identity: Identity, +timeouts: Timeouts, +sources: List<&2,AddressLookup>) -> IO(TransportResult(C)):
   PeerKeys{_,key,_} = identity
   +count = List.length(&2,AddressLookup,sources)
-  do IO<ConnectResult()>:
+  do IO<TransportResult(C)>:
     +workers : Dial.Workers<LookupAnswer> <- Dial.create(~LookupAnswer,count)
     observe_sources(sources,key,workers)
-    state : Attempts() <- add_candidates(plan,Race.Waiting{(1,"endpoint has no usable direct address or relay")},
+    state : Attempts(C) <- add_candidates(~C,~engine,plan,Race.Waiting{(1,"endpoint has no usable direct address or relay")},
       DialProgress{count,[],False{},[]},DialContext{identity,timeouts,workers})
-    drive_dial(state,DialContext{identity,timeouts,workers})
+    drive_dial(~C,~engine,state,DialContext{identity,timeouts,workers})
+
+def shared_handshake() -> Race.Backend<Quic.DatagramConnection>:
+  Race.Backend{Quic.start_route_handshake,Quic.open_handshake_socket,Quic.read_handshake_socket,
+    Quic.route_handshake_output,Quic.adopt_handshake_socket,Quic.drop_quic_datagram,"QUIC datagram handshake timed out"}
+
+def start_lookup_dial(plan: Routes, identity: Identity, timeouts: Timeouts, sources: List<&2,AddressLookup>) -> IO(ConnectResult()):
+  start_dial_with(~Quic.DatagramConnection,~shared_handshake(),plan,identity,timeouts,sources)
 
 def connect_with_lookup(plan: Routes, +identity: Identity, timeouts: Timeouts, sources: List<&2,AddressLookup>)
     -> IO(ConnectResult()):
