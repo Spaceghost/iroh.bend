@@ -637,6 +637,11 @@ $(BUILD)/quic-multipath-listener.c $(BUILD)/quic-multipath-path-idle.c: $(BUILD)
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/$(subst -,_,$*).bend -o "$(abspath $@)"
 
+.PHONY: check-quic-multipath-resumption-idle-listener
+check-quic-multipath-resumption-idle-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
+	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE to the Iroh resumption timeout fixture.' >&2; exit 2; }
+	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" --role listener
+
 .PHONY: check-quic-multipath-early-listener
 check-quic-multipath-early-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
 	@test -x "$(UPSTREAM_QUIC_EARLY_DIAL)" || { echo 'Set UPSTREAM_QUIC_EARLY_DIAL to the Iroh early-data dialer.' >&2; exit 2; }

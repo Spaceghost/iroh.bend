@@ -106,26 +106,30 @@ async def relay_case(bend, reference, urls, kind, host, idle):
     print(f"PASS Bend {kind} listener negotiated {idle} ms on warm and resumed {host or urls[0]} connections", flush=True)
 
 
-async def run(bend, reference, urls):
+async def run(bend, reference, urls, role):
     if urls:
         for kind, host, idle in [("relay", None, WIDE), ("direct-relay", None, SHORT),
                                  ("direct-relay", "127.0.0.1", SHORT), ("direct-relay", "::1", 0)]:
             await asyncio.wait_for(relay_case(bend, reference, urls, kind, host, idle), 30)
         return
     for host in ("127.0.0.1", "::1"):
-        for mode, limit in [("accept", SHORT), ("accept", 0), ("reject", WIDE), ("quiet", SHORT)]:
-            await asyncio.wait_for(client_case(bend, reference, host, mode, limit), 25)
-        for rotate, warm, resumed in [(False, WIDE, WIDE), (True, WIDE, SHORT), (True, SHORT, 0)]:
-            await asyncio.wait_for(server_case(bend, reference, host, rotate, warm, resumed), 25)
-        for kind in ("identity", "dual"):
-            for rotate, warm, resumed in [(False, SHORT, SHORT), (True, 0, WIDE)]:
-                await asyncio.wait_for(server_case(bend, reference, host, rotate, warm, resumed, kind), 25)
+        if role != "listener":
+            for mode, limit in [("accept", SHORT), ("accept", 0), ("reject", WIDE), ("quiet", SHORT)]:
+                await asyncio.wait_for(client_case(bend, reference, host, mode, limit), 25)
+        if role != "client":
+            for rotate, warm, resumed in [(False, WIDE, WIDE), (True, WIDE, SHORT), (True, SHORT, 0)]:
+                await asyncio.wait_for(server_case(bend, reference, host, rotate, warm, resumed), 25)
+            for kind in ("identity", "dual"):
+                for rotate, warm, resumed in [(False, SHORT, SHORT), (True, 0, WIDE)]:
+                    await asyncio.wait_for(server_case(bend, reference, host, rotate, warm, resumed, kind), 25)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bend")
     parser.add_argument("reference")
-    parser.add_argument("--relay", nargs=2, metavar=("BEND_WS_URL", "IROH_HTTP_URL"))
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--role", choices=("client", "listener"))
+    selection.add_argument("--relay", nargs=2, metavar=("BEND_WS_URL", "IROH_HTTP_URL"))
     args = parser.parse_args()
-    asyncio.run(run(args.bend, args.reference, args.relay))
+    asyncio.run(run(args.bend, args.reference, args.relay, args.role))

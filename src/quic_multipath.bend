@@ -494,19 +494,37 @@ def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List
   bind_multipath_bytes_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
 
 # Accept tickets and 0-RTT from this peer. Application I/O starts after authentication.
-def bind_resumable_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+def bind_resumable_multipath_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+def bind_resumable_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_resumable_multipath_with_idle_timeout(host,port,seed,peer,alpn,Close.default_idle_timeout())
+
 # Authenticate each connecting Ed25519 peer. List ALPNs in server preference order.
-def bind_multipath_identity(host: String, port: U32, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+def bind_multipath_identity_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32,
+    idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
+def bind_multipath_identity(host: String, port: U32, seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_multipath_identity_with_idle_timeout(host,port,seed,alpns,early_data,Close.default_idle_timeout())
+
+def bind_dual_multipath_identity_with_idle_timeout(host: String, port: U32, seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
 def bind_dual_multipath_identity(host: String, port: U32, seed: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>, early_data: U32)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
-  import "./quic_multipath.c"
+  bind_dual_multipath_identity_with_idle_timeout(host,port,seed,alpns,early_data,Close.default_idle_timeout())
 
 def bind_dual_multipath_nat_identity(host: String, port: U32, seed: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>, early_data: U32, parameter: List<&2,U32>)

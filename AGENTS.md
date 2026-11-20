@@ -17,7 +17,7 @@ Continue the first open item below and update the checkpoint after each verified
 
 ## Current checkpoint
 
-1. Carry the configured connection idle timeout through Picoquic session resumption and early data, then through the NAT constructors. Reuse `tests/quic_resumption_idle.py` and the Fedora Iroh reference from the passing ngtcp2 resumption checkpoint.
+1. Carry the configured connection idle timeout through the Picoquic resumption and early-data dialers, the relay listener constructors, and the NAT constructors. Reuse `tests/quic_resumption_idle.py` and the Fedora Iroh reference from the passing ngtcp2 resumption checkpoint.
 2. Check Picoquic's handling of a peer abandoning the last local path against Noq 1.5.0. Its upstream tests exercise both opening a replacement within the three-PTO grace period and closing when that period expires.
 3. Keep live **listener** NAT mapping refresh parked until the owner asks to resume it. The outbound connection's mapping-refresh tests are a separate, passing case.
 
@@ -28,6 +28,8 @@ Picoquic expires a silent path independently of the connection. The suite agains
 Relay paths use a 30-second timer. The relay socket and plain direct socket on a combined listener feed the same QUIC context. A separate three-case run measured about 30 seconds in each relay role and 15 seconds on plain loopback UDP. The mixed-peer listener, outbound direct failback after a second outage, and inbound NAT relay-loss checks passed on both WS and WSS.
 
 The ngtcp2 resumption and identity listener APIs now carry the configured connection idle timeout on direct and relayed connections. The Iroh 1.5.0 checks for these APIs run with `make check-quic-resumption-idle` and `make check-quic-resumption-idle-relay`. On Fedora, `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/resumption-idle/make.sh` runs the direct checks. Add `relays` to run both WS and WSS with a fresh local test CA. Set `NGTCP2_VERSION=1.25` to check the older library. The Iroh reference and its build script are in `oracle/` beside the runner.
+
+Picoquic’s pinned, identity and dual-stack listeners accept a configured idle timeout for full and resumed handshakes. Run `bash ~/workspaces/2026-11-20-iroh-conformance/artifacts/pico-resumption-idle/make.sh` on Fedora for the IPv4/IPv6 listener checks against Iroh 1.5.0.
 
 Run the path checks on Fedora with the build and reference scripts in the evidence directory.
 

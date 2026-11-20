@@ -690,9 +690,13 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   session cache with single-use early-data tickets. The listener exposes
   buffered early streams and datagrams after the authenticated handshake.
   Check `multipath_resumption_status` and `multipath_early_status` on the
-  accepted connection.
+  accepted connection. `bind_resumable_multipath_with_idle_timeout`
+  sets the local maximum in milliseconds for each connection the listener accepts.
 - `bind_multipath_identity` also accepts distinct authenticated Ed25519 peers
   on one listener and takes ALPNs in server preference order.
+  Use `bind_multipath_identity_with_idle_timeout` for one address or
+  `bind_dual_multipath_identity_with_idle_timeout` for an IPv4/IPv6 listener.
+  Both take a QUIC VarInt in milliseconds. Zero disables the local limit.
   `multipath_remote_id` returns the peer key after authentication, including
   when the peer reconnects with a session ticket.
 - Use `start_multipath_early` to opt in to replayable 0-RTT application
@@ -953,6 +957,11 @@ streams and datagrams, and a resumption without early data that both peers
 report as `TimedOut`. For accepted early data, the Iroh listener emits
 `EARLY received` after reading the stream and datagram. Only then does
 the driver let the Bend client complete the handshake.
+
+Run `make check-quic-multipath-resumption-idle-listener` with the same
+fixture to check Picoquic’s pinned, identity and dual-stack listeners. Iroh
+compares the limits on an accepted resumption and on a full handshake after
+a fresh listener rejects the ticket.
 
 Run `make check-quic-resumption-idle-relay` with the same fixture.
 Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and

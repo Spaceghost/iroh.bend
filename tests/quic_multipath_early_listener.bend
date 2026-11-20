@@ -1,5 +1,6 @@
 import Base
 import ../src/quic_multipath.bend as Quic
+import ../src/quic_nat.bend as Wire
 import ./quic_multipath_bend.bend as Fixture
 import ./quic_multipath_listener.bend as Listener
 
@@ -90,27 +91,6 @@ def warm(conn: Quic.MultipathConnection) -> IO(Unit):
     flushed : Quic.MultipathConnection <- Fixture.step(replied)
     Quic.close_multipath(flushed)
 
-def serve(pair: Quic.MultipathListener & Quic.MultipathConnection, mode: String) -> IO(Unit):
-  match pair mode:
-    case (listener,conn) "warm":
-      do IO<Unit>:
-        Quic.close_multipath_listener(listener)
-        warm(conn)
-    case (listener,conn) "reuse":
-      do IO<Unit>:
-        warm(conn)
-        resumed : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
-        finish(resumed,1)
-    case pair _:
-      finish(pair,0)
-
-def announce(pair: Quic.MultipathListener & U32, mode: String) -> IO(Unit):
-  (listener,port) = pair
-  do IO<Unit>:
-    IO.print(U32.show(port))
-    incoming : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
-    serve(incoming,mode)
-
 def identity_result(pair: Quic.MultipathConnection & List<&2,U32>, expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
   (conn,key) = pair
   Fixture.checked_datagram(conn,Fixture.same_bytes(key,expected))
@@ -120,6 +100,39 @@ def verify_peer(conn: Quic.MultipathConnection, expected: List<&2,U32>) -> IO(Qu
     result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <- Quic.multipath_remote_id(conn)
     identity : Quic.MultipathConnection & List<&2,U32> <- Fixture.ok(List<&2,U32>,result)
     identity_result(identity,expected)
+
+def authenticated(pair: Quic.MultipathListener & Quic.MultipathConnection)
+    -> IO(Quic.MultipathListener & Quic.MultipathConnection):
+  (listener,conn) = pair
+  do IO<Quic.MultipathListener & Quic.MultipathConnection>:
+    verified : Quic.MultipathConnection <- verify_peer(conn,Listener.fixture_peer())
+    return (listener,verified)
+
+def accept_verified(listener: Quic.MultipathListener) -> IO(Quic.MultipathListener & Quic.MultipathConnection):
+  do IO<Quic.MultipathListener & Quic.MultipathConnection>:
+    pair : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
+    authenticated(pair)
+
+def serve(pair: Quic.MultipathListener & Quic.MultipathConnection, mode: String) -> IO(Unit):
+  match pair mode:
+    case (listener,conn) "warm":
+      do IO<Unit>:
+        Quic.close_multipath_listener(listener)
+        warm(conn)
+    case (listener,conn) "reuse":
+      do IO<Unit>:
+        warm(conn)
+        resumed : Quic.MultipathListener & Quic.MultipathConnection <- accept_verified(listener)
+        finish(resumed,1)
+    case pair _:
+      finish(pair,0)
+
+def announce(pair: Quic.MultipathListener & U32, mode: String) -> IO(Unit):
+  (listener,port) = pair
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    incoming : Quic.MultipathListener & Quic.MultipathConnection <- accept_verified(listener)
+    serve(incoming,mode)
 
 def finish_identity_resume(pair: Quic.MultipathListener & Quic.MultipathConnection,
     key: List<&2,U32>) -> IO(Quic.MultipathListener):
@@ -164,8 +177,44 @@ def listen_identity(host: String) -> IO(Unit):
       Quic.bind_multipath_identity(host,0,List.replicate(U32,32n,42),[Fixture.text_alpn()],1))
     announce_identity(bound)
 
+def configured(kind: String, host: String, idle_ms: Wire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>):
+  match kind:
+    case "server":
+      Quic.bind_resumable_multipath_with_idle_timeout(host,0,List.replicate(U32,32n,42),Listener.fixture_peer(),Fixture.text_alpn(),idle_ms)
+    case "identity":
+      Quic.bind_multipath_identity_with_idle_timeout(host,0,List.replicate(U32,32n,42),[Fixture.text_alpn()],1,idle_ms)
+    case "dual":
+      Quic.bind_dual_multipath_identity_with_idle_timeout("::",0,List.replicate(U32,32n,42),[Fixture.text_alpn()],1,idle_ms)
+    case _:
+      IO.pure(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>,Fail{(22,"unknown listener kind")})
+
+def announce_configured(bound: Quic.MultipathListener & U32, mode: String) -> IO(Unit):
+  match bound mode:
+    case pair "accept":
+      announce(pair,"reuse")
+    case pair "warm":
+      announce(pair,"warm")
+    case pair "reject":
+      announce(pair,"fresh")
+    case (listener,_) _:
+      do IO<Unit>:
+        Quic.close_multipath_listener(listener)
+        IO.die(Unit,2,"unknown listener resumption mode")
+
+def configured_listener(kind: String, host: String, mode: String, hi: Maybe<&2,U32>, lo: Maybe<&2,U32>) -> IO(Unit):
+  match hi lo:
+    case Some{h} Some{l}:
+      do IO<Unit>:
+        bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,configured(kind,host,Wire.Var{h,l}))
+        announce_configured(bound,mode)
+    case _ _:
+      IO.die(Unit,2,"expected millisecond timeout words")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,kind,host,mode,hi,lo]:
+      configured_listener(kind,host,mode,U32.read(hi),U32.read(lo))
     case [_,host,"identity"]:
       listen_identity(host)
     case [_,host,mode]:
