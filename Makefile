@@ -28,7 +28,7 @@ $(BUILD)/iroh-bend-rate: tests/relay_rate.bend src/relay_rate.bend src/relay_hea
 check-quic-nat: $(BUILD)/iroh-bend-quic-nat
 	$(BUILD)/iroh-bend-quic-nat
 
-$(BUILD)/iroh-bend-quic-nat: tests/quic_nat.bend src/quic_nat.bend
+$(BUILD)/iroh-bend-quic-nat: tests/quic_nat.bend src/quic_nat.bend src/quic_nat_state.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/quic_nat.bend -o $@
 

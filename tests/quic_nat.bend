@@ -1,5 +1,6 @@
 import Base
 import ../src/quic_nat.bend as NatWire
+import ../src/quic_nat_state.bend as State
 
 def bytes_equal(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
   match a b:
@@ -139,6 +140,92 @@ def parameter_vectors() -> Bool:
   absent(List<&2,U32>,NatWire.encode_limit(0)) &&
   absent(List<&2,U32>,NatWire.encode_limit(256))
 
+type Exchange is Data:
+  Incoming{frame: NatWire.Frame, expected: State.PeerEvent}
+
+def check_event(expected: State.PeerEvent, actual: State.PeerEvent) -> Bool:
+  match expected actual:
+    case State.Ignored{} State.Ignored{}:
+      True{}
+    case State.ProtocolViolation{} State.ProtocolViolation{}:
+      True{}
+    case State.AddressAdded{address} State.AddressAdded{other}:
+      State.equal_socket(address,other)
+    case State.AddressRemoved{address} State.AddressRemoved{other}:
+      State.equal_socket(address,other)
+    case State.Probe{round,target,True{}} State.Probe{other,other_target,True{}}:
+      same_integer(round,other) && State.equal_socket(target,other_target)
+    case State.Probe{round,target,False{}} State.Probe{other,other_target,False{}}:
+      same_integer(round,other) && State.equal_socket(target,other_target)
+    case _ _:
+      False{}
+
+def check_transition(expected: State.PeerEvent, actual: State.Transition, next: State.PeerState -> Bool) -> Bool:
+  State.Received{state,event} = actual
+  check_event(expected,event) && next(state)
+
+def exchange(steps: List<&2,Exchange>, state: State.PeerState) -> Bool:
+  match steps:
+    case Nil{}:
+      True{}
+    case Con{Incoming{frame,expected},rest}:
+      check_transition(expected,State.receive(state,frame),next => exchange(rest,next))
+
+def client_addresses() -> Bool:
+  +v4 = {NatWire.IPv4{[127,0,0,1]} : NatWire.Address}
+  +mapped = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1]} : NatWire.Address}
+  +v6 = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]} : NatWire.Address}
+  +id = {NatWire.Var{0,42} : NatWire.VarInt}
+  +other = {NatWire.Var{0,43} : NatWire.VarInt}
+  exchange([
+    Incoming{NatWire.AddAddress{id,v4,1},State.AddressAdded{State.Socket{v4,1}}},
+    Incoming{NatWire.AddAddress{id,mapped,1},State.Ignored{}},
+    Incoming{NatWire.AddAddress{other,v6,2},State.Ignored{}},
+    Incoming{NatWire.AddAddress{id,v6,3},State.AddressAdded{State.Socket{v6,3}}},
+    Incoming{NatWire.RemoveAddress{other},State.Ignored{}},
+    Incoming{NatWire.RemoveAddress{id},State.AddressRemoved{State.Socket{v6,3}}},
+    Incoming{NatWire.AddAddress{other,v6,2},State.AddressAdded{State.Socket{v6,2}}},
+    Incoming{NatWire.ReachOut{id,v4,1},State.ProtocolViolation{}}
+  ],State.start(State.Client{},True{},Some{1},Some{4})) &&
+  exchange([
+    Incoming{NatWire.AddAddress{id,v4,1},State.ProtocolViolation{}}
+  ],State.start(State.Client{},True{},Some{1},None{})) &&
+  exchange([
+    Incoming{NatWire.AddAddress{id,v4,1},State.ProtocolViolation{}}
+  ],State.start(State.Client{},False{},Some{1},Some{4}))
+
+# The first round uses the same two addresses as noq-proto's
+# test_basic_server_state. Verify round rollover and retransmission as well.
+def server_reach_out() -> Bool:
+  +v4 = {NatWire.IPv4{[127,0,0,1]} : NatWire.Address}
+  +mapped = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1]} : NatWire.Address}
+  +other = {NatWire.IPv4{[1,1,1,1]} : NatWire.Address}
+  +other_mapped = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,1,1,1,1]} : NatWire.Address}
+  +round = {NatWire.Var{0,1} : NatWire.VarInt}
+  +new_round = {NatWire.Var{1,0} : NatWire.VarInt}
+  exchange([
+    Incoming{NatWire.ReachOut{round,v4,1},State.Probe{round,State.Socket{mapped,1},True{}}},
+    Incoming{NatWire.ReachOut{round,other,2},State.Probe{round,State.Socket{other_mapped,2},False{}}},
+    Incoming{NatWire.ReachOut{round,mapped,1},State.Ignored{}},
+    Incoming{NatWire.ReachOut{round,v4,3},State.ProtocolViolation{}},
+    Incoming{NatWire.ReachOut{new_round,mapped,1},State.Probe{new_round,State.Socket{mapped,1},True{}}},
+    Incoming{NatWire.ReachOut{round,other,2},State.Ignored{}},
+    Incoming{NatWire.ReachOut{new_round,other,2},State.Probe{new_round,State.Socket{other_mapped,2},False{}}},
+    Incoming{NatWire.AddAddress{round,v4,1},State.ProtocolViolation{}},
+    Incoming{NatWire.RemoveAddress{round},State.ProtocolViolation{}}
+  ],State.start(State.Server{True{}},True{},Some{2},Some{1}))
+
+def ipv4_probes() -> Bool:
+  +v4 = {NatWire.IPv4{[127,0,0,1]} : NatWire.Address}
+  +mapped = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1]} : NatWire.Address}
+  +v6 = {NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]} : NatWire.Address}
+  +first = {NatWire.Var{0,1} : NatWire.VarInt}
+  +later = {NatWire.Var{0,3} : NatWire.VarInt}
+  exchange([
+    Incoming{NatWire.ReachOut{later,v6,1},State.Ignored{}},
+    Incoming{NatWire.ReachOut{first,mapped,2},State.Probe{first,State.Socket{v4,2},True{}}}
+  ],State.start(State.Server{False{}},True{},Some{2},Some{1}))
+
 def require(message: String, ok: Bool) -> IO(Unit):
   match ok:
     case True{}:
@@ -152,4 +239,7 @@ def main() -> IO(Unit):
     require("QUIC NAT traversal sequence integer boundaries",sequence_vectors())
     require("QUIC NAT traversal malformed and unknown frames",malformed_frames())
     require("QUIC NAT traversal transport parameter",parameter_vectors())
+    require("QUIC NAT traversal client candidate updates and role checks",client_addresses())
+    require("QUIC NAT traversal server rounds and duplicate suppression",server_reach_out())
+    require("QUIC NAT traversal IPv4 socket address mapping",ipv4_probes())
     return Unit{}
