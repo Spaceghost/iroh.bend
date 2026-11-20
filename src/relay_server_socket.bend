@@ -7,7 +7,7 @@ type SocketEvent is Data:
   RelayIdle{}
   RelayJoined{id: U32, version: U32}
   RelayBytes{id: U32, bytes: List<&2,U32>}
-  RelayBufferedBytes{id: U32, bytes: List<&2,U32>}
+  RelayRead{id: U32, wire_bytes: U32}
   RelayLeft{id: U32}
 
 type RequestHeaderValues is Data:

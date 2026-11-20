@@ -542,40 +542,38 @@ def rate_notice(socket: Net.ServerSocket, id: U32, version: Wire.Version, first:
     case _ _:
       IO.pure(Net.ServerSocket,socket)
 
-def metered_frame(socket: Net.ServerSocket, clients: Clients, +id: U32, +version: Wire.Version,
-    sender: List<&2,U32>, timer: Health.Heartbeat, now: U32, bytes: List<&2,U32>, charge: Rate.Charge)
-    -> IO(State):
+def save_charge(socket: Net.ServerSocket, clients: Clients, id: U32, version: Wire.Version,
+    sender: List<&2,U32>, timer: Health.Heartbeat, bucket: Rate.Bucket) -> State:
+  Serving{socket,update_client(clients,Authorized{id,version,sender,timer,bucket})}
+
+def metered_read(socket: Net.ServerSocket, clients: Clients, +id: U32, +version: Wire.Version,
+    sender: List<&2,U32>, timer: Health.Heartbeat, charge: Rate.Charge) -> IO(State):
   match charge:
     case Rate.KeepReading{bucket}:
       do IO<State>:
         opened : Net.ServerSocket <- Net.relay_resume_rx(socket,id)
-        authenticated_frame(opened,clients,id,version,sender,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
+        return save_charge(opened,clients,id,version,sender,timer,bucket)
     case Rate.HoldReading{bucket,first}:
       do IO<State>:
         notified : Net.ServerSocket <- rate_notice(socket,id,version,first)
-        authenticated_frame(notified,clients,id,version,sender,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
+        return save_charge(notified,clients,id,version,sender,timer,bucket)
 
-def charge_message(socket: Net.ServerSocket, clients: Clients, id: U32, +version: Wire.Version,
-    sender: List<&2,U32>, timer: Health.Heartbeat, +now: U32, +bytes: List<&2,U32>, bucket: Rate.Bucket)
+def handle_read(socket: Net.ServerSocket, clients: Clients, current: Maybe<&2,Client>, now: U32, bytes: U32)
     -> IO(State):
-  match bucket:
-    case Rate.Unmetered{notified}:
-      authenticated_frame(socket,clients,id,version,sender,timer,now,
-        Wire.decode(Wire.ToRelay{},version,bytes),Rate.Unmetered{notified})
+  match current:
+    case Some{Authorized{id,version,key,timer,bucket}}:
+      metered_read(socket,clients,id,version,key,timer,Rate.consume(bucket,now,bytes))
     case _:
-      metered_frame(socket,clients,id,version,sender,timer,now,bytes,
-        Rate.consume(bucket,now,U32.from_nat(List.length(&2,U32,bytes))))
+      IO.pure(State,Serving{socket,clients})
 
-def handle_bytes(socket: Net.ServerSocket, clients: Clients, match_client: Maybe<&2,Client>,
-    bytes: List<&2,U32>, now: U32, charge: Bool) -> IO(State):
-  match match_client charge:
-    case Some{Challenged{id,version,nonce}} _:
+def handle_bytes(socket: Net.ServerSocket, clients: Clients, current: Maybe<&2,Client>,
+    bytes: List<&2,U32>, now: U32) -> IO(State):
+  match current:
+    case Some{Challenged{id,version,nonce}}:
       verify(socket,clients,id,version,Handshake.decode(bytes),nonce)
-    case Some{Authorized{id,+version,key,timer,bucket}} False{}:
+    case Some{Authorized{id,+version,key,timer,bucket}}:
       authenticated_frame(socket,clients,id,version,key,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
-    case Some{Authorized{id,version,key,timer,bucket}} True{}:
-      charge_message(socket,clients,id,version,key,timer,now,bytes,bucket)
-    case None{} _:
+    case None{}:
       IO.pure(State,Serving{socket,clients})
 
 def event(socket: Net.ServerSocket, +clients: Clients, update: Net.SocketEvent, now: U32) -> IO(State):
@@ -587,9 +585,9 @@ def event(socket: Net.ServerSocket, +clients: Clients, update: Net.SocketEvent, 
         header : Net.ServerSocket & Maybe<&1,List<&2,U32>> <- Net.relay_client_auth_header(socket,id)
         client_header(header,clients,id,version(number))
     case Net.RelayBytes{+id,bytes}:
-      handle_bytes(socket,clients,find_id(clients,id),bytes,now,True{})
-    case Net.RelayBufferedBytes{+id,bytes}:
-      handle_bytes(socket,clients,find_id(clients,id),bytes,now,False{})
+      handle_bytes(socket,clients,find_id(clients,id),bytes,now)
+    case Net.RelayRead{+id,bytes}:
+      handle_read(socket,clients,find_id(clients,id),now,bytes)
     case Net.RelayLeft{+id}:
       unregister(socket,clients,id,find_id(clients,id))
 

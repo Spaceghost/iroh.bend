@@ -15,7 +15,7 @@ require 'C.string'
 ##[[
 for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
                       'relay_resume_rx','relay_reconfigure_rx','relay_kick','relay_stop',
-                      'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayBufferedBytes','RelayLeft',
+                      'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayRead','RelayLeft',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material',
                       'relay_request_raw','relay_enable_request_details','Nil'} do
@@ -37,7 +37,7 @@ local iroh_srv_RelayListener: uint32 <cimport,nodecl>
 local iroh_srv_RelayIdle: uint32 <cimport,nodecl>
 local iroh_srv_RelayJoined: uint32 <cimport,nodecl>
 local iroh_srv_RelayBytes: uint32 <cimport,nodecl>
-local iroh_srv_RelayBufferedBytes: uint32 <cimport,nodecl>
+local iroh_srv_RelayRead: uint32 <cimport,nodecl>
 local iroh_srv_RelayLeft: uint32 <cimport,nodecl>
 local iroh_srv_Con: uint32 <cimport,nodecl>
 local iroh_srv_True: uint32 <cimport,nodecl>
@@ -159,7 +159,7 @@ local Header = @record{next: pointer, name: cstring, size: csize, values: pointe
 local HeaderCapture = @record{ws: *lws, text: cstring, headers: pointer, used: csize, failed: boolean}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
-  metered: boolean, rx_held: boolean,
+  metered: boolean, rx_held: boolean, inside_frame: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer, headers: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer,
@@ -275,14 +275,28 @@ local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize)
   end
   if len > 0 then C.memcpy(&(@*[0]cuchar)(peer.body)[peer.length],bytes,len) end
   peer.length = required
-  if lws_is_final_fragment(peer.ws) == 0 or lws_remaining_packet_payload(peer.ws) ~= 0 then return 0 end
-  local ev = post(server,iroh_srv_RelayBytes,peer.id)
-  if ev == nilptr then return -1 end
-  ev.body = (@cstring)(peer.body)
-  ev.size = peer.length
-  peer.body = nilptr
-  peer.length = 0
-  peer.capacity = 0
+  local remaining = lws_remaining_packet_payload(peer.ws)
+  if peer.metered then
+    local charge = len
+    if not peer.inside_frame then
+      local size = len + remaining
+      -- RFC 6455 client frames carry a mask and may extend the payload length.
+      charge = charge + (size < 126 and 6 or (size < 65536 and 8 or 14))
+    end
+    local read = post(server,iroh_srv_RelayRead,peer.id)
+    if read == nilptr then return -1 end
+    read.size = charge
+  end
+  peer.inside_frame = remaining ~= 0
+  if lws_is_final_fragment(peer.ws) ~= 0 and remaining == 0 then
+    local ev = post(server,iroh_srv_RelayBytes,peer.id)
+    if ev == nilptr then return -1 end
+    ev.body = (@cstring)(peer.body)
+    ev.size = peer.length
+    peer.body = nilptr
+    peer.length = 0
+    peer.capacity = 0
+  end
   if peer.metered then
     peer.rx_held = true
     return lws_rx_flow_control(peer.ws,0)
@@ -631,8 +645,10 @@ local function poll_run(e: Env, f: *[0]Term, work: *IoWork): Term
     server.event_count = server.event_count - 1
     if ev.tag == iroh_srv_RelayJoined then
       result = io_node(e,ev.tag,ev.id,ev.version)
-    elseif ev.tag == iroh_srv_RelayBytes or ev.tag == iroh_srv_RelayBufferedBytes then
+    elseif ev.tag == iroh_srv_RelayBytes then
       result = io_node(e,ev.tag,ev.id,io_list(e,ev.body,ev.size))
+    elseif ev.tag == iroh_srv_RelayRead then
+      result = io_node(e,ev.tag,ev.id,ev.size)
     else
       result = term_pak(ev.tag,ev.id)
     end
@@ -776,12 +792,12 @@ end
 local function reconfigure_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local server = find_server(e,f[0])
   if server == nilptr then return f[0] end
-  -- Queued frames were read before this update. Keep them out of the new
-  -- buckets and drain them before servicing sockets again.
+  -- Drop charges for bytes read under the previous configuration.
+  -- Keep the corresponding messages in order.
   local at = server.events
   while at ~= nilptr do
     local event = (@*Event)(at)
-    if event.tag == iroh_srv_RelayBytes then event.tag = iroh_srv_RelayBufferedBytes end
+    if event.tag == iroh_srv_RelayRead then event.tag = iroh_srv_RelayIdle end
     at = event.next
   end
   local metered = term_aux(f[1]) == iroh_srv_True
