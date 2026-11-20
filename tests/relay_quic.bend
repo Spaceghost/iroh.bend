@@ -1,4 +1,5 @@
 import Base
+import ./endpoint_validation.bend as CheckOptions
 import ../src/direct.bend as Direct
 import ../src/discovery.bend as Dns
 import ../src/endpoint.bend as Endpoint
@@ -609,8 +610,34 @@ def listen_mixed(url: String, outage: Bool) -> IO(Unit):
       Endpoint.bind_direct_relay_identity(0,url,List.replicate(U32,32n,42),Fixture.alpn(),0))
     accept_mixed(bound,outage)
 
+def check_options(mode: String, id: Endpoint.Identity, port: Maybe<&2,U32>) -> IO(Unit):
+  match mode port:
+    case "routes" Some{p}:
+      do IO<Unit>:
+        outcome : Endpoint.ConnectResult() <- Endpoint.connect_routes(CheckOptions.routes(p),id,CheckOptions.timeouts())
+        CheckOptions.rejection(Endpoint.Connection(),outcome)
+    case "stream" Some{p}:
+      do IO<Unit>:
+        outcome : Endpoint.Outcome() <- Endpoint.dial_routes(CheckOptions.routes(p),id,CheckOptions.timeouts())
+        CheckOptions.rejection(Endpoint.Connected(),outcome)
+    case "dns" Some{p}:
+      do IO<Unit>:
+        outcome : Endpoint.ConnectResult() <- Endpoint.lookup_and_connect(id,CheckOptions.dns(p),CheckOptions.timeouts())
+        CheckOptions.rejection(Endpoint.Connection(),outcome)
+    case "lookup" Some{+p}:
+      sources : List<&2,Endpoint.AddressLookup> = [Endpoint.DnsLookup{CheckOptions.dns(p)},Endpoint.PkarrLookup{"http://127.0.0.1:" ++ U32.show(p),100}]
+      do IO<Unit>:
+        outcome : Endpoint.ConnectResult() <- Endpoint.connect_with_lookup(Endpoint.DialRoutes{[],[]},id,CheckOptions.timeouts(),sources)
+        CheckOptions.rejection(Endpoint.Connection(),outcome)
+    case _ _:
+      IO.die(Unit,2,"invalid options test")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_, "options", mode, choice, port]:
+      do IO<Unit>:
+        id : Endpoint.Identity <- CheckOptions.identity(choice)
+        check_options(mode,id,U32.read(port))
     case [_, "lookup-ticket", ticket, "dns", port]:
       lookup_dns_ticket(ticket,U32.read(port),[])
     case [_, "lookup-ticket", ticket, "pkarr", url]:

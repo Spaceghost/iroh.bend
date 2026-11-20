@@ -183,17 +183,20 @@ def close_nat_listener(owner: NatRelayedListener()) -> IO(Result<&1,&1,U32 & Str
   (listener,_) = owner
   close_listener(listener)
 
-def dial(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
+def dial_address(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
   Endpoint.IpAddress{host,port} = address
   Endpoint.PeerKeys{seed,peer,alpn} = identity
   Quic.connect_multipath_bytes(host,port,seed,peer,alpn,U32.to_nat(timeout))
 
+def dial(address: Endpoint.Address, +identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
+  Endpoint.before_connect(Quic.MultipathConnection,identity,u => dial_address(address,identity,timeout))
+
 # Use the automatic NAT traversal driver for a direct bootstrap address.
-def connect_nat_direct(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32, limit: U32)
+def connect_nat_direct(address: Endpoint.Address, +identity: Endpoint.Identity, timeout: U32, limit: U32)
     -> IO(Nat.ConnectResult()):
   Endpoint.IpAddress{host,port} = address
   Endpoint.PeerKeys{seed,peer,alpn} = identity
-  Nat.connect(host,port,seed,peer,alpn,limit,U32.to_nat(timeout))
+  Endpoint.before_connect(Nat.Connection(),identity,u => Nat.connect(host,port,seed,peer,alpn,limit,U32.to_nat(timeout)))
 
 def step_nat_direct(connection: Nat.Connection()) -> IO(Nat.Connection() & Nat.NewPathResult()):
   Nat.step(connection)
@@ -230,9 +233,10 @@ def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, iden
 def connect_nat_relay_using(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
     timeout: U32, limit: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
   Endpoint.PeerKeys{seed,peer,_} = identity
-  do IO<NatRelayResult()>:
-    result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
-    attach_nat_relay(result,identity,source,limit,timeout,discovery)
+  Endpoint.before_connect(NatRelayConnection(),identity,u =>
+    do IO<NatRelayResult()>:
+      result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
+      attach_nat_relay(result,identity,source,limit,timeout,discovery))
 
 # Bootstrap through an authenticated relay and probe with a reachable UDP source.
 def connect_nat_relay(url: String, identity: Endpoint.Identity, source: Endpoint.Address,
@@ -257,19 +261,15 @@ def step_nat_relay(owner: NatRelayConnection()) -> IO(NatRelayConnection() & Nat
 
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  Endpoint.dial_plan(~Quic.MultipathConnection,~dial,routes,identity,timeouts)
+  Endpoint.dial_plan(~Quic.MultipathConnection,~dial_address,routes,identity,timeouts)
 
 def lookup_and_connect(+identity: Endpoint.Identity, resolver: Endpoint.DnsSource, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    routes : Result<&1,&1,U32 & String,Endpoint.Routes> <- Endpoint.lookup_routes(identity,resolver)
-    Endpoint.connect_resolved(~Quic.MultipathConnection,~dial,routes,identity,timeouts)
+  Endpoint.resolve_and_connect(~Quic.MultipathConnection,~dial_address,identity,timeouts,key => Endpoint.lookup_routes(key,resolver))
 
 def verify_and_connect(+identity: Endpoint.Identity, packet: List<&2,U32>, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    routes : Result<&1,&1,U32 & String,Endpoint.Routes> <- Endpoint.verify_routes(identity,packet)
-    Endpoint.connect_resolved(~Quic.MultipathConnection,~dial,routes,identity,timeouts)
+  Endpoint.resolve_and_connect(~Quic.MultipathConnection,~dial_address,identity,timeouts,key => Endpoint.verify_routes(key,packet))
 
 def keep_relay(-R: Type, outcome: Quic.MultipathConnection & R, bridge: Maybe<&1,Relay.Bridge>) -> Connection() & R:
   (conn,value) = outcome
@@ -390,7 +390,7 @@ def connect_routed(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +time
     -> IO(RoutedResult()):
   Endpoint.DialRoutes{candidates,urls} = routes
   do IO<RoutedResult()>:
-    result : ConnectResult() <- Endpoint.dial_plan_with(~Quic.MultipathConnection,~dial,~dial_relay_offer,routes,identity,timeouts)
+    result : ConnectResult() <- Endpoint.dial_plan_with(~Quic.MultipathConnection,~dial_address,~dial_relay_offer,routes,identity,timeouts)
     now : U32 <- Quic.multipath_millis()
     setup_routed(result,candidates,urls,identity,timeouts,now)
 

@@ -1,6 +1,7 @@
 import Base
 import ./endpoint_ticket.bend as Tickets
 import ./ip.bend as Ip
+import ./ed25519.bend as Ed
 import ./direct.bend as Direct
 import ./discovery.bend as Dns
 import ./pkarr.bend as Pkarr
@@ -232,6 +233,38 @@ def with_ticket(~C: Type, ~dial: Routes -> Identity -> Timeouts -> IO(Result<&1,
     ticket : Maybe<&2,Tickets.EndpointTicket> <- Tickets.decode(text)
     use_ticket(~C,~dial,ticket,seed,alpn,timeouts)
 
+def remote_options(same_endpoint: Bool, alpn: List<&2,U32>) -> Result<&1,&1,U32 & String,Unit>:
+  match same_endpoint alpn:
+    case True{} _:
+      Fail{(22,"Connecting to ourself is not supported")}
+    case False{} Nil{}:
+      Fail{(22,"Invalid ALPN")}
+    case False{} _:
+      Done{Unit{}}
+
+def remote_key(local: Result<&1,&1,U32 & String,List<&2,U32>>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> Result<&1,&1,U32 & String,Unit>:
+  match local:
+    case Done{key}:
+      remote_options(Dns.bytes_eq(key,peer),alpn)
+    case Fail{error}:
+      Fail{error}
+
+def start_checked(-C: Type, checked: Result<&1,&1,U32 & String,Unit>,
+    start: Unit -> IO(Result<&1,&1,U32 & String,C>)) -> IO(Result<&1,&1,U32 & String,C>):
+  match checked:
+    case Done{_}:
+      start(Unit{})
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,C>,Fail{error})
+
+def before_connect(-C: Type, identity: Identity, start: Unit -> IO(Result<&1,&1,U32 & String,C>))
+    -> IO(Result<&1,&1,U32 & String,C>):
+  PeerKeys{seed,peer,alpn} = identity
+  do IO<Result<&1,&1,U32 & String,C>>:
+    local : Result<&1,&1,U32 & String,List<&2,U32>> <- Ed.public_key(seed)
+    start_checked(C,remote_key(local,peer,alpn),start)
+
 def direct_stream(address: Address, identity: Identity, ms: U32)
     -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection>):
   IpAddress{host,port} = address
@@ -304,10 +337,14 @@ def try_ips(~C: Type, ~attempt: Dialer(C), ~relay_attempt: Dialer(C), ips: List<
         continue_dial(C,Result.map(&1,&1,U32 & String,C,Transport(C),c => (c,None{}),conn),
           error => try_ips(~C,~attempt,~relay_attempt,rest,urls,identity,timeouts,error))
 
-def dial_plan_with(~C: Type, ~direct: Dialer(C), ~relay: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
+def dial_validated_plan(~C: Type, ~direct: Dialer(C), ~relay: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
     -> IO(TransportResult(C)):
   DialRoutes{ips,urls} = plan
   try_ips(~C,~direct,~relay,ips,urls,identity,timeouts,(1,"endpoint has no usable direct address or relay"))
+
+def dial_plan_with(~C: Type, ~direct: Dialer(C), ~relay: Dialer(C), plan: Routes, +identity: Identity, timeouts: Timeouts)
+    -> IO(TransportResult(C)):
+  before_connect(Transport(C),identity,u => dial_validated_plan(~C,~direct,~relay,plan,identity,timeouts))
 
 def dial_plan(~C: Type, ~attempt: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
     -> IO(TransportResult(C)):
@@ -361,13 +398,24 @@ def verify_routes(identity: Identity, packet: List<&2,U32>) -> IO(Result<&1,&1,U
     verified : Pkarr.Verification <- Pkarr.verify(key,packet)
     return pkarr_routes(verified)
 
-def connect_resolved(~C: Type, ~attempt: Dialer(C), planned: Result<&1,&1,U32 & String,Routes>,
+def dial_resolved(~C: Type, ~attempt: Dialer(C), planned: Result<&1,&1,U32 & String,Routes>,
     identity: Identity, timeouts: Timeouts) -> IO(TransportResult(C)):
   match planned:
     case Done{plan}:
-      dial_plan(~C,~attempt,plan,identity,timeouts)
+      dial_validated_plan(~C,~attempt,~attempt,plan,identity,timeouts)
     case Fail{error}:
       IO.pure(TransportResult(C),Fail{error})
+
+def connect_resolved(~C: Type, ~attempt: Dialer(C), planned: Result<&1,&1,U32 & String,Routes>,
+    +identity: Identity, timeouts: Timeouts) -> IO(TransportResult(C)):
+  before_connect(Transport(C),identity,u => dial_resolved(~C,~attempt,planned,identity,timeouts))
+
+def resolve_and_connect(~C: Type, ~attempt: Dialer(C), +identity: Identity, timeouts: Timeouts,
+    resolve: Identity -> IO(Result<&1,&1,U32 & String,Routes>)) -> IO(TransportResult(C)):
+  before_connect(Transport(C),identity,u =>
+    do IO<TransportResult(C)>:
+      plan : Result<&1,&1,U32 & String,Routes> <- resolve(identity)
+      dial_resolved(~C,~attempt,plan,identity,timeouts))
 
 def pkarr_reply(reply: Result<&1,&1,U32 & String,Pkarr.Verification>) -> Result<&1,&1,U32 & String,Routes>:
   match reply:
@@ -392,16 +440,17 @@ def try_lookups(sources: List<&2,AddressLookup>, outcome: ConnectResult(), +iden
     case Con{source,rest} Fail{_}:
       do IO<ConnectResult()>:
         plan : Result<&1,&1,U32 & String,Routes> <- resolve_source(source,identity)
-        next : ConnectResult() <- connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+        next : ConnectResult() <- dial_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
         try_lookups(rest,next,identity,timeouts)
     case _ _:
       IO.pure(ConnectResult(),outcome)
 
 def connect_with_lookup(plan: Routes, +identity: Identity, +timeouts: Timeouts, sources: List<&2,AddressLookup>)
     -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    tried : ConnectResult() <- connect_routes(plan,identity,timeouts)
-    try_lookups(sources,tried,identity,timeouts)
+  before_connect(Connection(),identity,u =>
+    do IO<ConnectResult()>:
+      tried : ConnectResult() <- dial_validated_plan(~Quic.DatagramConnection,~direct_quic,~direct_quic,plan,identity,timeouts)
+      try_lookups(sources,tried,identity,timeouts))
 
 def connect_ticket_with_lookup(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts,
     sources: List<&2,AddressLookup>) -> IO(ConnectResult()):
@@ -413,27 +462,19 @@ def from_dns(reply: Result<&1,&1,U32 & String,Dns.Reply>, identity: Identity, ti
   connect_resolved(~Direct.QuicConnection,~direct_stream,dns_routes(reply),identity,timeouts)
 
 def lookup_and_dial(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(Outcome()):
-  do IO<Outcome()>:
-    plan : Result<&1,&1,U32 & String,Routes> <- lookup_routes(identity,resolver)
-    connect_resolved(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)
+  resolve_and_connect(~Direct.QuicConnection,~direct_stream,identity,timeouts,key => lookup_routes(key,resolver))
 
 def from_pkarr(verified: Pkarr.Verification, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
   connect_resolved(~Direct.QuicConnection,~direct_stream,pkarr_routes(verified),identity,timeouts)
 
 def verify_and_dial(+identity: Identity, packet: List<&2,U32>, timeouts: Timeouts) -> IO(Outcome()):
-  do IO<Outcome()>:
-    plan : Result<&1,&1,U32 & String,Routes> <- verify_routes(identity,packet)
-    connect_resolved(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)
+  resolve_and_connect(~Direct.QuicConnection,~direct_stream,identity,timeouts,key => verify_routes(key,packet))
 
 def lookup_and_connect(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    plan : Result<&1,&1,U32 & String,Routes> <- lookup_routes(identity,resolver)
-    connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+  resolve_and_connect(~Quic.DatagramConnection,~direct_quic,identity,timeouts,key => lookup_routes(key,resolver))
 
 def verify_and_connect(+identity: Identity, packet: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
-  do IO<ConnectResult()>:
-    plan : Result<&1,&1,U32 & String,Routes> <- verify_routes(identity,packet)
-    connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+  resolve_and_connect(~Quic.DatagramConnection,~direct_quic,identity,timeouts,key => verify_routes(key,packet))
 
 def keep_path(-R: Type, outcome: Quic.DatagramConnection & R, path: Maybe<&1,Path.Bridge>) -> Connection() & R:
   (conn,value) = outcome
