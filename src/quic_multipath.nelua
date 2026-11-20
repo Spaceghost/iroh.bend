@@ -1989,6 +1989,9 @@ local function closed_error(e: Env, conn: *Connection): Term
   if picoquic_get_local_error(conn.cnx) == IROH_MP_PIN_MISMATCH then
     return io_fail(e,EACCES,'QUIC peer endpoint key mismatch')
   end
+  if conn.detached and conn.ready and conn.cnx.is_multipath_enabled == 0 then
+    return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath')
+  end
   return io_fail(e,ECONNRESET,'multipath connection closed')
 end
 
@@ -2362,6 +2365,12 @@ local function prepare_handshake(conn:*Connection, bytes:*uint8, length:*csize):
   return picoquic_prepare_packet(conn.cnx,picoquic_current_time(),bytes,IO_CAPACITY,length,&peer,&source,&iface)
 end
 
+-- Send a pending TLS alert or CONNECTION_CLOSE on the actual candidate socket.
+local function send_handshake_close(conn:*Connection, fd:cint, bytes:*uint8)
+  local length:csize
+  if prepare_handshake(conn,bytes,&length) == 0 and length > 0 then send(fd,bytes,length,0) end
+end
+
 local function handshake_input(e:Env, conn:*Connection, fd:cint):Term
   if conn == nilptr or not conn.detached then return io_fail(e,EBADF,'no pending multipath handshake') end
   if handshake_failed(conn) then return closed_error(e,conn) end
@@ -2372,15 +2381,14 @@ local function handshake_input(e:Env, conn:*Connection, fd:cint):Term
   local count = conn.cnx.nb_packets_received
   picoquic_incoming_packet(conn.quic,&bytes[0],(@csize)(n),&conn.paths.peer,&conn.paths.local_addr,0,0,picoquic_current_time())
   if handshake_failed(conn) then
-    -- Deliver the TLS alert on the socket that supplied the peer's flight.
-    local length:csize
-    if prepare_handshake(conn,&bytes[0],&length) == 0 and length > 0 then
-      send(fd,&bytes[0],length,0)
-    end
+    send_handshake_close(conn,fd,&bytes[0])
     return closed_error(e,conn)
   end
   if not conn.ready or count == conn.cnx.nb_packets_received then return io_done(e,0) end
-  if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
+  if conn.cnx.is_multipath_enabled == 0 then
+    if picoquic_close(conn.cnx,0) == 0 then send_handshake_close(conn,fd,&bytes[0]) end
+    return closed_error(e,conn)
+  end
   return io_done(e,1)
 end
 

@@ -486,19 +486,51 @@ def accept_second(first: Quic.QuicDatagramListener & Quic.DatagramConnection) ->
     second : Quic.QuicDatagramListener & Quic.DatagramConnection <- server_accept(15000n,listener)
     serve_two(second,conn)
 
-def serve(bound: Quic.QuicDatagramListener & U32, prefix: String) -> IO(Unit):
+def closed_peer(result: Quic.DatagramConnection & Result<&1,&1,U32 & String,U32>,
+    retry: Quic.DatagramConnection -> IO(Unit)) -> IO(Unit):
+  match result:
+    case (conn,Fail{_}):
+      Quic.drop_quic_datagram(conn)
+    case (conn,Done{_}):
+      do IO<Unit>:
+        IO.sleep(1)
+        retry(conn)
+
+def await_close(fuel: Nat, conn: Quic.DatagramConnection) -> IO(Unit):
+  match fuel:
+    case 0n:
+      do IO<Unit>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Unit,1,"multipath dialer left the single-path connection open")
+    case 1n+left:
+      do IO<Unit>:
+        result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_quic_datagram(conn)
+        closed_peer(result,next => await_close(left,next))
+
+def expect_close(pair: Quic.QuicDatagramListener & Quic.DatagramConnection) -> IO(Unit):
+  (listener,conn) = pair
+  do IO<Unit>:
+    await_close(2000n,conn)
+    Quic.close_shared_quic(listener)
+    IO.print("PEER_CLOSED")
+
+def serve(bound: Quic.QuicDatagramListener & U32, prefix: String,
+    accept: Quic.QuicDatagramListener & Quic.DatagramConnection -> IO(Unit)) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(String.append(prefix,U32.show(port)))
     first : Quic.QuicDatagramListener & Quic.DatagramConnection <- server_accept(15000n,listener)
-    accept_second(first)
+    accept(first)
 
-def listen(host: String, prefix: String) -> IO(Unit):
+def listen_with(host: String, prefix: String, accept: Quic.QuicDatagramListener & Quic.DatagramConnection -> IO(Unit)) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.QuicDatagramListener & U32 <- IO.try(Quic.QuicDatagramListener & U32,
       Quic.bind_shared_quic(host,0,List.replicate(U32,32n,42),public_key(True{}),
         [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]))
-    serve(bound,prefix)
+    serve(bound,prefix,accept)
+
+def listen(host: String, prefix: String) -> IO(Unit):
+  listen_with(host,prefix,accept_second)
 
 def choose_listener(v4: Bool, v6: Bool) -> IO(Unit):
   match v4 v6:

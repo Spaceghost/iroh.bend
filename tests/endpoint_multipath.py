@@ -67,6 +67,18 @@ def check_ticket_identity(client, fixture, host, mode):
     print(f"PASS {mode} rejected the wrong ticket identity and notified Iroh", flush=True)
 
 
+def check_single_path_peer(client, fixture, host, mode):
+    with process(fixture, "listen-single-path", host) as peer:
+        port = read_address(peer)
+        direct = ip_ticket(ticket([], SERVER_KEY), mode, [port])
+        result = subprocess.run((client, "dial-ticket", direct, "direct", host, str(port)), capture_output=True, timeout=6)
+        transcript, _ = peer.communicate(timeout=5)
+        if (result.returncode != 95 or b"peer did not negotiate QUIC multipath" not in result.stderr
+                or peer.returncode or b"PEER_CLOSED" not in transcript):
+            raise AssertionError(f"Multipath refusal failed: {result.stderr!r}, single-path peer {transcript!r}")
+    print(f"PASS {mode} single-path peer received the multipath dialer's close", flush=True)
+
+
 def signed_address(address):
     # Pkarr signs the BEP 44 sequence and DNS wire message, excluding the key.
     name = b"\x05_iroh" + bytes([len(LABEL)]) + LABEL.encode() + b"\x00"
@@ -299,6 +311,9 @@ if __name__ == "__main__":
         ("127.0.0.1", "listen", socket.AF_INET),
         ("::1", "listen6", socket.AF_INET6),
     ):
+        if flags == ["--single-path"]:
+            check_single_path_peer(client, fixture, host, mode)
+            continue
         if relay_qad:
             _, local_ip, port, name, ca = flags
             if host == local_ip:

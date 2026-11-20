@@ -770,6 +770,8 @@ def run(args: List<String>) -> IO(Unit):
       dial_endpoint_dns(U32.read(port))
     case Con{_,Con{"bridge-endpoint",Con{url,Con{port,Nil{}}}}}:
       bridge_endpoint(url,U32.read(port))
+    case Con{_,Con{"listen-single-path",Con{host,Nil{}}}}:
+      TransportFixture.listen_with(host,"port:",TransportFixture.expect_close)
     case Con{_,Con{"listen-endpoint",Nil{}}}:
       listen_endpoint("127.0.0.1","127.0.0.1:")
     case Con{_,Con{"listen6-endpoint",Nil{}}}:

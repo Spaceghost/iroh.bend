@@ -195,6 +195,10 @@ check-endpoint-connect-options: $(BUILD)/iroh-bend-relay-quic
 check-multipath-connect-options: $(BUILD)/iroh-bend-endpoint-multipath-options
 	python3 -B tests/endpoint_connect_options.py "$<" multipath "$(UPSTREAM_CONNECT_OPTIONS)"
 
+.PHONY: check-multipath-negotiation
+check-multipath-negotiation: $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-relay-quic
+	python3 -B tests/endpoint_multipath.py "$<" "$(word 2,$^)" "" "" --single-path
+
 .PHONY: check-endpoint-ticket-dial
 UPSTREAM_ENDPOINT_TICKET ?=
 check-endpoint-ticket-dial: $(BUILD)/iroh-bend-relay-quic
