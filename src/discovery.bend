@@ -488,15 +488,25 @@ def after_wait(-R: Type, -P: Type, outcome: SocketPoll(R,P), stop: Chan(Unit), d
     after_wait(R,P,outcome,stop,deadline,sock => rest => left =>
       watch_socket(~C,~R,~P,~op,context,sock,rest,left,deadline,stop))
 
+def begin_wait(~C: Data, ~R: Type, ~P: Type, ~op: SocketOp(C,R,P), event: Poll<&1,&1,Maybe<&1,Unit>,Unit>,
+    context: C, socket: Socket, pending: P, +ms: U32, stop: Chan(Unit)) -> IO(SocketPoll(R,P)):
+  match event:
+    case Ready{_}:
+      IO.pure(SocketPoll(R,P),(socket,Wait{pending}))
+    case Wait{_}:
+      do IO<SocketPoll(R,P)>:
+        now : Nat <- IO.now()
+        watch_socket(~C,~R,~P,~op,context,socket,pending,ms,Nat.add(now,U32.to_nat(ms)),stop)
+
 def wait_socket(~C: Data, ~R: Type, ~P: Type, ~op: SocketOp(C,R,P), mode: WaitMode, context: C,
     socket: Socket, pending: P, +ms: U32) -> IO(SocketPoll(R,P)):
   match mode:
     case TimedWait{}:
       op(context,socket,pending,ms)
-    case StopOnClose{stop}:
+    case StopOnClose{+stop}:
       do IO<SocketPoll(R,P)>:
-        now : Nat <- IO.now()
-        watch_socket(~C,~R,~P,~op,context,socket,pending,ms,Nat.add(now,U32.to_nat(ms)),stop)
+        event : Poll<&1,&1,Maybe<&1,Unit>,Unit> <- Chan.try_recv(Unit,stop,0)
+        begin_wait(~C,~R,~P,~op,event,context,socket,pending,ms,stop)
 
 def tcp_receive(size: U32, socket: Socket, pending: Unit, ms: U32) -> IO(SocketPoll(ReadReply(),Unit)):
   TCP.try_recv_bytes(socket,size,ms)
@@ -545,7 +555,7 @@ def read_more(outcome: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,Maybe<&1,Li
     case (socket,Wait{_}):
       IO.pure(Socket & TcpChunk,(socket,ReadFailed{1,"DNS TCP read timed out"}))
 
-def read_exact(+fuel: Nat, socket: Socket, +left: U32, +ms: U32, reversed: List<&2,U32>, +mode: WaitMode)
+def read_exact_with(+fuel: Nat, socket: Socket, +left: U32, +ms: U32, reversed: List<&2,U32>, +mode: WaitMode)
     -> IO(Socket & TcpChunk):
   match fuel left:
     case _ 0:
@@ -554,7 +564,7 @@ def read_exact(+fuel: Nat, socket: Socket, +left: U32, +ms: U32, reversed: List<
       do IO<Socket & TcpChunk>:
         received : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>,Unit> <-
           wait_socket(~U32,~ReadReply(),~Unit,~tcp_receive,mode,left,socket,Unit{},ms)
-        read_more(received,next => +bytes => read_exact(k,next,U32.sub(left,count_bytes(bytes)),ms,
+        read_more(received,next => +bytes => read_exact_with(k,next,U32.sub(left,count_bytes(bytes)),ms,
           List.append(&2,U32,List.reverse(&2,U32,bytes),reversed),mode))
     case 0n _:
       IO.pure(Socket & TcpChunk,(socket,ReadFailed{1,"incomplete DNS TCP frame"}))
@@ -573,40 +583,40 @@ def finish_tcp(result: Socket & TcpChunk, request: Query)
     Socket.close(socket)
     return tcp_reply(chunk,request)
 
-def read_tcp_body(socket: Socket, request: Query, +size: U32, ms: U32, valid: Bool, mode: WaitMode)
+def read_tcp_body_with(socket: Socket, request: Query, +size: U32, ms: U32, valid: Bool, mode: WaitMode)
     -> IO(Result<&1,&1,U32 & String,Reply>):
   match valid:
     case True{}:
       do IO<Result<&1,&1,U32 & String,Reply>>:
-        body : Socket & TcpChunk <- read_exact(U32.to_nat(size),socket,size,ms,[],mode)
+        body : Socket & TcpChunk <- read_exact_with(U32.to_nat(size),socket,size,ms,[],mode)
         finish_tcp(body,request)
     case False{}:
       finish_tcp((socket,ReadFailed{1,"invalid DNS TCP frame length"}),request)
 
-def read_tcp_frame(prefix: Socket & TcpChunk, request: Query, ms: U32, mode: WaitMode)
+def read_tcp_frame_with(prefix: Socket & TcpChunk, request: Query, ms: U32, mode: WaitMode)
     -> IO(Result<&1,&1,U32 & String,Reply>):
   match prefix:
     case (socket,Chunk{Con{hi,Con{lo,Nil{}}}}):
       +size = be16(hi,lo)
-      read_tcp_body(socket,request,size,ms,U32.is_ge(size,12),mode)
+      read_tcp_body_with(socket,request,size,ms,U32.is_ge(size,12),mode)
     case (socket,ReadFailed{code,message}):
       finish_tcp((socket,ReadFailed{code,message}),request)
     case (socket,_):
       finish_tcp((socket,ReadFailed{1,"invalid DNS TCP frame prefix"}),request)
 
-def tcp_sent(sent: Socket & Poll<&1,&1,Result<&1,&1,(U32 & String) & List<&2,U32>,Unit>,List<&2,U32>>,
+def tcp_sent_with(sent: Socket & Poll<&1,&1,Result<&1,&1,(U32 & String) & List<&2,U32>,Unit>,List<&2,U32>>,
     request: Query, +ms: U32, +mode: WaitMode) -> IO(Result<&1,&1,U32 & String,Reply>):
   match sent:
     case (socket,Ready{Done{_}}):
       do IO<Result<&1,&1,U32 & String,Reply>>:
-        prefix : Socket & TcpChunk <- read_exact(2n,socket,2,ms,[],mode)
-        read_tcp_frame(prefix,request,ms,mode)
+        prefix : Socket & TcpChunk <- read_exact_with(2n,socket,2,ms,[],mode)
+        read_tcp_frame_with(prefix,request,ms,mode)
     case (socket,Ready{Fail{((code,message),_)}}):
       finish_tcp((socket,ReadFailed{code,message}),request)
     case (socket,Wait{_}):
       finish_tcp((socket,ReadFailed{1,"DNS TCP send timed out"}),request)
 
-def tcp_query(conn: Result<&1,&1,U32 & String,Socket>, +request: Query, +ms: U32, +mode: WaitMode)
+def tcp_query_with(conn: Result<&1,&1,U32 & String,Socket>, +request: Query, +ms: U32, +mode: WaitMode)
     -> IO(Result<&1,&1,U32 & String,Reply>):
   match conn request:
     case Done{socket} TxtQuery{_,_,+data}:
@@ -615,37 +625,37 @@ def tcp_query(conn: Result<&1,&1,U32 & String,Socket>, +request: Query, +ms: U32
       do IO<Result<&1,&1,U32 & String,Reply>>:
         sent : Socket & Poll<&1,&1,Result<&1,&1,(U32 & String) & List<&2,U32>,Unit>,List<&2,U32>> <-
           wait_socket(~Unit,~WriteReply(),~List<&2,U32>,~tcp_write,mode,Unit{},socket,frame,ms)
-        tcp_sent(sent,request,ms,mode)
+        tcp_sent_with(sent,request,ms,mode)
     case Done{socket} InvalidQuery{}:
       finish_tcp((socket,ReadFailed{1,"invalid Iroh discovery query"}),request)
     case Fail{error} _:
       IO.pure(Result<&1,&1,U32 & String,Reply>,Fail{error})
 
-def retry_truncated(reply: Result<&1,&1,U32 & String,Reply>, request: Query,
+def retry_truncated_with(reply: Result<&1,&1,U32 & String,Reply>, request: Query,
     resolver: String, +port: U32, +ms: U32, mode: WaitMode, open_tcp: OpenTcp()) -> IO(Result<&1,&1,U32 & String,Reply>):
   match reply:
     case Done{Truncated{}}:
       do IO<Result<&1,&1,U32 & String,Reply>>:
         conn : Result<&1,&1,U32 & String,Socket> <- open_tcp(resolver,port,ms)
-        tcp_query(conn,request,ms,mode)
+        tcp_query_with(conn,request,ms,mode)
     case _:
       IO.pure(Result<&1,&1,U32 & String,Reply>,reply)
 
-def close_answer(outcome: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
+def close_answer_with(outcome: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
     +request: Query, +resolver: String, +port: U32, ms: U32, mode: WaitMode, open_tcp: OpenTcp()) -> IO(Result<&1,&1,U32 & String,Reply>):
   (socket,poll) = outcome
   do IO<Result<&1,&1,U32 & String,Reply>>:
     Socket.close(socket)
-    retry_truncated(recv_result(poll,request,resolver,port),request,resolver,port,ms,mode,open_tcp)
+    retry_truncated_with(recv_result(poll,request,resolver,port),request,resolver,port,ms,mode,open_tcp)
 
-def on_sent(outcome: SocketPoll(WriteReply(),List<&2,U32>), request: Query, resolver: String,
+def on_sent_with(outcome: SocketPoll(WriteReply(),List<&2,U32>), request: Query, resolver: String,
     port: U32, +ms: U32, +mode: WaitMode, open_tcp: OpenTcp()) -> IO(Result<&1,&1,U32 & String,Reply>):
   match outcome:
     case (socket,Ready{Done{_}}):
       do IO<Result<&1,&1,U32 & String,Reply>>:
         received : SocketPoll(UdpReply(),Unit) <-
           wait_socket(~U32,~UdpReply(),~Unit,~udp_receive,mode,4097,socket,Unit{},ms)
-        close_answer(received,request,resolver,port,ms,mode,open_tcp)
+        close_answer_with(received,request,resolver,port,ms,mode,open_tcp)
     case (socket,Ready{Fail{(error,_)}}):
       do IO<Result<&1,&1,U32 & String,Reply>>:
         Socket.close(socket)
@@ -655,7 +665,7 @@ def on_sent(outcome: SocketPoll(WriteReply(),List<&2,U32>), request: Query, reso
         Socket.close(socket)
         return Fail{(1,"DNS UDP send timed out")}
 
-def on_bound(bound: Result<&1,&1,U32 & String,Socket>, request: Query, +resolver: String,
+def on_bound_with(bound: Result<&1,&1,U32 & String,Socket>, request: Query, +resolver: String,
     +port: U32, +ms: U32, data: List<&2,U32>, +mode: WaitMode, open_tcp: OpenTcp())
     -> IO(Result<&1,&1,U32 & String,Reply>):
   match bound:
@@ -665,7 +675,7 @@ def on_bound(bound: Result<&1,&1,U32 & String,Socket>, request: Query, +resolver
       do IO<Result<&1,&1,U32 & String,Reply>>:
         sent : SocketPoll(WriteReply(),List<&2,U32>) <-
           send_query(mode,resolver,port,socket,data,ms)
-        on_sent(sent,request,resolver,port,ms,mode,open_tcp)
+        on_sent_with(sent,request,resolver,port,ms,mode,open_tcp)
 
 def transact_with(+request: Query, resolver: String, port: U32, ms: U32, mode: WaitMode, open_tcp: OpenTcp())
     -> IO(Result<&1,&1,U32 & String,Reply>):
@@ -673,12 +683,47 @@ def transact_with(+request: Query, resolver: String, port: U32, ms: U32, mode: W
     case TxtQuery{_,_,data}:
       do IO<Result<&1,&1,U32 & String,Reply>>:
         bound : Result<&1,&1,U32 & String,Socket> <- UDP.bind("0.0.0.0",0)
-        on_bound(bound,request,resolver,port,ms,data,mode,open_tcp)
+        on_bound_with(bound,request,resolver,port,ms,data,mode,open_tcp)
     case InvalidQuery{}:
       IO.pure(Result<&1,&1,U32 & String,Reply>,Fail{(1,"invalid Iroh discovery name")})
 
+# The unscoped entry points retain the socket and timeout contracts of lookup.
+def standard_tcp(host: String, port: U32, ms: U32) -> IO(Result<&1,&1,U32 & String,Socket>):
+  TCP.connect(host,port)
+
+def read_exact(fuel: Nat, socket: Socket, left: U32, ms: U32, reversed: List<&2,U32>) -> IO(Socket & TcpChunk):
+  read_exact_with(fuel,socket,left,ms,reversed,TimedWait{})
+
+def read_tcp_body(socket: Socket, request: Query, size: U32, ms: U32, valid: Bool) -> IO(Result<&1,&1,U32 & String,Reply>):
+  read_tcp_body_with(socket,request,size,ms,valid,TimedWait{})
+
+def read_tcp_frame(prefix: Socket & TcpChunk, request: Query, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  read_tcp_frame_with(prefix,request,ms,TimedWait{})
+
+def tcp_sent(sent: SocketPoll(WriteReply(),List<&2,U32>), request: Query, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  tcp_sent_with(sent,request,ms,TimedWait{})
+
+def tcp_query(conn: Result<&1,&1,U32 & String,Socket>, request: Query, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  tcp_query_with(conn,request,ms,TimedWait{})
+
+def retry_truncated(reply: Result<&1,&1,U32 & String,Reply>, request: Query, resolver: String,
+    port: U32, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  retry_truncated_with(reply,request,resolver,port,ms,TimedWait{},standard_tcp)
+
+def close_answer(outcome: SocketPoll(UdpReply(),Unit), request: Query, resolver: String, port: U32,
+    ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  close_answer_with(outcome,request,resolver,port,ms,TimedWait{},standard_tcp)
+
+def on_sent(outcome: Socket & WriteReply(), request: Query, resolver: String, port: U32,
+    ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
+  on_sent_with(wrap_sent(outcome),request,resolver,port,ms,TimedWait{},standard_tcp)
+
+def on_bound(bound: Result<&1,&1,U32 & String,Socket>, request: Query, resolver: String, port: U32,
+    ms: U32, data: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Reply>):
+  on_bound_with(bound,request,resolver,port,ms,data,TimedWait{},standard_tcp)
+
 def transact(request: Query, resolver: String, port: U32, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
-  transact_with(request,resolver,port,ms,TimedWait{},host => p => timeout => TCP.connect(host,p))
+  transact_with(request,resolver,port,ms,TimedWait{},standard_tcp)
 
 def lookup_using(random: Result<&1,&1,U32 & String,U32>, key: List<&2,U32>, origin: String,
     resolver: String, port: U32, ms: U32, mode: WaitMode, open_tcp: OpenTcp()) -> IO(Result<&1,&1,U32 & String,Reply>):
@@ -690,7 +735,7 @@ def lookup_using(random: Result<&1,&1,U32 & String,U32>, key: List<&2,U32>, orig
 
 def lookup_with_id(random: Result<&1,&1,U32 & String,U32>, key: List<&2,U32>, origin: String,
     resolver: String, port: U32, ms: U32) -> IO(Result<&1,&1,U32 & String,Reply>):
-  lookup_using(random,key,origin,resolver,port,ms,TimedWait{},host => p => timeout => TCP.connect(host,p))
+  lookup_using(random,key,origin,resolver,port,ms,TimedWait{},standard_tcp)
 
 # ms limits socket reads and the TCP send. TCP connection establishment uses
 # Bend's socket effect and its operating-system connect timeout.

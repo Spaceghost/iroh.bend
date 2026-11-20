@@ -1,5 +1,6 @@
 """Hold a resolver open through an authenticated exchange and observe its cancellation."""
 
+import select
 import socket
 import subprocess
 from contextlib import ExitStack, contextmanager
@@ -85,19 +86,23 @@ def check_race(client, ticket, peer, pkarr, dns_port, slow_kind, fast_kind):
 
     def slow(connection, address):
         query_source.append(address)
+        partial = slow_kind == "dns-tcp-body"
+        if partial:
+            # A long frame delivers bytes inside every individual read timeout.
+            connection.sendall(b"\xff\xff\x00")
         started.set()
         if connection is None:
             released.wait(12)
         else:
-            connection.settimeout(0.1)
             while not released.is_set():
                 try:
-                    if not connection.recv(1):
-                        closed.set()
-                        break
-                except TimeoutError:
-                    continue
-                except ConnectionResetError:
+                    if select.select([connection], [], [], 0.005 if partial else 0.1)[0]:
+                        if not connection.recv(1):
+                            closed.set()
+                            break
+                    elif partial:
+                        connection.sendall(b"\x00")
+                except (BrokenPipeError, ConnectionResetError):
                     closed.set()
                     break
         return False
@@ -109,7 +114,7 @@ def check_race(client, ticket, peer, pkarr, dns_port, slow_kind, fast_kind):
         def provider(kind, gate):
             if kind == "pkarr":
                 return relay_proxy(stack, pkarr.rstrip("/"), gate)
-            return dns_proxy(stack, dns_port, gate, tcp=kind == "dns-tcp")
+            return dns_proxy(stack, dns_port, gate, tcp=kind.startswith("dns-tcp"))
 
         first = provider(slow_kind, slow)
         second = provider(fast_kind, fast)

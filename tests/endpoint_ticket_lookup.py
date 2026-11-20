@@ -110,7 +110,7 @@ def main(client, fixture, pkarr, dns_port):
                   expected_error=b"invalid signed Pkarr endpoint packet")
             check(client, fixture, family, "id-only", "pkarr-dns", pkarr, dns_port, invalid)
             for slow, fast in (("dns", "pkarr"), ("pkarr", "dns"), ("dns", "dns"), ("pkarr", "pkarr"),
-                               ("dns-tcp", "pkarr"), ("pkarr", "dns-tcp")):
+                               ("dns-tcp", "pkarr"), ("pkarr", "dns-tcp"), ("dns-tcp-body", "pkarr")):
                 check(client, fixture, family, "id-only", (slow, fast), pkarr, dns_port)
 
 
