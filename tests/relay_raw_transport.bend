@@ -62,12 +62,17 @@ def drop_after(net: Net.ServerSocket, id: U32, flush: U32)
     closed : Net.ServerSocket <- Net.relay_kick(net,id,flush)
     return (closed,None{})
 
+def complete_chunk(net: Net.ServerSocket, +id: U32) -> IO(Net.ServerSocket):
+  do IO<Net.ServerSocket>:
+    resumed : Net.ServerSocket <- Net.relay_resume_rx(net,id)
+    Net.relay_raw_chunk_done(resumed,id)
+
 def drive_frames(fuel: Nat, net: Net.ServerSocket, +id: U32, read: Ws.Read)
     -> IO(Net.ServerSocket & Maybe<&2,WirePeer>):
   match fuel read:
     case _ Ws.Waiting{next}:
       do IO<Net.ServerSocket & Maybe<&2,WirePeer>>:
-        resumed : Net.ServerSocket <- Net.relay_resume_rx(net,id)
+        resumed : Net.ServerSocket <- complete_chunk(net,id)
         return (resumed,Some{Framed{next}})
     case 1n+left Ws.Received{Ws.Ping{bytes},next,rest}:
       do IO<Net.ServerSocket & Maybe<&2,WirePeer>>:
@@ -91,7 +96,7 @@ def started(net: Net.ServerSocket, +id: U32, result: Raw.UpgradeRead)
   match result:
     case Raw.MoreHttp{state}:
       do IO<Net.ServerSocket & Maybe<&2,WirePeer>>:
-        resumed : Net.ServerSocket <- Net.relay_resume_rx(net,id)
+        resumed : Net.ServerSocket <- complete_chunk(net,id)
         return (resumed,Some{Opening{state}})
     case Raw.WebSocketReady{_,_,reply,pending}:
       do IO<Net.ServerSocket & Maybe<&2,WirePeer>>:

@@ -33,7 +33,8 @@ def relay_bind(host: String, port: U32, cert: String, key: String)
 
 # Raw listeners expose accepted sockets as version 0 and post plaintext
 # chunks as RelayBytes. When metered, a RelayRead precedes each chunk.
-# Each chunk holds reads until relay_resume_rx.
+# Finish consuming a chunk with relay_raw_chunk_done. Metered peers also
+# need relay_resume_rx, which can arrive before or after completion.
 def relay_bind_raw(host: String, port: U32, cert: String, key: String)
     -> IO(Result<&1,&1,U32 & String,ServerSocket & U32>):
   import "./relay_server_socket.c"
@@ -58,6 +59,9 @@ def relay_meter_challenge(server: ServerSocket, id: U32, metered: Bool) -> IO(Se
   import "./relay_server_socket.c"
 
 def relay_resume_rx(server: ServerSocket, id: U32) -> IO(ServerSocket):
+  import "./relay_server_socket.c"
+
+def relay_raw_chunk_done(server: ServerSocket, id: U32) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 
 def relay_reconfigure_rx(server: ServerSocket, metered: Bool) -> IO(ServerSocket):
