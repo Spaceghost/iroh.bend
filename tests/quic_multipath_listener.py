@@ -56,6 +56,7 @@ if __name__ == "__main__":
         check(listener, fixture, host, mode)
         check_affinity(listener, dialer, host)
         check_affinity(listener, dialer, host, advertises_nat=True)
+        check(listener, fixture, host, mode, "6")
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
             check(listener, fixture, host, mode, "2")
         if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":

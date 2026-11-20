@@ -1,5 +1,7 @@
 import Base
 import ../src/quic_multipath.bend as Quic
+import ../src/quic_nat.bend as NatWire
+import ../src/quic_nat_state.bend as NatState
 import ./quic_multipath_bend.bend as Fixture
 
 def accepted_result(pair: Quic.MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>,
@@ -173,6 +175,56 @@ def exchange_both(peers: Quic.MultipathConnection & Quic.MultipathConnection) ->
     exchange(second,66,33,44)
     IO.print("PASS Bend served both connections after closing the multipath listener")
 
+def server_decision(conn: Quic.MultipathConnection, event: NatState.Transition)
+    -> IO(Quic.MultipathConnection):
+  match event:
+    case NatState.Received{_,NatState.Probe{_,_,_}}:
+      do IO<Quic.MultipathConnection>:
+        IO.print("PASS Bend decoded Iroh's authenticated REACH_OUT and selected a probe target")
+        return conn
+    case _:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"expected a NAT probe target")
+
+def decode_reach_out(conn: Quic.MultipathConnection, result: NatWire.DecodeResult)
+    -> IO(Quic.MultipathConnection):
+  match result:
+    case NatWire.Decoded{frame,Nil{}}:
+      server_decision(conn,NatState.receive(NatState.start(NatState.Server{True{}},True{},Some{64},Some{32}),frame))
+    case _:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"invalid NAT traversal frame from transport")
+
+def await_frame(result: Quic.MultipathConnection & Maybe<&1,List<&2,U32>>,
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match result:
+    case (conn,Some{bytes}):
+      decode_reach_out(conn,NatWire.decode(bytes))
+    case (conn,None{}):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def wait_nat_frame(fuel: Nat, conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"Iroh did not send REACH_OUT")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        active : Quic.MultipathConnection <- Fixture.step(conn)
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
+          Quic.read_multipath_nat_frame(active)
+        pair : Quic.MultipathConnection & Maybe<&1,List<&2,U32>> <- Fixture.ok(Maybe<&1,List<&2,U32>>,result)
+        await_frame(pair,next => wait_nat_frame(left,next))
+
+def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mode: U32) -> IO(Unit):
+  match peers mode:
+    case (left,right) 6:
+      do IO<Unit>:
+        first : Quic.MultipathConnection <- wait_nat_frame(6000n,left)
+        second : Quic.MultipathConnection <- wait_nat_frame(6000n,right)
+        exchange_both((first,second))
+    case active _:
+      exchange_both(active)
+
 def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection,
     +mode: U32) -> IO(Unit):
   (listener,conn) = second
@@ -181,7 +233,7 @@ def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: 
     preferred : Quic.MultipathConnection <- check_selection(first,Fixture.binary_alpn(),mode)
     fallback : Quic.MultipathConnection <- check_selection(conn,Fixture.text_alpn(),mode)
     peers : Quic.MultipathConnection & Quic.MultipathConnection <- check_parameters(preferred,fallback)
-    exchange_both(peers)
+    exchange_nat(peers,mode)
 
 def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
   (listener,conn) = first
@@ -235,6 +287,8 @@ def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -
       serve_two_connections(first,0)
     case 3:
       serve_two_connections(first,3)
+    case 6:
+      serve_two_connections(first,6)
     case 4:
       reconfigure(first)
     case _:
@@ -298,6 +352,8 @@ def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
       listen_live(host)
     case Some{5}:
       listen_nat_offer(host,5)
+    case Some{6}:
+      listen_nat_offer(host,6)
     case Some{number}:
       listen_text(host,number)
     case None{}:

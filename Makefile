@@ -367,7 +367,7 @@ UPSTREAM_QUIC_MULTIPATH_DIAL ?=
 UPSTREAM_QUIC_MULTIPATH_SESSION ?=
 UPSTREAM_ENDPOINT_MULTIPATH ?=
 PICOQUIC_FLAGS = -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include"
-PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
+PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--wrap=picoquic_decode_frames -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
 	"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
 	"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group
 MULTIPATH_CURL_CFLAGS ?= $$($(PKG_CONFIG) --cflags libcurl)
@@ -439,9 +439,9 @@ $(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.ben
 		"$(abspath $(BUILD)/quic-multipath-stage/src/quic_multipath.c)"
 	cd "$(BUILD)/quic-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_bend.bend -o "$(abspath $@)"
 
-$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-multipath-listener-stage/src" "$(BUILD)/quic-multipath-listener-stage/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend "$(BUILD)/quic-multipath-listener-stage/src/"
+	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend "$(BUILD)/quic-multipath-listener-stage/src/"
 	cp tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend "$(BUILD)/quic-multipath-listener-stage/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(BUILD)/quic-multipath-listener-stage/src/quic_multipath.c)"

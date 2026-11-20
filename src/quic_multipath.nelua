@@ -129,6 +129,17 @@ local function picoquic_probe_new_tuple(cnx:*cnx_t, path:*path_t, peer:pointer, 
 local function picoquic_set_stream_path_affinity(cnx:*cnx_t,id:uint64,path:uint64):cint <cimport,nodecl> end
 local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <cimport,nodecl> end
 local function picoquic_add_to_stream_with_ctx(cnx:*cnx_t,id:uint64,data:pointer,count:csize,fin:cint,ctx:pointer):cint <cimport,nodecl> end
+local receive_node_t <cimport,nodecl,codename 'picoquic_stream_data_node_t'> = @record{}
+local cid_t <cimport,nodecl,codename 'picoquic_local_cnxid_t'> = @record{}
+local function picoquic_varint_decode(bytes:*uint8, length:csize, value:*uint64):csize <cimport,nodecl> end
+local function picoquic_skip_frame(bytes:*uint8, length:csize, consumed:*csize, pure_ack:*cint):cint <cimport,nodecl> end
+local function picoquic_connection_error(cnx:*cnx_t, code:uint64, kind:uint64):cint <cimport,nodecl> end
+local function real_decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize, node:*receive_node_t,
+    epoch:cint, src:pointer, dst:pointer, pn:uint64, unallocated:cint, cid:*cid_t, now:uint64):cint
+    <cimport,codename '__real_picoquic_decode_frames'> end
+local picoquic_epoch_1rtt: cint <cimport,nodecl>
+local PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR: uint64 <cimport,nodecl>
+local PICOQUIC_TRANSPORT_INTERNAL_ERROR: uint64 <cimport,nodecl>
 local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
 local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
     index:*cint):cint <cimport,nodecl> end
@@ -245,7 +256,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -291,6 +302,7 @@ local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
+local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
@@ -348,6 +360,9 @@ local SESSION_LIMIT: uint32 <comptime> = 256
 local HANDSHAKE_LIMIT: uint64 <comptime> = 10000000
 local DATAGRAM_QUEUE_LIMIT: uint32 <comptime> = 64
 local NAT_PARAMETER_SIZE: csize <comptime> = 10
+local NAT_INBOX_CAPACITY: csize <comptime> = 512
+local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
+local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
 local Listener = @record{
   next: pointer, id: uint32, fd: cint, quic: *quic_t, local_addr: storage_t,
   refs: uint32, stopped: boolean,
@@ -364,7 +379,9 @@ local Stream = @record{
 local Datagram = @record{next:pointer,size:csize}
 local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean, retained:boolean}
 local PeerParameters = @record{bytes:*uint8, size:csize}
-local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8}
+local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8, nat_enabled:boolean}
+local NatFrame = @record{size:csize, bytes:[30]uint8}
+local NatInbox = @record{frames:[NAT_INBOX_CAPACITY]NatFrame, first:csize, count:csize}
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
   local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32,
@@ -378,6 +395,7 @@ local Connection = @record{
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
+  nat_inbox: *NatInbox,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
 }
@@ -632,6 +650,29 @@ local function collect_server_extension(tls: *tls_t, props: *props_t, kind: uint
   return (kind == 19 or kind == QUIC_TRANSPORT_EXTENSION) and 1 or 0
 end
 
+-- Gate the synchronous frame adapter on a valid peer offer before Bend polls.
+local function peer_offers_nat(data: iov_t): boolean
+  local bytes = (@*[0]uint8)(data.base)
+  local at: csize = 0
+  local has_offer: boolean
+  while at < data.len do
+    local kind: uint64, length: uint64
+    local width = picoquic_varint_decode((&bytes[at]),data.len - at,&kind)
+    if width == 0 then return false end
+    at = at + width
+    width = picoquic_varint_decode((&bytes[at]),data.len - at,&length)
+    if width == 0 then return false end
+    at = at + width
+    if length > data.len - at then return false end
+    if kind == 0x3d7f91120401 then
+      if has_offer or length ~= 1 or bytes[at] == 0 then return false end
+      has_offer = true
+    end
+    at = at + (@csize)(length)
+  end
+  return has_offer
+end
+
 local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): cint
   local parsed = picoquic_tls_collected_extensions_cb(tls,props,slots)
   if parsed ~= 0 then return parsed end
@@ -679,6 +720,7 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
     C.free(pending.extensions)
     pending.extensions = merged
     pin.response[0].data = {base=merged,len=base.len + NAT_PARAMETER_SIZE}
+    pending.nat_enabled = cnx.is_multipath_enabled ~= 0 and peer_offers_nat(transport.data)
   end
   if iroh_mp_peer_multipath_parameters ~= 0xffffffff then
     local status = save_parameters(&pending.parameters,transport.data)
@@ -915,6 +957,7 @@ local function destroy(conn: *Connection)
   free_session(conn.ticket)
   free_session(conn.resume)
   C.free(conn.peer_parameters.bytes)
+  C.free(conn.nat_inbox)
   C.free(conn)
 end
 
@@ -1135,7 +1178,15 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   conn.listener = listener
   local pending = (@*PendingHandshake)(user)
   conn.selected_alpn = pending.alpn
+  if pending.nat_enabled then
+    conn.nat_inbox = (@*NatInbox)(C.calloc(1,#NatInbox))
+    if conn.nat_inbox == nilptr then
+      C.free(conn)
+      return -1
+    end
+  end
   if remember_shared_path(conn,0) == nilptr then
+    C.free(conn.nat_inbox)
     C.free(conn)
     return -1
   end
@@ -1146,6 +1197,68 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   C.free(pending.extensions)
   C.free(pending)
   return on_event(cnx,id,bytes,size,kind,conn,stream_user)
+end
+
+local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize, node:*receive_node_t,
+    epoch:cint, src:pointer, dst:pointer, pn:uint64, unallocated:cint, cid:*cid_t, now:uint64):cint
+    <cexport,codename '__wrap_picoquic_decode_frames'>
+  if epoch ~= picoquic_epoch_1rtt or (@pointer)(picoquic_get_callback_function(cnx)) ~= (@pointer)(on_event) then
+    return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
+  end
+  local conn = (@*Connection)(picoquic_get_callback_context(cnx))
+  if conn == nilptr or not conn.ready or conn.nat_inbox == nilptr then
+    return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
+  end
+  local inbox = conn.nat_inbox
+  local input = (@*[0]uint8)(bytes)
+  local patch: *[0]uint8
+  defer C.free(patch) end
+  local count: csize = 0
+  local at: csize = 0
+  while at < size do
+    local remaining = size - at
+    local kind: uint64
+    local tag_size = picoquic_varint_decode(&input[at],remaining,&kind)
+    if kind == REACH_OUT_V4 or kind == REACH_OUT_V6 then
+      local round: uint64
+      if tag_size ~= 4 then return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,kind) end
+      local round_size = picoquic_varint_decode(&input[at + tag_size],remaining - tag_size,&round)
+      local frame_size: csize = tag_size + round_size + (kind == REACH_OUT_V4 and 6 or 18)
+      if round_size == 0 or frame_size > remaining then
+        return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,kind)
+      end
+      if inbox.count + count == NAT_INBOX_CAPACITY then
+        return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_INTERNAL_ERROR,kind)
+      end
+      if patch == nilptr then
+        patch = (@*[0]uint8)(C.malloc(size))
+        if patch == nilptr then return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_INTERNAL_ERROR,kind) end
+        C.memcpy(patch,bytes,size)
+      end
+      local item = &inbox.frames[(inbox.first + inbox.count + count) % NAT_INBOX_CAPACITY]
+      item.size = frame_size
+      C.memcpy(&item.bytes[0],&input[at],frame_size)
+      count = count + 1
+      -- Reach-out is ack-eliciting and non-probing, like PING.
+      -- Keep all vanilla frame offsets and the payload length intact.
+      C.memset(&patch[at],0,frame_size)
+      patch[at] = 1
+      at = at + frame_size
+    else
+      local consumed: csize
+      local pure_ack: cint
+      if picoquic_skip_frame(&input[at],remaining,&consumed,&pure_ack) ~= 0 or consumed == 0 or consumed > remaining then
+        break
+      end
+      at = at + consumed
+    end
+  end
+  if patch == nilptr then return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now) end
+  -- Pass a nil receiver node so Picoquic copies STREAM/CRYPTO bytes from
+  -- the temporary packet if it buffers any out-of-order data.
+  local result = real_decode_frames(cnx,path,&patch[0],size,nilptr,epoch,src,dst,pn,unallocated,cid,now)
+  if result == 0 then inbox.count = inbox.count + count end
+  return result
 end
 
 local function handle_id(e: Env, handle: Term, tag: uint32): uint64
@@ -1524,6 +1637,18 @@ end
 
 local function none(e: Env): Term
   return io_done(e,term_pak(iroh_mp_None,0))
+end
+
+local function read_nat_frame_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local inbox = conn.nat_inbox
+  if inbox == nilptr or inbox.count == 0 then return io_tup(e,args[0],none(e)) end
+  local frame = &inbox.frames[inbox.first]
+  local bytes = io_list(e,(@cstring)(&frame.bytes[0]),frame.size)
+  inbox.first = (inbox.first + 1) % NAT_INBOX_CAPACITY
+  inbox.count = inbox.count - 1
+  return io_tup(e,args[0],optional_id(e,bytes))
 end
 
 local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t): cuint
@@ -2217,6 +2342,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
   if iroh_mp_bind_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer,bind_nat_offer_run) end
+  if iroh_mp_read_multipath_nat_frame ~= 0xffffffff then io_eff(iroh_mp_read_multipath_nat_frame,read_nat_frame_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end
