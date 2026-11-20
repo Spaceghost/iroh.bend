@@ -255,6 +255,7 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
+.PHONY: check-picoquic-multipath
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -279,6 +280,31 @@ check-quic-rebind: $(BUILD)/iroh-bend-quic-datagram
 check-quic-migration: $(BUILD)/iroh-bend-quic-migration
 	@test -x "$(UPSTREAM_QUIC_MIGRATION)" || { echo 'Set UPSTREAM_QUIC_MIGRATION to the executable Iroh migration listener.' >&2; exit 2; }
 	python3 -B tests/quic_migration.py "$(BUILD)/iroh-bend-quic-migration" "$(UPSTREAM_QUIC_MIGRATION)"
+
+PICOQUIC_SOURCE ?=
+PICOTLS_SOURCE ?=
+PICOQUIC_BUILD ?=
+PICOTLS_BUILD ?= $(PICOQUIC_BUILD)/_deps/picotls-build
+UPSTREAM_QUIC_MULTIPATH ?=
+
+check-picoquic-multipath: $(BUILD)/iroh-bend-picoquic-multipath
+	@test -x "$(UPSTREAM_QUIC_MULTIPATH)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH to the Iroh multipath fixture.' >&2; exit 2; }
+	sh tests/quic_multipath.sh "$(BUILD)/iroh-bend-picoquic-multipath" "$(UPSTREAM_QUIC_MULTIPATH)"
+
+$(BUILD)/picoquic-multipath.c: tests/quic_multipath.nelua
+	mkdir -p "$(BUILD)"
+	$(NELUA) --code --cache-dir "$(abspath $(BUILD)/nelua)" -o "$@" "$<"
+
+$(BUILD)/iroh-bend-picoquic-multipath: $(BUILD)/picoquic-multipath.c
+	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
+		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
+		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }
+	$(CLANG) -std=gnu11 -O2 -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include" \
+		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" \
+		-Wl,--wrap=ptls_handle_message -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
+		"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
+		"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group \
+		-pthread $$($(PKG_CONFIG) --libs openssl)
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"

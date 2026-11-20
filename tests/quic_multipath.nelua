@@ -1,0 +1,303 @@
+## pragmas.noentrypoint = true
+## cinclude '<picoquic.h>'
+## cinclude '<picoquic_internal.h>'
+## cinclude '<picotls.h>'
+## cinclude '<picotls/openssl.h>'
+## cinclude '<openssl/evp.h>'
+## cinclude '<arpa/inet.h>'
+## cinclude '<unistd.h>'
+## cinclude '<stdio.h>'
+## cinclude '<stdlib.h>'
+require 'C.stdlib'
+local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer}
+local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{is_multipath_enabled:cuint,nb_paths:cint}
+local context_t <cimport,nodecl,codename 'ptls_context_t'> = @record{use_raw_public_keys:cuint,sign_certificate:pointer}
+local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
+local buffer_t <cimport,nodecl,codename 'ptls_buffer_t'> = @record{}
+local iov_t <cimport,nodecl,codename 'ptls_iovec_t'> = @record{base:*uint8,len:csize}
+local ext_t <cimport,nodecl,codename 'ptls_raw_extension_t'> = @record{type:uint16,data:iov_t}
+local props_t <cimport,nodecl,codename 'ptls_handshake_properties_t'> = @record{additional_extensions:*ext_t}
+local evp_t <cimport,nodecl,codename 'EVP_PKEY'> = @record{}
+local verify_t <cimport,nodecl,codename 'ptls_verify_certificate_t'> = @record{cb:pointer,algos:pointer}
+local pin_t <cimport,nodecl,codename 'ptls_openssl_raw_pubkey_verify_certificate_t'> = @record{
+  super:verify_t,expected_pubkey:*evp_t
+}
+## cdefine 'proof_v4 struct sockaddr_in'
+## cdefine 'proof_v6 struct sockaddr_in6'
+## cdefine 'proof_sock_store struct sockaddr_storage'
+## cdefine 'PROOF_V4_SIZE sizeof(struct sockaddr_in)'
+## cdefine 'PROOF_V6_SIZE sizeof(struct sockaddr_in6)'
+## cdefine 'PROOF_STORAGE_SIZE sizeof(struct sockaddr_storage)'
+## cdefine 'PROOF_PIN_MISMATCH (PICOQUIC_TRANSPORT_CRYPTO_ERROR(PTLS_ALERT_BAD_CERTIFICATE))'
+## cdefine 'proof_ipv4 struct in_addr'
+## cdefine 'PROOF_SIGN_SIZE sizeof(ptls_openssl_sign_certificate_t)'
+## cdefine 'PROOF_PIN_SIZE sizeof(ptls_openssl_raw_pubkey_verify_certificate_t)'
+local PROOF_SIGN_SIZE:csize <cimport,nodecl>
+local PROOF_PIN_SIZE:csize <cimport,nodecl>
+local PROOF_V4_SIZE:cuint <cimport,nodecl>
+local PROOF_V6_SIZE:cuint <cimport,nodecl>
+local PROOF_STORAGE_SIZE:cuint <cimport,nodecl>
+local PROOF_PIN_MISMATCH:uint64 <cimport,nodecl>
+local signer_t <cimport,nodecl,codename 'ptls_openssl_sign_certificate_t'> = @record{}
+local function ptls_openssl_init_sign_certificate(signer:*signer_t,key:*evp_t):cint <cimport,nodecl> end
+local ip_t <cimport,nodecl,codename 'proof_ipv4'> = @record{s_addr:uint32}
+local addr_t <cimport,nodecl,codename 'proof_v4'> = @record{sin_family:uint16,sin_port:uint16,sin_addr:ip_t}
+local addr6_t <cimport,nodecl,codename 'proof_v6'> = @record{sin6_family:uint16,sin6_port:uint16,sin6_addr:[16]uint8}
+local storage_t <cimport,nodecl,codename 'proof_sock_store'> = @record{ss_family:uint16}
+
+local function log(format:cstring, ...:cvarargs):cint <cimport,nodecl,codename 'printf'> end
+local function ptls_get_context(tls:*tls_t):*context_t <cimport,nodecl> end
+local function ptls_is_server(tls:*tls_t):cint <cimport,nodecl> end
+local function real_tls(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer, len:csize,
+    props:*props_t):cint <cimport,codename '__real_ptls_handle_message'> end
+
+local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
+    props:*props_t):cint <cexport,codename '__wrap_ptls_handle_message'>
+  if ptls_is_server(tls) ~= 0 or ptls_get_context(tls).use_raw_public_keys == 0 or
+      props == nilptr or props.additional_extensions == nilptr then
+    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  end
+  -- Offer the client raw key on every ClientHello, including after HelloRetryRequest.
+  -- RFC 7250 client_certificate_type contains a single RawPublicKey entry.
+  local offer:[2]uint8 = {1,2}
+  local extensions:[3]ext_t
+  local original = props.additional_extensions
+  local upstream = (@*[0]ext_t)(original)
+  if upstream[0].type ~= 57 or upstream[1].type ~= 65535 then
+    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  end
+  extensions[0] = upstream[0]
+  extensions[1] = {type=19,data={base=&offer[0],len=2}}
+  extensions[2] = {type=65535}
+  props.additional_extensions = &extensions[0]
+  local result = real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  props.additional_extensions = original
+  return result
+end
+
+local function picoquic_current_time():uint64 <cimport,nodecl> end
+local function picoquic_create(max:uint32, cert:cstring,key:cstring,ca:cstring,alpn:cstring, cb:pointer, cbctx:pointer,
+    cidcb:pointer,cidctx:pointer,seed:pointer, now:uint64, sim:pointer,tickets:cstring,enckey:pointer,enclen:csize):*quic_t <cimport,nodecl> end
+local function picoquic_set_default_multipath_option(quic:*quic_t, enabled:cint) <cimport,nodecl> end
+local function picoquic_set_verify_certificate_callback(quic:*quic_t, verify:*verify_t, dispose:pointer) <cimport,nodecl> end
+local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
+local function picoquic_set_tls_certificate_chain(quic:*quic_t, certs:*iov_t, count:csize) <cimport,nodecl> end
+local function picoquic_create_client_cnx(quic:*quic_t, peer:pointer,time:uint64,version:uint32,sni:cstring,alpn:cstring,cb:pointer,ctx:pointer):*cnx_t <cimport,nodecl> end
+local function picoquic_enable_path_callbacks(cnx:*cnx_t, enabled:cint) <cimport,nodecl> end
+local function picoquic_probe_new_path(cnx:*cnx_t, peer:pointer, src:pointer,time:uint64):cint <cimport,nodecl> end
+local function picoquic_set_stream_path_affinity(cnx:*cnx_t,id:uint64,path:uint64):cint <cimport,nodecl> end
+local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <cimport,nodecl> end
+local function picoquic_add_to_stream(cnx:*cnx_t,id:uint64, data:pointer,count:csize,fin:cint):cint <cimport,nodecl> end
+local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
+local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
+    index:*cint):cint <cimport,nodecl> end
+local function picoquic_get_local_error(cnx:*cnx_t):uint64 <cimport,nodecl> end
+local function picoquic_get_remote_error(cnx:*cnx_t):uint64 <cimport,nodecl> end
+local function picoquic_free(quic:*quic_t) <cimport,nodecl> end
+local function EVP_PKEY_new_raw_private_key_ex(ctx:pointer, name:cstring, props:cstring, key:*uint8,n:csize):*evp_t <cimport,nodecl> end
+local function EVP_PKEY_new_raw_public_key_ex(ctx:pointer, name:cstring, props:cstring, key:*uint8,n:csize):*evp_t <cimport,nodecl> end
+local function EVP_PKEY_free(key:*evp_t) <cimport,nodecl> end
+local function i2d_PUBKEY(key:*evp_t, out:**uint8):cint <cimport,nodecl> end
+local function ptls_openssl_raw_pubkey_init_verify_certificate(pin:*pin_t, pubkey:*evp_t):cint <cimport,nodecl> end
+local function ptls_openssl_raw_pubkey_dispose_verify_certificate(pin:*pin_t) <cimport,nodecl> end
+local function socket(domain:cint,kind:cint,protocol:cint):cint <cimport,nodecl> end
+local function connect(fd:cint, addr:pointer, size:cuint):cint <cimport,nodecl> end
+local function getsockname(fd:cint, addr:pointer, size:*cuint):cint <cimport,nodecl> end
+local function close(fd:cint):cint <cimport,nodecl> end
+local function recv(fd:cint, data:pointer,size:csize,flags:cint):isize <cimport,nodecl> end
+local function send(fd:cint, data:pointer,size:csize,flags:cint):isize <cimport,nodecl> end
+local function htons(port:uint16):uint16 <cimport,nodecl> end
+local function ntohs(port:uint16):uint16 <cimport,nodecl> end
+local function inet_pton(family:cint,s:cstring,addr:pointer):cint <cimport,nodecl> end
+local function usleep(usec:cuint):cint <cimport,nodecl> end
+local function puts(s:cstring):cint <cimport,nodecl> end
+local function exit(code:cint) <cimport,nodecl> end
+local AF_INET:cint <cimport,nodecl>
+local AF_INET6:cint <cimport,nodecl>
+local SOCK_DGRAM:cint <cimport,nodecl>
+local SOCK_NONBLOCK:cint <cimport,nodecl>
+local SOCK_CLOEXEC:cint <cimport,nodecl>
+local picoquic_callback_ready:cint <cimport,nodecl>
+local picoquic_callback_path_available:cint <cimport,nodecl>
+local picoquic_callback_stream_fin:cint <cimport,nodecl>
+local picoquic_callback_stream_data:cint <cimport,nodecl>
+
+local ready:boolean
+local path:uint64
+local echoed:uint32
+local failed:boolean
+
+local function event(cnx:*cnx_t,id:uint64,bytes:*uint8,size:csize,kind:cint,ctx:pointer,stream:pointer):cint
+  if kind == picoquic_callback_ready then
+    ready = true
+    log('ready: multipath=%u\n',cnx.is_multipath_enabled)
+  elseif kind == picoquic_callback_path_available then
+    log('available path %llu\n',(@culonglong)(id))
+    if id ~= 0 then path = id end
+  elseif (kind == picoquic_callback_stream_fin or kind == picoquic_callback_stream_data) and size > 0 then
+    local received = ((@*[0]uint8)(bytes))[0]
+    if size == 1 and id == 0 and received == 11 then
+      echoed = echoed | 1
+    elseif size == 1 and id == 4 and received == 22 then
+      echoed = echoed | 2
+    else
+      failed = true
+    end
+  end
+  return 0
+end
+
+local function check(ok:boolean,step:cstring)
+  if not ok then
+    log('failed: %s\n',step)
+    exit(1)
+  end
+end
+
+local function disposable_pin(pin:*verify_t)
+  ptls_openssl_raw_pubkey_dispose_verify_certificate((@*pin_t)(pin))
+  C.free(pin)
+end
+
+local function address_port(addr:*storage_t):uint16
+  if addr.ss_family == AF_INET then return ((@*addr_t)(addr)).sin_port end
+  if addr.ss_family == AF_INET6 then return ((@*addr6_t)(addr)).sin6_port end
+  return 0
+end
+
+local function make_address(host:cstring, port:uint16, out:*storage_t):cuint
+  local v4 = (@*addr_t)(out)
+  if inet_pton(AF_INET,host,&v4.sin_addr) == 1 then
+    v4.sin_family = (@uint16)(AF_INET)
+    v4.sin_port = htons(port)
+    return PROOF_V4_SIZE
+  end
+  local v6 = (@*addr6_t)(out)
+  check(inet_pton(AF_INET6,host,&v6.sin6_addr) == 1,'numeric peer address')
+  v6.sin6_family = (@uint16)(AF_INET6)
+  v6.sin6_port = htons(port)
+  return PROOF_V6_SIZE
+end
+
+local function open_udp(peer:*storage_t, peer_size:cuint, here:*storage_t):cint
+  local fd = socket((@cint)(peer.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  local size = PROOF_STORAGE_SIZE
+  check(fd >= 0 and connect(fd,peer,peer_size) == 0 and getsockname(fd,here,&size) == 0,'open UDP')
+  return fd
+end
+
+local function configure(quic:*quic_t, wrong:boolean)
+  local ctx = (@*context_t)(quic.tls_master_ctx)
+  ctx.use_raw_public_keys = 1
+  -- Ed25519 test identities shared by the upstream reference fixtures.
+  local seed:[32]uint8
+  for i=0,<32 do seed[i]=73 end
+  local signing_key = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,&seed[0],32)
+  check(signing_key ~= nilptr,'load local Ed25519 key')
+  local signer = (@*signer_t)(C.malloc(PROOF_SIGN_SIZE))
+  check(signer ~= nilptr and ptls_openssl_init_sign_certificate(signer,signing_key) == 0,'set Ed25519 signing key')
+  ctx.sign_certificate = signer
+  local next_byte:*uint8
+  local cert = (@*iov_t)(C.malloc(#iov_t))
+  check(cert ~= nilptr,'allocate raw public key')
+  cert.base = (@*uint8)(C.malloc(64))
+  check(cert.base ~= nilptr,'allocate SPKI')
+  next_byte = cert.base
+  local spki_size = i2d_PUBKEY(signing_key,&next_byte)
+  check(spki_size == 44,'encode Ed25519 SPKI')
+  cert.len = (@csize)(spki_size)
+  picoquic_set_tls_certificate_chain(quic,cert,1)
+  EVP_PKEY_free(signing_key)
+  for i=0,<32 do seed[i]=wrong and 43 or 42 end
+  local remote_key = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,&seed[0],32)
+  check(remote_key ~= nilptr,'load peer fixture key')
+  local encoded:[64]uint8
+  next_byte = &encoded[0]
+  check(i2d_PUBKEY(remote_key,&next_byte) == 44,'peer SPKI')
+  local pin_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,&encoded[12],32)
+  local verifier = (@*pin_t)(C.malloc(PROOF_PIN_SIZE))
+  check(pin_key ~= nilptr and verifier ~= nilptr and ptls_openssl_raw_pubkey_init_verify_certificate(verifier,pin_key) == 0,'pin peer SPKI')
+  picoquic_set_verify_certificate_callback(quic,&verifier.super,(@pointer)(disposable_pin))
+  picoquic_set_client_cert_verification_policy(quic,1)
+  EVP_PKEY_free(pin_key)
+  EVP_PKEY_free(remote_key)
+end
+
+local function poll_udp(quic:*quic_t,fd:cint,peer:*storage_t,here:*storage_t,now:uint64)
+  local bytes:[2048]uint8
+  local size=recv(fd,&bytes[0],#bytes,0)
+  if size > 0 then picoquic_incoming_packet(quic,&bytes[0],(@csize)(size),peer,here,0,0,now) end
+end
+
+local function run(host:cstring, port:uint16, wrong:boolean)
+  local peer:storage_t, orig:storage_t, alt:storage_t
+  local peer_size = make_address(host,port,&peer)
+  local fd = open_udp(&peer,peer_size,&orig)
+  local second = open_udp(&peer,peer_size,&alt)
+  defer close(fd); close(second) end
+  local quic=picoquic_create(2,nilptr,nilptr,nilptr,'iroh-bend/compat/1',nilptr,nilptr,nilptr,nilptr,nilptr,
+    picoquic_current_time(),nilptr,nilptr,nilptr,0)
+  check(quic ~= nilptr,'create QUIC context')
+  defer picoquic_free(quic) end
+  configure(quic,wrong)
+  picoquic_set_default_multipath_option(quic,1)
+  local cnx=picoquic_create_client_cnx(quic,&peer,picoquic_current_time(),1,'localhost','iroh-bend/compat/1',(@pointer)(event),nilptr)
+  check(cnx ~= nilptr,'create QUIC connection')
+  picoquic_enable_path_callbacks(cnx,1)
+  local probed:boolean,queued:boolean
+  local sent_a:uint64,sent_b:uint64
+  local until_time=picoquic_current_time()+7000000
+  while picoquic_current_time() < until_time and echoed ~= 3 and not failed do
+    local now=picoquic_current_time()
+    poll_udp(quic,fd,&peer,&orig,now)
+    poll_udp(quic,second,&peer,&alt,now)
+    if ready and not probed then
+      check(cnx.is_multipath_enabled ~= 0,'multipath negotiated')
+      probed = picoquic_probe_new_path(cnx,&peer,&alt,now) == 0
+    end
+    if path ~= 0 and not queued then
+      local first=picoquic_get_next_local_stream_id(cnx,0)
+      local a:uint8=11
+      local b:uint8=22
+      check(first == 0 and picoquic_add_to_stream(cnx,first,&a,1,1) == 0,'queue first stream')
+      local next_id=picoquic_get_next_local_stream_id(cnx,0)
+      check(next_id == 4 and picoquic_add_to_stream(cnx,next_id,&b,1,1) == 0,'queue second stream')
+      check(picoquic_set_stream_path_affinity(cnx,first,0) == 0,'pin first stream')
+      check(picoquic_set_stream_path_affinity(cnx,next_id,path) == 0,'pin second stream')
+      queued=true
+    end
+    local tx:[2048]uint8
+    local size:csize
+    local to:storage_t,from:storage_t
+    local idx:cint
+    local status=picoquic_prepare_packet(cnx,now,&tx[0],#tx,&size,&to,&from,&idx)
+    if status ~= 0 then break end
+    if size > 0 then
+      local alternate=address_port(&from) == address_port(&alt)
+      local output=alternate and second or fd
+      check(send(output,&tx[0],size,0)==(@isize)(size),'write QUIC packet')
+      if alternate then sent_b=sent_b+1 else sent_a=sent_a+1 end
+    else
+      usleep(1000)
+    end
+  end
+  log('echo_mask=%u paths=%d local=%llu remote=%llu sent=%llu/%llu ports=%u/%u\n',
+    echoed,cnx.nb_paths,(@culonglong)(picoquic_get_local_error(cnx)),(@culonglong)(picoquic_get_remote_error(cnx)),
+    (@culonglong)(sent_a),(@culonglong)(sent_b),ntohs(address_port(&orig)),ntohs(address_port(&alt)))
+  if wrong then
+    check(not ready and picoquic_get_local_error(cnx) == PROOF_PIN_MISMATCH,'reject mismatched Ed25519 peer key')
+    puts('PASS Picoquic rejected the wrong Iroh endpoint pin')
+    return
+  end
+  check(echoed == 3 and cnx.nb_paths >= 2,'receive both echoes on one multipath connection')
+  puts('PASS pinned Iroh and exchanged two streams across simultaneous paths')
+end
+
+local function main(argc:cint,argv:*cstring):cint <cexport,codename 'main'>
+  check(argc == 3 or argc == 4,'expected peer host, port, and optional wrong-key flag')
+  local args = (@*[0]cstring)(argv)
+  local port = C.atoi(args[2])
+  check(port > 0 and port <= 65535,'valid peer port')
+  run(args[1],(@uint16)(port),argc == 4)
+  return 0
+end
