@@ -40,16 +40,21 @@ def scenarios() -> List<&2,Check>:
    Check{Read{},Byte{101}},Check{Read{},Fin{}},Check{Drop{},Complete{}},
    Check{Open{0},Handle{0}},Check{Write{2,0},Complete{}},Check{Flush{},Complete{}},
    Check{ReadDatagram{},Byte{12}},Check{Stop{large},Complete{}},Check{Stop{zero},Error{32,""}},
-   Check{Read{},Error{32,""}},Check{Write{102,1},Complete{}},Check{Flush{},Complete{}},
+   Check{Read{},Error{32,""}},Check{Write{102,1},Complete{}},Check{Flush{},Complete{}},Check{Drop{},Complete{}},
    Check{Accept{0},Handle{0}},Check{Read{},Byte{3}},Check{SendDatagram{13},Complete{}},
    Check{PeerReset{},Code{zero}},Check{Read{},Error{104,""}},Check{PeerStop{},NoCode{}},
-   Check{Write{103,1},Complete{}},Check{Flush{},Complete{}},
+   Check{Write{103,1},Complete{}},Check{Flush{},Complete{}},Check{Drop{},Complete{}},
    Check{Accept{0},Handle{0}},Check{Read{},Byte{4}},Check{Write{44,0},Complete{}},Check{Flush{},Complete{}},
    Check{PeerStop{},Code{Wire.Var{1,17}}},Check{Write{7,0},Error{32,""}},
    Check{Read{},Byte{104}},Check{Read{},Fin{}},Check{Drop{},Complete{}},
    Check{Open{1},Handle{0}},Check{Stop{zero},Error{32,""}},Check{Reset{Wire.Var{0,63}},Complete{}},
    Check{Drop{},Complete{}},Check{Accept{1},Handle{0}},Check{Reset{zero},Error{32,""}},
    Check{PeerReset{},Code{Wire.Var{0,64}}},Check{Drop{},Complete{}},
+   Check{Open{0},Handle{0}},Check{Write{5,0},Complete{}},Check{Flush{},Complete{}},
+   Check{PeerReset{},Code{max}},Check{PeerStop{},Code{Wire.Var{1,17}}},
+   Check{Read{},Error{104,""}},Check{Write{7,0},Error{32,""}},Check{Drop{},Complete{}},
+   Check{Accept{0},Handle{0}},Check{Read{},Byte{6}},Check{Reset{zero},Complete{}},
+   Check{Stop{large},Complete{}},Check{Drop{},Complete{}},
    Check{SendDatagram{250},Complete{}},Check{ReadDatagram{},Byte{251}}]
 
 def Reply(-C: Type) -> Type:
