@@ -49,7 +49,7 @@ check_family() {
     fi
     stop_peer
     start "$mode"
-    if ! timeout 10s "$client" "$host" "${address##*:}"; then
+    if ! timeout 10s "$client" "$host" "${address##*:}" iroh-parameters; then
         cat "$work/errors" >&2
         exit 1
     fi

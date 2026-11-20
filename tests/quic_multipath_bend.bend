@@ -1,5 +1,6 @@
 import Base
 import ../src/quic_multipath.bend as Quic
+import ../src/quic_nat.bend as NatWire
 
 def binary_alpn() -> List<&2,U32>:
   Con{0,Con{255,Con{10,List.replicate(U32,252n,128)}}}
@@ -289,12 +290,12 @@ def run_paths(candidate: Quic.MultipathConnection & U32) -> IO(Unit):
     sent : Quic.MultipathConnection & U32 <- send(opened,0,11)
     send_second(sent,path)
 
-def fixture_key(wrong: U32) -> List<&2,U32>:
-  match wrong:
-    case 0:
-      [25,127,107,35,225,108,133,50,198,171,200,56,250,205,94,167,137,190,12,118,178,146,3,52,3,155,250,139,61,54,141,97]
-    case _:
+def fixture_key(mode: U32) -> List<&2,U32>:
+  match mode:
+    case 1:
       List.replicate(U32,32n,0)
+    case _:
+      [25,127,107,35,225,108,133,50,198,171,200,56,250,205,94,167,137,190,12,118,178,146,3,52,3,155,250,139,61,54,141,97]
 
 def run_probe(conn: Quic.MultipathConnection, host: String, port: U32) -> IO(Unit):
   do IO<Unit>:
@@ -345,8 +346,34 @@ def parse_multiple(host: String, port: Maybe<&2,U32>) -> IO(Unit):
     case None{}:
       IO.die(Unit,2,"expected a numeric port")
 
-def dial_result(result: Quic.ConnectResult(), wrong: U32, host: String, port: U32) -> IO(Unit):
-  match result wrong:
+def validate_nat_limit(conn: Quic.MultipathConnection, limit: NatWire.ParameterResult)
+    -> IO(Quic.MultipathConnection):
+  match limit:
+    case NatWire.ParameterLimit{32}:
+      do IO<Quic.MultipathConnection>:
+        IO.print("PASS Bend read Iroh's authenticated NAT traversal limit")
+        return conn
+    case _:
+      reject(Quic.MultipathConnection,conn,1,"expected Iroh's default NAT traversal limit of 32")
+
+def validate_peer_parameters(pair: Quic.MultipathConnection & List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  (conn,parameters) = pair
+  validate_nat_limit(conn,NatWire.read_parameters(parameters))
+
+def require_nat_limit(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <-
+      Quic.peer_multipath_parameters(conn)
+    pair : Quic.MultipathConnection & List<&2,U32> <- ok(List<&2,U32>,result)
+    validate_peer_parameters(pair)
+
+def dial_result(result: Quic.ConnectResult(), mode: U32, host: String, port: U32) -> IO(Unit):
+  match result mode:
+    case Done{conn} 2:
+      do IO<Unit>:
+        ready : Quic.MultipathConnection <- require_nat_limit(conn)
+        run_probe(ready,host,port)
     case Done{conn} 0:
       run_probe(conn,host,port)
     case Fail{(13,_)} 1:
@@ -356,16 +383,16 @@ def dial_result(result: Quic.ConnectResult(), wrong: U32, host: String, port: U3
     case Done{conn} _:
       reject(Unit,conn,1,"wrong Iroh endpoint pin was accepted")
 
-def dial(+host: String, +port: U32, +wrong: U32) -> IO(Unit):
+def dial(+host: String, +port: U32, +mode: U32) -> IO(Unit):
   do IO<Unit>:
     result : Quic.ConnectResult() <-
-      Quic.connect_multipath(host,port,List.replicate(U32,32n,73),fixture_key(wrong),"iroh-bend/compat/1",3000n)
-    dial_result(result,wrong,host,port)
+      Quic.connect_multipath(host,port,List.replicate(U32,32n,73),fixture_key(mode),"iroh-bend/compat/1",3000n)
+    dial_result(result,mode,host,port)
 
-def parse(host: String, port: Maybe<&2,U32>, wrong: U32) -> IO(Unit):
+def parse(host: String, port: Maybe<&2,U32>, mode: U32) -> IO(Unit):
   match port:
     case Some{number}:
-      dial(host,number,wrong)
+      dial(host,number,mode)
     case None{}:
       IO.die(Unit,2,"expected a numeric port")
 
@@ -373,6 +400,8 @@ def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,host,port,"multiple"]:
       parse_multiple(host,U32.read(port))
+    case [_,host,port,"iroh-parameters"]:
+      parse(host,U32.read(port),2)
     case Con{_,Con{host,Con{port,Nil{}}}}:
       parse(host,U32.read(port),0)
     case Con{_,Con{host,Con{port,Con{_,Nil{}}}}}:

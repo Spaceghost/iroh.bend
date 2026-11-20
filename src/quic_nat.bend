@@ -242,3 +242,71 @@ def encode_parameter(+limit: U32, valid: Bool) -> Maybe<&2,List<&2,U32>>:
 
 def encode_limit(+limit: U32) -> Maybe<&2,List<&2,U32>>:
   encode_parameter(limit,U32.is_gt(limit,0) && U32.is_le(limit,255))
+
+type ParameterResult is Data:
+  ParameterAbsent{}
+  ParameterLimit{limit: U32}
+  ParameterMalformed{}
+
+type ParameterTail is Data:
+  ParameterRest{rest: List<&2,U32>}
+  ParameterTruncated{}
+
+def skip_parameter(length: Nat, bytes: List<&2,U32>) -> ParameterTail:
+  match length bytes:
+    case 0n rest:
+      ParameterRest{rest}
+    case 1n+left Con{_,tail}:
+      skip_parameter(left,tail)
+    case _ _:
+      ParameterTruncated{}
+
+def known_parameter(+value: U32, rest: List<&2,U32>, previous: ParameterResult, valid: Bool,
+    next: List<&2,U32> -> ParameterResult -> ParameterResult) -> ParameterResult:
+  match previous valid:
+    case ParameterAbsent{} True{}:
+      next(rest,ParameterLimit{value})
+    case _ _:
+      ParameterMalformed{}
+
+def unknown_parameter(tail: ParameterTail, previous: ParameterResult,
+    next: List<&2,U32> -> ParameterResult -> ParameterResult) -> ParameterResult:
+  match tail:
+    case ParameterRest{rest}:
+      next(rest,previous)
+    case ParameterTruncated{}:
+      ParameterMalformed{}
+
+def parameter_body(header: IntegerInput, known: Bool, previous: ParameterResult,
+    next: List<&2,U32> -> ParameterResult -> ParameterResult) -> ParameterResult:
+  match header known:
+    case Integer{Var{0,1},_,Con{+byte,rest}} True{}:
+      known_parameter(byte,rest,previous,U32.is_gt(byte,0) && U32.is_le(byte,255),next)
+    case Integer{Var{0,size},_,rest} False{}:
+      unknown_parameter(skip_parameter(U32.to_nat(size),rest),previous,next)
+    case _ _:
+      ParameterMalformed{}
+
+def parameter_header(header: IntegerInput, previous: ParameterResult,
+    next: List<&2,U32> -> ParameterResult -> ParameterResult) -> ParameterResult:
+  match header:
+    case Integer{Var{15743,2433876993},_,rest}:
+      parameter_body(split_integer(rest),True{},previous,next)
+    case Integer{_,_,rest}:
+      parameter_body(split_integer(rest),False{},previous,next)
+    case _:
+      ParameterMalformed{}
+
+def scan_parameters(fuel: Nat, parameters: List<&2,U32>, result: ParameterResult) -> ParameterResult:
+  match fuel parameters:
+    case _ Nil{}:
+      result
+    case 1n+left payload:
+      parameter_header(split_integer(payload),result,rest => seen => scan_parameters(left,rest,seen))
+    case _ _:
+      ParameterMalformed{}
+
+# Walk an entire QUIC Transport Parameters extension to find the n0 limit.
+# Duplicate n0 parameters are malformed even when their values agree.
+def read_parameters(+parameters: List<&2,U32>) -> ParameterResult:
+  scan_parameters(List.length(&2,U32,parameters),parameters,ParameterAbsent{})

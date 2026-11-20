@@ -141,6 +141,46 @@ def parameter_vectors() -> Bool:
   absent(List<&2,U32>,NatWire.encode_limit(0)) &&
   absent(List<&2,U32>,NatWire.encode_limit(256))
 
+def parameter_value(result: NatWire.ParameterResult, expected: U32) -> Bool:
+  match result:
+    case NatWire.ParameterLimit{limit}:
+      U32.is_eq(limit,expected)
+    case _:
+      False{}
+
+def is_malformed(result: NatWire.ParameterResult) -> Bool:
+  match result:
+    case NatWire.ParameterMalformed{}:
+      True{}
+    case _:
+      False{}
+
+def malformed_parameters(parameters: List<&2,U32>) -> Bool:
+  is_malformed(NatWire.read_parameters(parameters))
+
+def absent_parameter(result: NatWire.ParameterResult) -> Bool:
+  match result:
+    case NatWire.ParameterAbsent{}:
+      True{}
+    case _:
+      False{}
+
+def full_parameters() -> Bool:
+  +tag = {[192,0,61,127,145,18,4,1] : List<&2,U32>}
+  +known = List.append(&2,U32,tag,[1,255])
+  +others = {[15,3,72,73,74,64,200,0] : List<&2,U32>}
+  parameter_value(NatWire.read_parameters(List.append(&2,U32,others,known)),255) &&
+  parameter_value(NatWire.read_parameters(List.append(&2,U32,known,others)),255) &&
+  absent_parameter(NatWire.read_parameters(others)) &&
+  absent_parameter(NatWire.read_parameters([])) &&
+  malformed_parameters(List.append(&2,U32,known,known)) &&
+  malformed_parameters(List.append(&2,U32,tag,[1,0])) &&
+  malformed_parameters(List.append(&2,U32,tag,[2,1,1])) &&
+  malformed_parameters(List.append(&2,U32,tag,[1])) &&
+  malformed_parameters([159,1]) &&
+  malformed_parameters([15,3,72,73]) &&
+  malformed_parameters([15,192,0,0,1,0,0,0,0])
+
 type Exchange is Data:
   Incoming{frame: NatWire.Frame, expected: State.PeerEvent}
 
@@ -337,6 +377,7 @@ def main() -> IO(Unit):
     require("QUIC NAT traversal sequence integer boundaries",sequence_vectors())
     require("QUIC NAT traversal malformed and unknown frames",malformed_frames())
     require("QUIC NAT traversal transport parameter",parameter_vectors())
+    require("QUIC NAT traversal complete transport parameter blocks",full_parameters())
     require("QUIC NAT traversal client candidate updates and role checks",client_addresses())
     require("QUIC NAT traversal server rounds and duplicate suppression",server_reach_out())
     require("QUIC NAT traversal IPv4 socket address mapping",ipv4_probes())

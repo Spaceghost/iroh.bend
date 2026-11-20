@@ -35,6 +35,11 @@ def negotiated_multipath_alpn(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_multipath.c"
 
+# Return the TLS-authenticated transport parameters from the peer after a dial.
+def peer_multipath_parameters(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_multipath.c"
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)
