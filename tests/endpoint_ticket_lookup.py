@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
 from urllib.request import Request, urlopen
 
+from endpoint_candidate_lookup import check_supplied_route
 from endpoint_lookup_events import check_events
 from endpoint_lookup_race import check_race, check_stale_record, dns_proxy
 from endpoint_ticket_dial import read_ticket
@@ -51,6 +52,9 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if response.status != 204:
                 raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
 
+        if source in ("supplied-dns", "supplied-pkarr"):
+            check_supplied_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("supplied-"))
+            return
         if source == "stale-record":
             check_stale_record(client, ticket, peer, pkarr, dns_port, family)
             print(f"PASS {family} failed resolved DNS address followed by authenticated Pkarr address", flush=True)
@@ -84,12 +88,13 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if peer.returncode:
                 raise RuntimeError(f"Iroh rejected the {mode} ticket exchange: {transcript!r}")
         if invalid:
-            expected_requests = [] if mode == "direct" else [f"/pkarr/{label}"]
-            if invalid.requests != expected_requests:
+            expected_requests = [f"/pkarr/{label}"]
+            # A fast supplied path may win before the HTTP request reaches the server.
+            if invalid.requests != expected_requests and (mode != "direct" or invalid.requests):
                 raise AssertionError(f"Unexpected lookup requests: {invalid.requests}")
     detail = expected_error.decode() if expected_error else "authenticated exchange"
     if invalid and mode == "direct":
-        detail = "authenticated exchange without lookup"
+        detail = "supplied route usable during lookup"
     elif invalid and source == "pkarr-dns":
         detail = "authenticated DNS route after signature rejection"
     print(f"PASS {family} {mode} ticket via {source} ({detail})", flush=True)
@@ -105,6 +110,8 @@ def main(client, fixture, pkarr, dns_port):
                     check(client, fixture, family, mode, source, pkarr, dns_port)
                 check(client, fixture, family, "wrong-id", source, pkarr, dns_port,
                       expected_error=b"peer endpoint key mismatch")
+            for kind in ("supplied-dns", "supplied-pkarr"):
+                check(client, fixture, family, "direct", kind, pkarr, dns_port)
             check(client, fixture, family, "direct", "pkarr", pkarr, dns_port, invalid)
             check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,
                   expected_error=b"invalid signed Pkarr endpoint packet")

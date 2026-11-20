@@ -634,10 +634,12 @@ def try_lookups(sources: List<&2,AddressLookup>, outcome: ConnectResult(), +iden
 
 def connect_with_lookup(plan: Routes, +identity: Identity, +timeouts: Timeouts, sources: List<&2,AddressLookup>)
     -> IO(ConnectResult()):
+  PeerKeys{_,key,_} = identity
   before_connect(Connection(),identity,u =>
     do IO<ConnectResult()>:
+      stream : LookupStream <- resolve_addresses(sources,key)
       tried : ConnectResult() <- dial_validated_plan(~Quic.DatagramConnection,~direct_quic,~direct_quic,plan,identity,timeouts)
-      try_lookups(sources,tried,identity,timeouts))
+      use_lookup_connection(tried,stream,next => error => dial_lookup_stream(next,error,identity,timeouts)))
 
 def connect_ticket_with_lookup(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts,
     sources: List<&2,AddressLookup>) -> IO(ConnectResult()):

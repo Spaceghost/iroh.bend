@@ -709,9 +709,10 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 
 Full drop-in compatibility remains open. Known differences include the following.
 
-- Ticket dialing starts lookup after its supplied routes fail. Iroh can start
-  lookup while it still has candidate addresses and no selected path. Timing
-  parity for that case remains open. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
+- Ticket dialing starts DNS and Pkarr lookup while trying supplied candidates.
+  A gated IPv4/IPv6 test holds the supplied handshake until the resolver starts
+  and finishes the exchange while the resolver reply is withheld. Discovered
+  addresses still wait behind outstanding supplied handshake attempts. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
 - A listener can advertise its initial observed UDP address. Refreshing that
   advertisement after a live listener's NAT mapping changes is parked. The
   outbound routed connection has a separate passing address-refresh test below.
