@@ -56,6 +56,12 @@ def take_multipath_nat_response(conn: MultipathConnection, ip: List<&2,U32>, por
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
+# Send one ADD_ADDRESS or REMOVE_ADDRESS at a time. Step QUIC and call
+# again with the same frame until the peer acknowledges it.
+def send_multipath_nat_address(conn: MultipathConnection, frame: List<&2,U32>)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)

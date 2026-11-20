@@ -121,6 +121,9 @@ local picoquic_state_client_init:cint <cimport,nodecl>
 local picoquic_state_client_init_sent:cint <cimport,nodecl>
 local picoquic_tp_max_datagram_frame_size:uint64 <cimport,nodecl>
 local picoquic_callback_datagram:cint <cimport,nodecl>
+local picoquic_callback_datagram_acked:cint <cimport,nodecl>
+local picoquic_callback_datagram_lost:cint <cimport,nodecl>
+local picoquic_callback_datagram_spurious:cint <cimport,nodecl>
 local PICOQUIC_ERROR_DATAGRAM_TOO_LONG:cint <cimport,nodecl>
 local function picoquic_set_verify_certificate_callback(quic:*quic_t, verify:*verify_t, dispose:pointer) <cimport,nodecl> end
 local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
@@ -154,6 +157,7 @@ local function picoquic_finalize_and_protect_packet(cnx:*cnx_t, packet:*probe_pa
     path:*path_t, clock:uint64, ack:cint) <cimport,nodecl> end
 local picoquic_packet_1rtt_protected: cint <cimport,nodecl>
 local picoquic_frame_type_path_challenge: uint8 <cimport,nodecl>
+local picoquic_frame_type_datagram_l: uint8 <cimport,nodecl>
 local picoquic_frame_type_path_response: uint8 <cimport,nodecl>
 local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
 local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
@@ -248,6 +252,7 @@ local ENOTSUP: uint32 <cimport,nodecl>
 local ECONNRESET: uint32 <cimport,nodecl>
 local EPIPE: uint32 <cimport,nodecl>
 local ENOBUFS: uint32 <cimport,nodecl>
+local EBUSY: uint32 <cimport,nodecl>
 local EMSGSIZE: uint32 <cimport,nodecl>
 local PTLS_ALERT_BAD_CERTIFICATE: cint <cimport,nodecl>
 local PTLS_ALERT_UNSUPPORTED_CERTIFICATE: cint <cimport,nodecl>
@@ -271,7 +276,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -321,6 +326,7 @@ local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
+local iroh_mp_send_multipath_nat_address: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
@@ -403,9 +409,10 @@ local PeerParameters = @record{bytes:*uint8, size:csize}
 local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8, nat_enabled:boolean}
 local NatFrame = @record{size:csize, bytes:[30]uint8}
 local NatProbe = @record{peer:storage_t, challenge:[CHALLENGE_SIZE]uint8, expires:uint64, answered:boolean}
+local NatAdvertisement = @record{frame:NatFrame, tracked_payload:*uint8, tracked_at:uint64, delivered:boolean}
 local NatInbox = @record{
   frames:[NAT_INBOX_CAPACITY]NatFrame, first:csize, count:csize,
-  probes:[NAT_PROBE_CAPACITY]NatProbe
+  probes:[NAT_PROBE_CAPACITY]NatProbe, advertising:NatAdvertisement
 }
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
@@ -1155,6 +1162,17 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
     conn.ready = true
   elseif kind == picoquic_callback_datagram then
     receive_datagram(conn,bytes,size)
+  elseif conn.nat_inbox ~= nilptr and bytes ~= nilptr and
+      (kind == picoquic_callback_datagram_acked or kind == picoquic_callback_datagram_lost or
+       kind == picoquic_callback_datagram_spurious) then
+    local advertising = &conn.nat_inbox.advertising
+    -- This pointer belongs to the stored packet, so application datagrams
+    -- cannot match on identical payload bytes or overlapping timestamps.
+    if advertising.tracked_payload == bytes and advertising.tracked_at == id and
+        advertising.frame.size == size + 2 then
+      advertising.tracked_payload = nilptr
+      advertising.delivered = kind ~= picoquic_callback_datagram_lost
+    end
   elseif kind == picoquic_callback_path_available or kind == picoquic_callback_path_suspended or
       kind == picoquic_callback_path_deleted then
     update_path(conn,id,kind)
@@ -1984,13 +2002,14 @@ local function nat_probe(inbox:*NatInbox, peer:*storage_t, raw:*uint8, now:uint6
   return nilptr,available
 end
 
-local function send_nat_probe(conn:*Connection, peer:*storage_t, frame:*uint8, now:uint64): uint32
+local function send_nat_packet(conn:*Connection, peer:*storage_t, frame:*uint8, size:csize, now:uint64,
+    tracking:**uint8): uint32
   local cnx = conn.cnx
   local path = ((@*[0]*path_t)(cnx.path))[0]
   local length = picoquic_predict_packet_header_length(cnx,picoquic_packet_1rtt_protected,&path.pkt_ctx)
   local checksum = picoquic_get_checksum_length(cnx,picoquic_epoch_1rtt)
   local output: [IO_CAPACITY]uint8
-  if length + CHALLENGE_SIZE + checksum > #output then return EMSGSIZE end
+  if length + size + checksum > #output then return EMSGSIZE end
   local packet = picoquic_create_packet(conn.quic)
   if packet == nilptr then return ENOMEM end
   packet.ptype = picoquic_packet_1rtt_protected
@@ -2000,19 +2019,28 @@ local function send_nat_probe(conn:*Connection, peer:*storage_t, frame:*uint8, n
   packet.send_time = now
   packet.is_ack_eliciting = 1
   local payload = (@*[0]uint8)(&packet.bytes[0])
-  C.memcpy(&payload[length],frame,CHALLENGE_SIZE)
+  C.memcpy(&payload[length],frame,size)
   local sent: csize
   -- Consume the active path's packet number and apply its 1-RTT protection.
-  -- No tuple is registered and the short probe does not validate a QUIC path.
-  picoquic_finalize_and_protect_packet(cnx,packet,0,length + CHALLENGE_SIZE,length,checksum,
+  picoquic_finalize_and_protect_packet(cnx,packet,0,length + size,length,checksum,
     &sent,&output[0],#output,path,now,1)
   if sent == 0 then
     picoquic_recycle_packet(conn.quic,packet)
     return EIO
   end
+  if tracking ~= nilptr then
+    -- The encrypted payload already contains the actual extension frame.
+    -- Describe its plaintext entry as a length-bearing datagram only in
+    -- Picoquic's retransmission queue. Its ACK/loss callbacks let Bend retry
+    -- the extension without exposing an unknown tag to Picoquic's ACK parser.
+    payload[length] = picoquic_frame_type_datagram_l
+    payload[length + 1] = (@uint8)(size - 2)
+  end
   local written = sendto(conn.listener.fd,&output[0],sent,0,peer,address_size(peer))
   if written < 0 then return (@uint32)(errno) end
-  return written == (@isize)(sent) and 0 or EIO
+  if written ~= (@isize)(sent) then return EIO end
+  if tracking ~= nilptr then $tracking = &payload[length + 2] end
+  return 0
 end
 
 local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): Term
@@ -2034,7 +2062,8 @@ local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): T
   end
   if found ~= nilptr then return io_done(e,1) end
   if available == nilptr then return io_fail(e,ENOBUFS,'too many outstanding NAT challenges') end
-  local error = send_nat_probe(conn,&peer,&raw[0],now)
+  -- Short probes use the current CID but never register or validate a tuple.
+  local error = send_nat_packet(conn,&peer,&raw[0],CHALLENGE_SIZE,now,nilptr)
   if error == EAGAIN or error == EINTR then return io_done(e,0) end
   if error ~= 0 then return io_fail(e,error,'could not send NAT traversal challenge') end
   available.peer = peer
@@ -2050,6 +2079,59 @@ end
 
 local function take_nat_response_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],nat_challenge_effect(e,args,false))
+end
+
+local function valid_nat_advertisement(bytes:*uint8, size:csize): boolean
+  local tag: uint64
+  if picoquic_varint_decode(bytes,size,&tag) ~= 4 or size < 5 then return false end
+  local frame = (@*[0]uint8)(bytes)
+  local seq: uint64
+  local width = picoquic_varint_decode(&frame[4],size - 4,&seq)
+  if width == 0 then return false end
+  local body = size - 4 - width
+  return (tag == 0x3d7f90 and body == 6) or (tag == 0x3d7f91 and body == 18) or (tag == 0x3d7f94 and body == 0)
+end
+
+local function advertise_nat(e:Env, conn:*Connection, value:Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready or conn.nat_inbox == nilptr then return io_fail(e,ENOTSUP,'NAT traversal was not negotiated') end
+  local raw: NatFrame
+  local size = bytes_from_list(e,value,&raw.bytes[0],#raw.bytes)
+  if size < 0 or not valid_nat_advertisement(&raw.bytes[0],(@csize)(size)) then
+    return io_fail(e,EINVAL,'invalid NAT address advertisement or withdrawal')
+  end
+  raw.size = (@csize)(size)
+  local state = &conn.nat_inbox.advertising
+  if state.frame.size == 0 then
+    state.frame = raw
+  elseif state.frame.size ~= raw.size or C.memcmp(&state.frame.bytes[0],&raw.bytes[0],raw.size) ~= 0 then
+    return io_fail(e,EBUSY,'another NAT address frame is awaiting acknowledgement')
+  end
+  if state.delivered then
+    state.delivered = false
+    state.frame.size = 0
+    return io_done(e,1)
+  end
+  if state.tracked_payload ~= nilptr then return io_done(e,0) end
+  local peer: storage_t
+  local path = ((@*[0]*path_t)(conn.cnx.path))[0]
+  if picoquic_get_path_addr(conn.cnx,path.unique_path_id,2,&peer) ~= 0 then
+    state.frame.size = 0
+    return io_fail(e,EIO,'could not resolve the QUIC peer address')
+  end
+  local now = picoquic_current_time()
+  local error = send_nat_packet(conn,&peer,&raw.bytes[0],raw.size,now,&state.tracked_payload)
+  if error == 0 then
+    state.tracked_at = now
+    return io_done(e,0)
+  end
+  if error == EAGAIN or error == EINTR then return io_done(e,0) end
+  state.frame.size = 0
+  return io_fail(e,error,'could not send NAT address advertisement')
+end
+
+local function advertise_nat_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],advertise_nat(e,find_connection(e,args[0]),args[1]))
 end
 
 local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2515,6 +2597,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_read_multipath_nat_frame ~= 0xffffffff then io_eff(iroh_mp_read_multipath_nat_frame,read_nat_frame_run) end
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
+  if iroh_mp_send_multipath_nat_address ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_address,advertise_nat_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end

@@ -120,3 +120,18 @@ def poll(conn: Quic.MultipathConnection, probe: Probe) -> IO(Quic.MultipathConne
   do IO<Quic.MultipathConnection & Progress>:
     now : U32 <- Quic.multipath_micros()
     poll_at(conn,probe,now)
+
+def send_encoded_address(conn: Quic.MultipathConnection, encoded: Maybe<&2,List<&2,U32>>)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  match encoded:
+    case Some{bytes}:
+      Quic.send_multipath_nat_address(conn,bytes)
+    case None{}:
+      IO.pure(Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>,
+        (conn,Fail{(22,"invalid NAT address frame")}))
+
+# Submit one candidate update from quic_nat_send.bend. Drive the connection
+# between polls and keep the same frame until it is acknowledged.
+def send_address(conn: Quic.MultipathConnection, frame: Wire.Frame)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  send_encoded_address(conn,Wire.encode(frame))

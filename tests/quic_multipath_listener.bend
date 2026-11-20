@@ -2,6 +2,7 @@ import Base
 import ../src/quic_multipath.bend as Quic
 import ../src/quic_nat.bend as NatWire
 import ../src/quic_nat_state.bend as NatState
+import ../src/quic_nat_send.bend as NatSend
 import ../src/quic_multipath_nat.bend as Probes
 import ./quic_multipath_bend.bend as Fixture
 
@@ -256,7 +257,53 @@ def wait_nat_frame(fuel: Nat, conn: Quic.MultipathConnection, +mode: U32) -> IO(
         pair : Quic.MultipathConnection & Maybe<&1,List<&2,U32>> <- Fixture.ok(Maybe<&1,List<&2,U32>>,result)
         await_frame(pair,mode,next => wait_nat_frame(left,next,mode))
 
-def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mode: U32) -> IO(Unit):
+def address_progress(pair: Quic.MultipathConnection & U32,
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,1):
+      IO.pure(Quic.MultipathConnection,conn)
+    case (conn,_):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def send_candidate_frame(fuel: Nat, conn: Quic.MultipathConnection, +frame: NatWire.Frame)
+    -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"Iroh did not acknowledge the NAT address frame")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Probes.send_address(conn,frame)
+        pair : Quic.MultipathConnection & U32 <- Fixture.ok(U32,result)
+        address_progress(pair,next =>
+          do IO<Quic.MultipathConnection>:
+            stepped : Quic.MultipathConnection <- Fixture.step(next)
+            send_candidate_frame(left,stepped,frame))
+
+def confirmed_address_frame(conn: Quic.MultipathConnection, result: NatSend.Change,
+    next: Quic.MultipathConnection -> NatSend.LocalState -> IO(Quic.MultipathConnection))
+    -> IO(Quic.MultipathConnection):
+  match result:
+    case NatSend.Changed{state,NatSend.Send{frame}}:
+      do IO<Quic.MultipathConnection>:
+        sent : Quic.MultipathConnection <- send_candidate_frame(6000n,conn,frame)
+        next(sent,state)
+    case _:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"expected a NAT address frame")
+
+def report_withdrawn(conn: Quic.MultipathConnection, _: NatSend.LocalState) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    IO.print("PASS Iroh acknowledged the authenticated ADD_ADDRESS and REMOVE_ADDRESS frames")
+    return conn
+
+def advertise_candidate(conn: Quic.MultipathConnection, +candidate: NatState.Candidate)
+    -> IO(Quic.MultipathConnection):
+  state = NatSend.start(NatState.Server{True{}},True{},Some{64},Some{32})
+  confirmed_address_frame(conn,NatSend.add(state,candidate),first => next =>
+    confirmed_address_frame(first,NatSend.remove(next,candidate),report_withdrawn))
+
+def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   match peers mode:
     case active 0:
       exchange_both(active)
@@ -265,23 +312,24 @@ def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mod
     case (left,right) test_port:
       do IO<Unit>:
         first : Quic.MultipathConnection <- wait_nat_frame(6000n,left,test_port)
-        exchange_both((first,right))
+        advertised : Quic.MultipathConnection <- advertise_candidate(first,local_address)
+        exchange_both((advertised,right))
 
 def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection,
-    +mode: U32) -> IO(Unit):
+    +mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   (listener,conn) = second
   do IO<Unit>:
     Quic.close_multipath_listener(listener)
     preferred : Quic.MultipathConnection <- check_selection(first,Fixture.binary_alpn(),mode)
     fallback : Quic.MultipathConnection <- check_selection(conn,Fixture.text_alpn(),mode)
     peers : Quic.MultipathConnection & Quic.MultipathConnection <- check_parameters(preferred,fallback)
-    exchange_nat(peers,mode)
+    exchange_nat(peers,mode,local_address)
 
-def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
+def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   (listener,conn) = first
   do IO<Unit>:
     second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,listener)
-    serve_two(second,conn,mode)
+    serve_two(second,conn,mode,local_address)
 
 def updated(result: Quic.MultipathListener & Result<&1,&1,U32 & String,Unit>, expected: U32)
     -> IO(Quic.MultipathListener):
@@ -323,14 +371,14 @@ def reconfigure(first: Quic.MultipathListener & Quic.MultipathConnection) -> IO(
     second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,unchanged)
     pause_and_exchange(second,conn)
 
-def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
+def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   match mode:
     case 0:
-      serve_two_connections(first,0)
+      serve_two_connections(first,0,local_address)
     case 3:
-      serve_two_connections(first,3)
+      serve_two_connections(first,3,local_address)
     case 6:
-      serve_two_connections(first,6)
+      serve_two_connections(first,6,local_address)
     case 4:
       reconfigure(first)
     case 1:
@@ -338,55 +386,62 @@ def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -
     case 5:
       serve_affinity(first)
     case port:
-      serve_two_connections(first,port)
+      serve_two_connections(first,port,local_address)
 
-def announce(bound: Quic.MultipathListener & U32, mode: U32) -> IO(Unit):
-  (listener,local_port) = bound
+def loopback(host: String, port: U32) -> NatState.Candidate:
+  match host:
+    case "127.0.0.1":
+      NatState.Socket{NatWire.IPv4{[127,0,0,1]},port}
+    case _:
+      NatState.Socket{NatWire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]},port}
+
+def announce(bound: Quic.MultipathListener & U32, mode: U32, host: String) -> IO(Unit):
+  (listener,+local_port) = bound
   do IO<Unit>:
     IO.print(U32.show(local_port))
     first : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,listener)
-    serve(first,mode)
+    serve(first,mode,loopback(host,local_port))
 
 def fixture_peer() -> List<&2,U32>:
   [119,44,138,68,43,125,176,110,22,108,251,193,204,188,188,222,
    111,62,186,118,164,233,142,243,255,197,25,80,34,55,214,239]
 
-def listen_text(host: String, mode: U32) -> IO(Unit):
+def listen_text(+host: String, mode: U32) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
       Quic.bind_multipath(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1"))
-    announce(bound,mode)
+    announce(bound,mode,host)
 
-def listen_nat_offer(host: String, mode: U32) -> IO(Unit):
+def listen_nat_offer(+host: String, mode: U32) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
       Quic.bind_multipath_with_nat_limit(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1",64))
-    announce(bound,mode)
+    announce(bound,mode,host)
 
-def listen_binary(host: String) -> IO(Unit):
+def listen_binary(+host: String) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
       Quic.bind_multipath_bytes(host,0,List.replicate(U32,32n,42),fixture_peer(),Fixture.binary_alpn()))
-    announce(bound,0)
+    announce(bound,0,host)
 
-def listen_multiple(host: String) -> IO(Unit):
+def listen_multiple(+host: String) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
       Quic.bind_multipath_alpns(host,0,List.replicate(U32,32n,42),fixture_peer(),
         [Fixture.binary_alpn(),Fixture.text_alpn()]))
-    announce(bound,3)
+    announce(bound,3,host)
 
-def enable_live(bound: Quic.MultipathListener & U32) -> IO(Unit):
+def enable_live(bound: Quic.MultipathListener & U32, host: String) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     enabled : Quic.MultipathListener <- set_alpns(listener,[Fixture.text_alpn()],0)
-    announce((enabled,port),4)
+    announce((enabled,port),4,host)
 
-def listen_live(host: String) -> IO(Unit):
+def listen_live(+host: String) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
       Quic.bind_multipath_alpns(host,0,List.replicate(U32,32n,42),fixture_peer(),[]))
-    enable_live(bound)
+    enable_live(bound,host)
 
 def listen_mode(host: String, number: U32, retry_fixture: Bool) -> IO(Unit):
   match retry_fixture:
