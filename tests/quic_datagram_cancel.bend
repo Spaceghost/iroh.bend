@@ -1,6 +1,9 @@
 import Base
 import ./quic_stream_cancel.bend as Test
 import ./quic_connection_close.bend as CloseTest
+import ../src/endpoint.bend as Endpoint
+import ../src/relay_quic.bend as Relay
+import ../src/quic_close.bend as Close
 import ../src/quic_nat.bend as Wire
 import ../src/quic_datagram.bend as Q
 import ./quic_datagram.bend as Fixture
@@ -90,6 +93,16 @@ def perform(conn: Q.DatagramConnection, id: U32, action: Test.Action) -> Test.Re
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,Unit> <- Q.drop_quic_stream(conn,id)
         Test.answer(Q.DatagramConnection,Unit,raw,Test.complete)
 
+def close_endpoint(conn: Q.DatagramConnection, code: Wire.VarInt, bytes: List<&2,U32>) -> IO(Q.DatagramConnection & Close.WriteResult()):
+  do IO<Q.DatagramConnection & Close.WriteResult()>:
+    raw : Endpoint.Connection() & Close.WriteResult() <- Endpoint.close_with((conn,None{}),code,bytes)
+    return CloseTest.direct_result(Q.DatagramConnection,Relay.Bridge,Close.WriteResult(),raw)
+
+def endpoint_reason(conn: Q.DatagramConnection) -> IO(Q.DatagramConnection & Close.ReadResult()):
+  do IO<Q.DatagramConnection & Close.ReadResult()>:
+    raw : Endpoint.Connection() & Close.ReadResult() <- Endpoint.close_reason((conn,None{}))
+    return CloseTest.direct_result(Q.DatagramConnection,Relay.Bridge,Close.ReadResult(),raw)
+
 type Suite is Data:
   StreamCases{checks: List<&2,Test.Check>}
   CloseCase{send: Bool, id: U32}
@@ -99,7 +112,7 @@ def exchange(conn: Q.DatagramConnection, suite: Suite) -> IO(Unit):
     case StreamCases{checks}:
       Test.advance(~Q.DatagramConnection,~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,0,1,checks,4000n)
     case CloseCase{send,id}:
-      CloseTest.exchange(~Q.DatagramConnection,~CloseTest.Operations{Q.close_quic_connection,Q.quic_close_reason,Q.step_quic_datagram},
+      CloseTest.exchange(~Q.DatagramConnection,~CloseTest.Operations{close_endpoint,endpoint_reason,Q.step_quic_datagram},
         ~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,send,id)
 
 def accepted(pair: Q.QuicDatagramListener & Q.DatagramConnection, suite: Suite) -> IO(Unit):

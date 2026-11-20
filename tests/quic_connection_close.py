@@ -39,7 +39,7 @@ def main():
     parser.add_argument("binary")
     parser.add_argument("reference")
     parser.add_argument("--control", action="store_true")
-    parser.add_argument("--examples", type=int, nargs="+", default=range(5), choices=range(5))
+    parser.add_argument("--examples", type=int, nargs="+", default=range(8), choices=range(8))
     args = parser.parse_args()
     for example in args.examples:
         for host in ("127.0.0.1", "::1"):

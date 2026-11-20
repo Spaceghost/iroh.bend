@@ -19,6 +19,11 @@ def pump(-C: Type, ops: Operations<C>, conn: C) -> IO(C & Result<&1,&1,U32 & Str
   Operations{_,_,step} = ops
   step(conn)
 
+# The loopback fixtures have a direct connection and no relay bridge.
+def direct_result(-C: Type, -P: Type, -R: Type, raw: (C & Maybe<&1,P>) & R) -> C & R:
+  ((conn,_),value) = raw
+  (conn,value)
+
 def pattern(left: Nat, +next: U32) -> List<&2,U32>:
   match left:
     case 0n:
@@ -36,8 +41,14 @@ def example(id: U32) -> Wire.VarInt & List<&2,U32>:
       (Wire.Var{1073741823,4294967295},[0,255,29,0,128,42,0])
     case 3:
       (Wire.Var{0,16384},pattern(1100n,0))
-    case _:
+    case 4:
       (Wire.Var{0,42},pattern(4096n,0))
+    case 5:
+      (Wire.Var{0,64},pattern(1023n,0))
+    case 6:
+      (Wire.Var{0,64},pattern(1024n,0))
+    case _:
+      (Wire.Var{0,64},pattern(1025n,0))
 
 def equal(actual: List<&2,U32>, expected: List<&2,U32>) -> Bool:
   match actual expected:

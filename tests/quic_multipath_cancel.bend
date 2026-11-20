@@ -1,6 +1,9 @@
 import Base
 import ./quic_stream_cancel.bend as Test
 import ./quic_connection_close.bend as CloseTest
+import ../src/endpoint_multipath.bend as Endpoint
+import ../src/relay_quic.bend as Relay
+import ../src/quic_close.bend as Close
 import ../src/quic_nat.bend as Wire
 import ../src/quic_multipath.bend as Q
 import ./quic_multipath_bend.bend as Fixture
@@ -82,6 +85,16 @@ def perform(conn: Q.MultipathConnection, id: U32, action: Test.Action) -> Test.R
         raw : Q.MultipathConnection & Result<&1,&1,U32 & String,Unit> <- Q.drop_multipath_stream(conn,id)
         Test.answer(Q.MultipathConnection,Unit,raw,Test.complete)
 
+def close_endpoint(conn: Q.MultipathConnection, code: Wire.VarInt, bytes: List<&2,U32>) -> IO(Q.MultipathConnection & Close.WriteResult()):
+  do IO<Q.MultipathConnection & Close.WriteResult()>:
+    raw : Endpoint.Connection() & Close.WriteResult() <- Endpoint.close_with((conn,None{}),code,bytes)
+    return CloseTest.direct_result(Q.MultipathConnection,Relay.Bridge,Close.WriteResult(),raw)
+
+def endpoint_reason(conn: Q.MultipathConnection) -> IO(Q.MultipathConnection & Close.ReadResult()):
+  do IO<Q.MultipathConnection & Close.ReadResult()>:
+    raw : Endpoint.Connection() & Close.ReadResult() <- Endpoint.close_reason((conn,None{}))
+    return CloseTest.direct_result(Q.MultipathConnection,Relay.Bridge,Close.ReadResult(),raw)
+
 type Suite is Data:
   StreamCases{checks: List<&2,Test.Check>}
   CloseCase{send: Bool, id: U32}
@@ -91,7 +104,7 @@ def exchange(conn: Q.MultipathConnection, suite: Suite) -> IO(Unit):
     case StreamCases{checks}:
       Test.advance(~Q.MultipathConnection,~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,0,1,checks,4000n)
     case CloseCase{send,id}:
-      CloseTest.exchange(~Q.MultipathConnection,~CloseTest.Operations{Q.close_multipath_connection,Q.multipath_close_reason,Q.step_multipath},
+      CloseTest.exchange(~Q.MultipathConnection,~CloseTest.Operations{close_endpoint,endpoint_reason,Q.step_multipath},
         ~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,send,id)
 
 def accepted(pair: Q.MultipathListener & Q.MultipathConnection, suite: Suite) -> IO(Unit):
