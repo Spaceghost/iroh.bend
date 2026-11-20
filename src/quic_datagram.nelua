@@ -21,6 +21,10 @@ local function SSL_select_next_proto(out: **cuchar, outlen: *cuchar, supported: 
   allowed_size: cuint, offered: *cuchar, offered_size: cuint): cint <cimport,nodecl> end
 local function SSL_get_ex_data_X509_STORE_CTX_idx(): cint <cimport,nodecl> end
 local function SSL_get_app_data(ssl: *SSL): pointer <cimport,nodecl> end
+local function SSL_CTX_set_max_early_data(ctx: *SSL_CTX, size: uint32): cint <cimport,nodecl> end
+local function SSL_CTX_set_session_id_context(ctx: *SSL_CTX, bytes: *cuchar, size: cuint): cint <cimport,nodecl> end
+local function SSL_CTX_sess_set_cache_size(ctx: *SSL_CTX, count: clong): clong <cimport,nodecl> end
+local function SSL_set_shutdown(ssl: *SSL, flags: cint) <cimport,nodecl> end
 local function SSL_CTX_up_ref(ctx: *SSL_CTX): cint <cimport,nodecl> end
 local function SSL_CTX_set_session_cache_mode(ctx: *SSL_CTX, mode: clong): clong <cimport,nodecl> end
 local function SSL_CTX_sess_set_new_cb(ctx: *SSL_CTX, callback: pointer) <cimport,nodecl> end
@@ -102,6 +106,10 @@ local SOCK_DGRAM: cint <cimport,nodecl>
 local SOCK_NONBLOCK: cint <cimport,nodecl>
 local EAGAIN: cint <cimport,nodecl>
 local errno: cint <cimport,nodecl>
+local SSL_SENT_SHUTDOWN: cint <cimport,nodecl>
+local SSL_RECEIVED_SHUTDOWN: cint <cimport,nodecl>
+local SSL_SESS_CACHE_SERVER: clong <cimport,nodecl>
+local SSL_EARLY_DATA_REJECTED: cint <cimport,nodecl>
 local SSL_SESS_CACHE_CLIENT: clong <cimport,nodecl>
 local SSL_SESS_CACHE_NO_INTERNAL_STORE: clong <cimport,nodecl>
 local SSL_EARLY_DATA_ACCEPTED: cint <cimport,nodecl>
@@ -211,7 +219,7 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
-    'QuicSession','open_early_quic_stream','bind_shared_quic','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
+    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
     'drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
@@ -225,6 +233,7 @@ local iroh_dgram_write_early_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_resumption_status: uint32 <cimport,nodecl>
 local iroh_dgram_open_early_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_QuicSession: uint32 <cimport,nodecl>
+local iroh_dgram_bind_resumable_quic: uint32 <cimport,nodecl>
 local iroh_dgram_bind_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_try_accept_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_close_shared_quic: uint32 <cimport,nodecl>
@@ -321,7 +330,7 @@ local Listener = @record{
   next: pointer, id: uint32, fd: cint,
   local_addr: iroh_datagram_address, local_size: cuint,
   ctx: *SSL_CTX, expected_key: *EVP_PKEY, alpn: [256]cuchar, alpn_size: cuint,
-  refs: uint32, pending: uint32, stopped: boolean
+  refs: uint32, pending: uint32, stopped: boolean, resumable: boolean
 }
 local Session = @record{
   next: pointer, id: uint32, tls: *SSL_SESSION, context: *SSL_CTX,
@@ -634,8 +643,9 @@ local function open_udp(conn: *Connection, host: cstring, port: cushort): boolea
 end
 
 local function authenticated_pin(conn: *Connection): boolean
-  return conn.pin_status == 1 or
-    (conn.pin_status == 0 and conn.resume_attempted and SSL_session_reused(conn.ssl) == 1)
+  -- A listener TLS context and its ticket cache are scoped to one pinned peer.
+  local allowed = conn.resume_attempted or (conn.listener ~= nilptr and conn.listener.resumable)
+  return conn.pin_status == 1 or (conn.pin_status == 0 and allowed and SSL_session_reused(conn.ssl) == 1)
 end
 
 local function free_session(session: *Session)
@@ -743,7 +753,8 @@ local function setup_ssl(conn: *Connection, ctx: *SSL_CTX, alpn: *cuchar, size: 
   end
   if conn.listener ~= nilptr then
     SSL_set_accept_state(conn.ssl)
-    return ngtcp2_crypto_ossl_configure_server_session(conn.ssl) == 0
+    return ngtcp2_crypto_ossl_configure_server_session(conn.ssl) == 0 and
+      (not conn.listener.resumable or SSL_set_quic_tls_early_data_enabled(conn.ssl,1) == 1)
   end
   SSL_set_connect_state(conn.ssl)
   return SSL_set_alpn_protos(conn.ssl,alpn,size) == 0 and ngtcp2_crypto_ossl_configure_client_session(conn.ssl) == 0
@@ -1274,7 +1285,13 @@ local function resumption_run(e: Env, args: *[0]Term, work: *IoWork): Term
   if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
   if not authenticated(conn) then return io_tup(e,args[0],io_done(e,term_pak(iroh_dgram_None,0))) end
   local early: Term = 0
-  if conn.early_attempted then early = conn.early_accepted and 1 or 2 end
+  if conn.listener ~= nilptr and conn.listener.resumable then
+    local status = SSL_get_early_data_status(conn.ssl)
+    if status == SSL_EARLY_DATA_ACCEPTED then early = 1 end
+    if status == SSL_EARLY_DATA_REJECTED then early = 2 end
+  elseif conn.early_attempted then
+    early = conn.early_accepted and 1 or 2
+  end
   local value = io_tup(e,SSL_session_reused(conn.ssl) == 1 and 1 or 0,early)
   return io_tup(e,args[0],io_done(e,io_box(e,iroh_dgram_Some,value)))
 end
@@ -1481,7 +1498,17 @@ local function drop_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],release_stream(e,find(e,args[0]),args[1]))
 end
 
-local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
+local function configure_tickets(ctx: *SSL_CTX, resume: boolean): boolean
+  if not resume then return SSL_CTX_set_num_tickets(ctx,0) == 1 end
+  local id: [32]cuchar
+  if RAND_bytes(&id[0],32) ~= 1 or SSL_CTX_set_session_id_context(ctx,&id[0],32) ~= 1 then return false end
+  -- OpenSSL uses the internal cache to enforce single-use early-data tickets.
+  SSL_CTX_set_session_cache_mode(ctx,SSL_SESS_CACHE_SERVER)
+  SSL_CTX_sess_set_cache_size(ctx,1024)
+  return SSL_CTX_set_max_early_data(ctx,0xffffffff) == 1 and SSL_CTX_set_num_tickets(ctx,2) == 1
+end
+
+local function bind_listener(e: Env, args: *[0]Term, resume: boolean): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
@@ -1509,10 +1536,11 @@ local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
   end
   listener.ctx = create_tls_ctx(&config.seed[0],SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
   listener.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,&config.peer[0],32)
-  if listener.ctx == nilptr or listener.expected_key == nilptr or SSL_CTX_set_num_tickets(listener.ctx,0) ~= 1 then
+  if listener.ctx == nilptr or listener.expected_key == nilptr or not configure_tickets(listener.ctx,resume) then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure QUIC listener TLS')
   end
+  listener.resumable = resume
   listener.alpn_size = config.size
   C.memcpy(&listener.alpn[0],&config.alpn[0],config.size)
   SSL_CTX_set_alpn_select_cb(listener.ctx,(@pointer)(select_alpn),listener)
@@ -1522,6 +1550,14 @@ local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
   listeners = listener
   local handle = term_pak(iroh_dgram_QuicDatagramListener,listener.id)
   return io_done(e,io_tup(e,handle,address_port(&listener.local_addr)))
+end
+
+local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return bind_listener(e,args,false)
+end
+
+local function bind_resumable_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return bind_listener(e,args,true)
 end
 
 local function try_accept(e: Env, listener: *Listener): Term
@@ -1579,6 +1615,11 @@ local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn ~= nilptr then
     if not conn.failed then close_transport(conn,0) end
+    if conn.listener ~= nilptr and conn.listener.resumable and authenticated(conn) and
+        (not conn.failed or conn.read_failure == NGTCP2_ERR_DRAINING) then
+      -- QUIC closes at the transport layer and does not send a TLS close_notify.
+      SSL_set_shutdown(conn.ssl,SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN)
+    end
     remove_connection(conn)
   end
   return term_pak(iroh_dgram_Unit,0)
@@ -1591,6 +1632,7 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_open_early_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_open_early_quic_stream,open_early_stream_run) end
   if iroh_dgram_write_early_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_early_datagram,early_datagram_run) end
   if iroh_dgram_quic_resumption_status ~= 0xffffffff then io_eff(iroh_dgram_quic_resumption_status,resumption_run) end
+  if iroh_dgram_bind_resumable_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_resumable_quic,bind_resumable_run) end
   if iroh_dgram_bind_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_shared_quic,bind_run) end
   if iroh_dgram_try_accept_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_try_accept_shared_quic,accept_run) end
   if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end

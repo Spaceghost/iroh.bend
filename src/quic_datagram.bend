@@ -179,3 +179,9 @@ def quic_resumption_status(conn: DatagramConnection)
 def open_early_quic_stream(conn: DatagramConnection, direction: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"
+
+# Opt in to TLS tickets and early data. Connections are handed to the
+# application after authentication, including any buffered early data.
+def bind_resumable_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"

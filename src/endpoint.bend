@@ -393,3 +393,10 @@ def try_accept(listener: Quic.QuicDatagramListener)
 
 def close_listener(listener: Quic.QuicDatagramListener) -> IO(Unit):
   Quic.close_shared_quic(listener)
+
+# Opt in to receiving replayable 0-RTT data on this listener.
+def bind_resumable(address: Address, identity: Identity)
+    -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
+  IpAddress{host,port} = address
+  PeerKeys{seed,peer,alpn} = identity
+  Quic.bind_resumable_quic(host,port,seed,peer,alpn)
