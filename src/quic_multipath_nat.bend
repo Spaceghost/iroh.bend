@@ -153,3 +153,17 @@ def local_candidate(conn: Quic.MultipathConnection)
     result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32> <-
       Quic.multipath_nat_local_candidate(conn)
     return local_address(result)
+
+
+def open_address(conn: Quic.MultipathConnection, ip: Wire.Address, port: U32)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  match ip:
+    case Wire.IPv4{bytes}:
+      Quic.open_multipath_nat_path(conn,bytes,port)
+    case Wire.IPv6{bytes}:
+      Quic.open_multipath_nat_path(conn,bytes,port)
+
+def open_path(conn: Quic.MultipathConnection, peer: State.Candidate)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  State.Socket{ip,port} = peer
+  open_address(conn,State.canonical(ip),port)

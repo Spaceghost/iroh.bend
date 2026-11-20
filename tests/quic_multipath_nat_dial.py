@@ -14,7 +14,7 @@ def check(dialer, fixture, host, family, mode):
         target = host, direct_port
         entrance = bind(stack, host, family)
         proxy_port = entrance.getsockname()[1]
-        bend = stack.enter_context(process(dialer, host, str(proxy_port), "iroh-nat-dial"))
+        bend = stack.enter_context(process(dialer, host, str(proxy_port), "iroh-nat-punch"))
         ready = stack.enter_context(selectors.DefaultSelector())
         ready.register(entrance, selectors.EVENT_READ)
         ready.register(bend.stdout, selectors.EVENT_READ)
@@ -22,6 +22,7 @@ def check(dialer, fixture, host, family, mode):
         peers = {}
         response_prefix = b"PASS Bend dialer verified Iroh's PATH_RESPONSE from port "
         response_port = None
+        direct_path = False
         open_outputs = 2
         deadline = time.monotonic() + 25
         while open_outputs:
@@ -43,6 +44,8 @@ def check(dialer, fixture, host, family, mode):
                         open_outputs -= 1
                     elif source == bend.stdout and line.startswith(response_prefix):
                         response_port = int(line.removeprefix(response_prefix))
+                    elif source == bend.stdout and line.strip() == b"PASS Bend validated the new QUIC path on the punched UDP socket":
+                        direct_path = True
                 else:
                     packet, _ = source.recvfrom(65536)
                     entrance.sendto(packet, key.data)
@@ -52,7 +55,9 @@ def check(dialer, fixture, host, family, mode):
             raise RuntimeError(f"dialer NAT probe failed on {host} ({bend_status}, {iroh_status})")
         if response_port != direct_port or response_port == proxy_port:
             raise RuntimeError(f"expected a response from Iroh's direct UDP port on {host}")
-        print(f"PASS Bend dialer reached Iroh's off-path UDP port on {host}", flush=True)
+        if not direct_path:
+            raise RuntimeError(f"expected application traffic on the punched QUIC path on {host}")
+        print(f"PASS Bend dialer opened Iroh's punched UDP path on {host}", flush=True)
 
 
 if __name__ == "__main__":

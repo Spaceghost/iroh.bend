@@ -9,6 +9,7 @@
 ## cinclude '<openssl/evp.h>'
 ## cinclude '<arpa/inet.h>'
 ## cinclude '<unistd.h>'
+## cinclude '<fcntl.h>'
 ## cinclude '<errno.h>'
 ## cinclude '<stdlib.h>'
 require 'C.stdlib'
@@ -159,6 +160,8 @@ local picoquic_packet_1rtt_protected: cint <cimport,nodecl>
 local picoquic_frame_type_path_challenge: uint8 <cimport,nodecl>
 local picoquic_frame_type_datagram_l: uint8 <cimport,nodecl>
 local picoquic_frame_type_path_response: uint8 <cimport,nodecl>
+local F_DUPFD_CLOEXEC:cint <cimport,nodecl>
+local function fcntl(fd:cint, command:cint, value:cint):cint <cimport,nodecl> end
 local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
 local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
     index:*cint):cint <cimport,nodecl> end
@@ -276,7 +279,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'multipath_nat_local_candidate', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -329,6 +332,7 @@ local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_address: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
+local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
@@ -413,7 +417,7 @@ local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean,
 local PeerParameters = @record{bytes:*uint8, size:csize}
 local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8, nat_enabled:boolean}
 local NatFrame = @record{size:csize, bytes:[30]uint8}
-local NatProbe = @record{peer:storage_t, challenge:[CHALLENGE_SIZE]uint8, expires:uint64, answered:boolean}
+local NatProbe = @record{peer:storage_t, challenge:[CHALLENGE_SIZE]uint8, expires:uint64, answered:boolean, claimed:boolean}
 local NatAdvertisement = @record{frame:NatFrame, tracked_payload:*uint8, tracked_at:uint64, delivered:boolean}
 local NatInbox = @record{
   frames:[NAT_INBOX_CAPACITY]NatFrame, first:csize, count:csize,
@@ -2020,27 +2024,7 @@ local function close_listener_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return term_pak(iroh_mp_Unit,0)
 end
 
-local function probe(e: Env, conn: *Connection, args: *[0]Term): Term
-  if conn == nilptr or conn.closed then return closed_error(e,conn) end
-  if conn.listener ~= nilptr then return io_fail(e,ENOTSUP,'only a QUIC dialer can open a new path') end
-  if not conn.ready then return none(e) end
-  if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
-  if conn.path_count >= PATH_LIMIT then return io_fail(e,ENOBUFS,'too many active QUIC paths') end
-  local source: storage_t, peer: storage_t
-  local bind_len: uint64
-  local bind_host = io_cstr(e,args[1],&bind_len)
-  defer C.free(bind_host) end
-  local peer_size = numeric_argument(e,args[3],args[4],&peer)
-  local source_size: cuint = 0
-  if bind_len ~= 0 and args[2] <= 65535 and not io_nul(bind_host,bind_len) then
-    source_size = address(bind_host,(@uint16)(args[2]),&source)
-  end
-  if peer_size == 0 or args[4] == 0 or (bind_len == 0 and args[2] ~= 0) or
-      (bind_len ~= 0 and (source_size == 0 or source.ss_family ~= peer.ss_family)) then
-    return io_fail(e,EINVAL,'invalid local or remote QUIC path address')
-  end
-  local path,error = open_path(&peer,peer_size,source_size ~= 0 and &source or nilptr,source_size)
-  if path == nilptr then return io_fail(e,error,nilptr) end
+local function register_probed_path(e:Env, conn:*Connection, path:*Path): Term
   local previous = conn.cnx.nb_paths
   local status = picoquic_probe_new_path(conn.cnx,&path.peer,&path.local_addr,picoquic_current_time())
   if status ~= 0 then
@@ -2066,6 +2050,30 @@ local function probe(e: Env, conn: *Connection, args: *[0]Term): Term
   conn.path_count = conn.path_count + 1
   if conn.last_path_id < id then conn.last_path_id = (@uint32)(id) end
   return optional_id(e,id)
+end
+
+local function probe(e: Env, conn: *Connection, args: *[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if conn.listener ~= nilptr then return io_fail(e,ENOTSUP,'only a QUIC dialer can open a new path') end
+  if not conn.ready then return none(e) end
+  if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
+  if conn.path_count >= PATH_LIMIT then return io_fail(e,ENOBUFS,'too many active QUIC paths') end
+  local source: storage_t, peer: storage_t
+  local bind_len: uint64
+  local bind_host = io_cstr(e,args[1],&bind_len)
+  defer C.free(bind_host) end
+  local peer_size = numeric_argument(e,args[3],args[4],&peer)
+  local source_size: cuint = 0
+  if bind_len ~= 0 and args[2] <= 65535 and not io_nul(bind_host,bind_len) then
+    source_size = address(bind_host,(@uint16)(args[2]),&source)
+  end
+  if peer_size == 0 or args[4] == 0 or (bind_len == 0 and args[2] ~= 0) or
+      (bind_len ~= 0 and (source_size == 0 or source.ss_family ~= peer.ss_family)) then
+    return io_fail(e,EINVAL,'invalid local or remote QUIC path address')
+  end
+  local path,error = open_path(&peer,peer_size,source_size ~= 0 and &source or nilptr,source_size)
+  if path == nilptr then return io_fail(e,error,nilptr) end
+  return register_probed_path(e,conn,path)
 end
 
 local function probe_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2177,8 +2185,9 @@ local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): T
   local now = picoquic_current_time()
   local found, available = nat_probe(conn.nat_inbox,&peer,&raw[0],now)
   if not send_probe then
-    if found == nilptr or not found.answered then return io_done(e,0) end
-    found.expires = 0
+    if found == nilptr or not found.answered or found.claimed then return io_done(e,0) end
+    if conn.listener ~= nilptr then found.expires = 0
+    else found.claimed = true end
     return io_done(e,1)
   end
   if found ~= nilptr then return io_done(e,1) end
@@ -2191,6 +2200,7 @@ local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): T
   C.memcpy(&available.challenge[0],&raw[0],CHALLENGE_SIZE)
   available.expires = now + NAT_PROBE_LIFETIME
   available.answered = false
+  available.claimed = false
   return io_done(e,1)
 end
 
@@ -2274,6 +2284,56 @@ local function local_nat_candidate_run(e:Env, args:*[0]Term, work:*IoWork): Term
     port = v6.sin6_port
   end
   return io_tup(e,args[0],io_done(e,io_tup(e,ip,ntohs(port))))
+end
+
+local function verified_nat_peer(conn:*Connection, peer:*storage_t, now:uint64): boolean
+  for i = 0,<NAT_PROBE_CAPACITY do
+    local probe = &conn.nat_inbox.probes[i]
+    if probe.claimed and probe.expires > now and picoquic_compare_addr(&probe.peer,peer) == 0 then return true end
+  end
+  return false
+end
+
+local function open_nat_candidate(e:Env, conn:*Connection, args:*[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if conn.listener ~= nilptr or conn.nat_inbox == nilptr or not conn.ready then
+    return io_fail(e,ENOTSUP,'a negotiated NAT traversal dialer is required')
+  end
+  local source = find_path(conn,0)
+  if source == nilptr or not source.unconnected or source.status == 3 then
+    return io_fail(e,ENOTSUP,'the UDP probe socket is unavailable')
+  end
+  local peer: storage_t
+  if not nat_address(e,args,conn,&peer) then return io_fail(e,EINVAL,'invalid NAT candidate address') end
+  if not verified_nat_peer(conn,&peer,picoquic_current_time()) then
+    return io_fail(e,EACCES,'NAT candidate has no recent authenticated response')
+  end
+  local existing = conn.paths
+  while existing ~= nilptr do
+    if existing.id ~= 0 and existing.status ~= 3 and existing.unconnected and
+        picoquic_compare_addr(&source.local_addr,&existing.local_addr) == 0 and
+        picoquic_compare_addr(&peer,&existing.peer) == 0 then return optional_id(e,existing.id) end
+    existing = (@*Path)(existing.next)
+  end
+  if conn.path_count >= PATH_LIMIT then return io_fail(e,ENOBUFS,'too many active QUIC paths') end
+  local path = (@*Path)(C.calloc(1,#Path))
+  if path == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  -- Duplicate the descriptor so both logical paths retain the same UDP
+  -- port and receive queue even when one path is retired.
+  path.fd = fcntl(source.fd,F_DUPFD_CLOEXEC,0)
+  if path.fd < 0 then
+    local error = (@uint32)(errno)
+    release_path(path)
+    return io_fail(e,error,'could not retain the punched UDP socket')
+  end
+  path.unconnected = true
+  path.local_addr = source.local_addr
+  path.peer = peer
+  return register_probed_path(e,conn,path)
+end
+
+local function open_nat_path_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],open_nat_candidate(e,find_connection(e,args[0]),args))
 end
 
 local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2742,6 +2802,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
   if iroh_mp_send_multipath_nat_address ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_address,advertise_nat_run) end
   if iroh_mp_multipath_nat_local_candidate ~= 0xffffffff then io_eff(iroh_mp_multipath_nat_local_candidate,local_nat_candidate_run) end
+  if iroh_mp_open_multipath_nat_path ~= 0xffffffff then io_eff(iroh_mp_open_multipath_nat_path,open_nat_path_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end

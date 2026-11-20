@@ -83,6 +83,12 @@ def multipath_nat_local_candidate(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"
 
+# After a matching NAT probe response, open a new QUIC path using the
+# punched socket. Wait for the returned path ID to become available.
+def open_multipath_nat_path(conn: MultipathConnection, ip: List<&2,U32>, port: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  import "./quic_multipath.c"
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)
