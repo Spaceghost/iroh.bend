@@ -358,6 +358,14 @@ def use_connection(-R: Type, connected: Connection(), operation: Quic.DatagramCo
     outcome : Quic.DatagramConnection & R <- operation(conn)
     return keep_path(R,outcome,path)
 
+# Probe a new route while retaining ownership of the existing relay bridge, if present.
+def start_path_migration(connected: Connection(), local: Address, remote: Address)
+    -> IO(Connection() & Result<&1,&1,U32 & String,U32>):
+  IpAddress{host,port} = local
+  IpAddress{peer,peer_port} = remote
+  use_connection(Result<&1,&1,U32 & String,U32>,connected,
+    conn => Quic.start_quic_path_migration(conn,host,port,peer,peer_port))
+
 def disconnect(connected: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
   match connected:
     case (conn,None{}):

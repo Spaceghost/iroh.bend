@@ -19,6 +19,11 @@ def start_quic_migration(conn: DatagramConnection, host: String, port: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"
 
+# Validate a new local and remote address for the existing pinned peer.
+def start_quic_path_migration(conn: DatagramConnection, host: String, port: U32, peer: String, peer_port: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
 # 0 means idle, 1 validating, 2 migrated, and 3 validation failed.
 def quic_migration_status(conn: DatagramConnection)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):

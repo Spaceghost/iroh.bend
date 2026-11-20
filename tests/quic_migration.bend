@@ -52,14 +52,9 @@ def check_move(outcome: Quic.DatagramConnection & U32, expected: U32) -> IO(Quic
   (conn,+code) = outcome
   check_move_status(conn,code,U32.is_eq(code,expected))
 
-def migrate(bound: Quic.DatagramConnection & U32, +stream: U32, +expected: U32) -> IO(Unit):
-  (conn,port) = bound
+def finish_stream(conn: Quic.DatagramConnection, +stream: U32) -> IO(Unit):
   do IO<Unit>:
-    IO.print(String.append("CANDIDATE ",U32.show(port)))
-    outcome : Quic.DatagramConnection & U32 <- await_move(12000n,conn)
-    ready : Quic.DatagramConnection <- check_move(outcome,expected)
-    IO.print(String.append("VALIDATION ",U32.show(expected)))
-    sent : Quic.DatagramConnection <- Fixture.send_datagram(2000n,ready,[12,0,255])
+    sent : Quic.DatagramConnection <- Fixture.send_datagram(2000n,conn,[12,0,255])
     queued : Quic.DatagramConnection <- Fixture.stream_submit(sent,Fixture.QueueStream{stream,[22,0,255],1})
     flushed : Quic.DatagramConnection <- Fixture.stream_submit(queued,Fixture.FlushStream{stream})
     reply : Quic.DatagramConnection <- Fixture.receive_reply(2000n,flushed,[13,0,255])
@@ -68,14 +63,28 @@ def migrate(bound: Quic.DatagramConnection & U32, +stream: U32, +expected: U32) 
     Quic.drop_quic_datagram(complete)
     IO.print("PASS Bend kept the original QUIC connection and stream")
 
-def initial(opened: Quic.DatagramConnection & U32, host: String, expected: U32) -> IO(Unit):
-  (conn,+stream) = opened
+def migrate(bound: Quic.DatagramConnection & U32, stream: U32, +expected: U32) -> IO(Unit):
+  (conn,port) = bound
   do IO<Unit>:
+    IO.print(String.append("CANDIDATE ",U32.show(port)))
+    outcome : Quic.DatagramConnection & U32 <- await_move(12000n,conn)
+    ready : Quic.DatagramConnection <- check_move(outcome,expected)
+    IO.print(String.append("VALIDATION ",U32.show(expected)))
+    finish_stream(ready,stream)
+
+def prime_stream(opened: Quic.DatagramConnection & U32) -> IO(Quic.DatagramConnection & U32):
+  (conn,+stream) = opened
+  do IO<Quic.DatagramConnection & U32>:
     sent : Quic.DatagramConnection <- Fixture.send_datagram(2000n,conn,[10,0,255])
     queued : Quic.DatagramConnection <- Fixture.stream_submit(sent,Fixture.QueueStream{stream,[20,0,255],0})
     flushed : Quic.DatagramConnection <- Fixture.stream_submit(queued,Fixture.FlushStream{stream})
     reply : Quic.DatagramConnection <- Fixture.receive_reply(2000n,flushed,[11,0,255])
-    bound : Quic.DatagramConnection & U32 <- start_move(2500n,reply,host)
+    return (reply,stream)
+
+def initial(primed: Quic.DatagramConnection & U32, host: String, expected: U32) -> IO(Unit):
+  (conn,stream) = primed
+  do IO<Unit>:
+    bound : Quic.DatagramConnection & U32 <- start_move(2500n,conn,host)
     migrate(bound,stream,expected)
 
 def connect(+host: String, port: U32, expected: U32) -> IO(Unit):
@@ -83,7 +92,8 @@ def connect(+host: String, port: U32, expected: U32) -> IO(Unit):
     conn : Quic.DatagramConnection <- IO.try(Quic.DatagramConnection,
       Quic.connect(host,port,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn(),5000n))
     stream : Quic.DatagramConnection & U32 <- Fixture.poll_stream(2500n,conn,Fixture.OpenStream{0})
-    initial(stream,host,expected)
+    primed : Quic.DatagramConnection & U32 <- prime_stream(stream)
+    initial(primed,host,expected)
 
 def parse(host: String, port: Maybe<&2,U32>, status: Maybe<&2,U32>) -> IO(Unit):
   match port status:

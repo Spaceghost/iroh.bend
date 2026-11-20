@@ -99,8 +99,10 @@ $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
-.PHONY: check-relay-quic
+.PHONY: check-relay-quic check-quic-route-migration
 UPSTREAM_RELAY_QUIC ?=
+UPSTREAM_QUIC_ROUTE_MIGRATION ?=
+UPSTREAM_IROH_RELAY_URL ?=
 DISCOVERY_DNS_PORT ?=
 RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/endpoint.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
 RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_http pkarr_publisher
@@ -120,6 +122,25 @@ $(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend tests/quic_stream
 	cd "$(BUILD)/relay-quic-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_quic.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-relay-quic: $(BUILD)/relay-quic.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS) libcurl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS) libcurl)
+
+check-quic-route-migration: $(BUILD)/iroh-bend-quic-route-migration
+	@test -x "$(UPSTREAM_QUIC_ROUTE_MIGRATION)" || { echo 'Set UPSTREAM_QUIC_ROUTE_MIGRATION to the Iroh route migration fixture.' >&2; exit 2; }
+	python3 -B tests/quic_route_migration.py "$(BUILD)/iroh-bend-quic-route-migration" \
+		"$(UPSTREAM_QUIC_ROUTE_MIGRATION)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
+
+$(BUILD)/quic-route-migration.c: tests/quic_route_migration.bend tests/quic_migration.bend tests/quic_datagram.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/quic-route-migration-stage/src" "$(BUILD)/quic-route-migration-stage/tests"
+	cp $(RELAY_QUIC_SOURCES) "$(BUILD)/quic-route-migration-stage/src/"
+	cp tests/quic_route_migration.bend tests/quic_migration.bend tests/quic_datagram.bend "$(BUILD)/quic-route-migration-stage/tests/"
+	for native in $(RELAY_QUIC_EFFECTS); do \
+		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
+			"$(abspath $(BUILD)/quic-route-migration-stage/src)/$$native.c" || exit; \
+	done
+	cd "$(BUILD)/quic-route-migration-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_route_migration.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-route-migration: $(BUILD)/quic-route-migration.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS) libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS) libcurl)
 
