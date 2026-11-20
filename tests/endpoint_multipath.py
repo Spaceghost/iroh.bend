@@ -86,14 +86,64 @@ def check_routed(client, fixture, host, mode, family, relay, peer_relay):
         raise TimeoutError("Bend did not promote the direct path")
 
 
+def check_recovery(client, fixture, host, mode, family, relay, peer_relay):
+    with ExitStack() as stack:
+        server = stack.enter_context(process("env", "IROH_RELAY_RECOVERY=1", fixture, mode, peer_relay))
+        target = (host, read_address(server))
+        gate = bind(stack, host, family)
+        child = stack.enter_context(process(client, host, str(gate.getsockname()[1]), relay))
+        ready = stack.enter_context(selectors.DefaultSelector())
+        ready.register(gate, selectors.EVENT_READ)
+        ready.register(child.stdout, selectors.EVENT_READ)
+        remote = None
+        cut = False
+        dropped = 0
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            events = sorted(ready.select(0.1), key=lambda event: event[0].fileobj != child.stdout)
+            for key, _ in events:
+                if key.fileobj == gate:
+                    packet, sender = gate.recvfrom(65536)
+                    if cut:
+                        dropped += 1
+                    elif sender[:2] == target:
+                        if remote is not None:
+                            gate.sendto(packet, remote)
+                    else:
+                        remote = sender
+                        gate.sendto(packet, target)
+                    continue
+                line = child.stdout.readline().strip()
+                if line == b"CUT_DIRECT" and not cut and remote is not None:
+                    cut = True
+                elif line == b"PASS open stream continued on the relay after direct path loss" and dropped:
+                    if child.wait(timeout=5):
+                        raise RuntimeError("Bend failed after recovering the relay path")
+                    transcript, _ = server.communicate(timeout=5)
+                    print(transcript.decode(), end="", flush=True)
+                    if server.returncode:
+                        raise RuntimeError("Iroh rejected the traffic after direct path loss")
+                    print(f"PASS same Bend stream recovered via relay on {host}", flush=True)
+                    return
+                else:
+                    raise RuntimeError(f"Unexpected recovery output {line!r} after {dropped} dropped packets")
+        raise TimeoutError(f"Bend did not recover the relay path after dropping {dropped} packets")
+
+
 if __name__ == "__main__":
-    client, fixture, relay, peer_relay = sys.argv[1:]
+    client, fixture, relay, peer_relay, *flags = sys.argv[1:]
+    recovery = flags == ["--recovery"]
     if bool(relay) != bool(peer_relay):
         raise SystemExit("Set both RELAY_URL and UPSTREAM_IROH_RELAY_URL for relay cases")
+    if recovery and not relay:
+        raise SystemExit("Relay recovery requires RELAY_URL and UPSTREAM_IROH_RELAY_URL")
     for host, mode, family in (
         ("127.0.0.1", "listen", socket.AF_INET),
         ("::1", "listen6", socket.AF_INET6),
     ):
+        if recovery:
+            check_recovery(client, fixture, host, mode, family, relay, peer_relay)
+            continue
         check(client, fixture, host, mode, family, "", "")
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
             check(client, fixture, host, mode, family, "", "", binary=True)

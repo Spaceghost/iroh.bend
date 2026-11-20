@@ -63,12 +63,23 @@ def disconnect(connection: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
     Quic.close_multipath(conn)
     stop_bridge(bridge)
 
+type BackupPlan is Data:
+  BackupRoutes{identity: Endpoint.Identity, urls: List<&2,String>, timeout: U32}
+
+type BackupState is Data:
+  DialBackup{remaining: List<&2,String>, since: U32}
+  ProbeBackup{remaining: List<&2,String>, port: U32, since: U32}
+  ValidateBackup{remaining: List<&2,String>, path: U32, since: U32}
+  StandbyBackup{path: U32}
+  ActiveBackup{path: U32}
+
 type ProbeState is Data:
   Disabled{}
   Seeking{remaining: List<&2,Endpoint.Address>, since: U32}
   Validating{remaining: List<&2,Endpoint.Address>, path: U32, since: U32}
   DirectPath{path: U32}
   Waiting{since: U32}
+  Backup{plan: BackupPlan, phase: BackupState}
 
 type RoutedConnection is Type:
   Routed{transport: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState}
@@ -76,6 +87,7 @@ type RoutedConnection is Type:
 type SelectedPath is Data:
   InitialPath{}
   PromotedPath{id: U32}
+  RecoveredRelay{id: U32}
 
 def RoutedResult() -> Type:
   Result<&1,&1,U32 & String,RoutedConnection>
@@ -83,21 +95,25 @@ def RoutedResult() -> Type:
 def PathResult() -> Type:
   Result<&1,&1,U32 & String,SelectedPath>
 
-def route_state(base: Connection(), +candidates: List<&2,Endpoint.Address>, now: U32) -> RoutedConnection:
-  match base:
-    case (conn,Some{bridge}):
+def route_state(base: Connection(), +candidates: List<&2,Endpoint.Address>, urls: List<&2,String>,
+    identity: Endpoint.Identity, timeouts: Endpoint.Timeouts, +now: U32) -> RoutedConnection:
+  match base urls:
+    case (conn,Some{bridge}) _:
       Routed{(conn,Some{bridge}),candidates,Seeking{candidates,now}}
-    case (conn,None{}):
+    case (conn,None{}) Nil{}:
       Routed{(conn,None{}),[],Disabled{}}
+    case (conn,None{}) Con{+url,+rest}:
+      Endpoint.HandshakeTimeouts{_,timeout} = timeouts
+      Routed{(conn,None{}),candidates,Backup{BackupRoutes{identity,Con{url,rest},timeout},DialBackup{Con{url,rest},now}}}
 
-def connect_routed(+routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
+def connect_routed(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +timeouts: Endpoint.Timeouts)
     -> IO(RoutedResult()):
-  Endpoint.DialRoutes{candidates,_} = routes
+  Endpoint.DialRoutes{candidates,urls} = routes
   do IO<RoutedResult()>:
     result : ConnectResult() <- connect_routes(routes,identity,timeouts)
     now : U32 <- Quic.multipath_millis()
     return Result.map(&1,&1,U32 & String,Connection(),RoutedConnection,
-      conn => route_state(conn,candidates,now),result)
+      conn => route_state(conn,candidates,urls,identity,timeouts,now),result)
 
 def after_probe(outcome: Connection() & Result<&1,&1,U32 & String,Maybe<&1,U32>>, peer: Endpoint.Address,
     rest: List<&2,Endpoint.Address>, since: U32, now: U32, expired: Bool) -> Connection() & ProbeState:
@@ -123,8 +139,8 @@ def seek(conn: Connection(), peers: List<&2,Endpoint.Address>, +since: U32, +now
 def check_path(conn: Connection(), path: U32) -> IO(Connection() & Result<&1,&1,U32 & String,U32>):
   use_connection(Result<&1,&1,U32 & String,U32>,conn,c => Quic.multipath_status(c,path))
 
-def standby(conn: Connection(), value: U32) -> IO(Connection() & Result<&1,&1,U32 & String,Unit>):
-  use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.set_multipath_standby(c,0,value))
+def standby(conn: Connection(), path: U32, value: U32) -> IO(Connection() & Result<&1,&1,U32 & String,Unit>):
+  use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.set_multipath_standby(c,path,value))
 
 def without_status(pair: Connection() & Result<&1,&1,U32 & String,Unit>) -> Connection():
   (conn,_) = pair
@@ -179,7 +195,7 @@ def finish_check(outcome: Connection() & Result<&1,&1,U32 & String,U32>, rest: L
   match outcome expired:
     case (conn,Done{1}) _:
       do IO<Connection() & ProbeState>:
-        preferred : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,1)
+        preferred : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0,1)
         return promote(preferred,path,rest,now)
     case (conn,Done{0}) False{}:
       IO.pure(Connection() & ProbeState,(conn,Validating{rest,path,since}))
@@ -197,7 +213,7 @@ def keep_direct(outcome: Connection() & Result<&1,&1,U32 & String,U32>, +path: U
       IO.pure(Connection() & ProbeState,(conn,DirectPath{path}))
     case (conn,_):
       do IO<Connection() & ProbeState>:
-        relay : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0)
+        relay : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0,0)
         kept : Connection() <- retire(without_status(relay),path)
         return (kept,Waiting{now})
 
@@ -208,6 +224,145 @@ def retry_routes(conn: Connection(), candidates: List<&2,Endpoint.Address>, sinc
       seek(conn,candidates,now,now)
     case False{}:
       IO.pure(Connection() & ProbeState,(conn,Waiting{since}))
+
+def BackupProgress() -> Type:
+  Connection() & BackupState
+
+def backup_progress(conn: Connection(), state: BackupState) -> IO(BackupProgress()):
+  IO.pure(BackupProgress(),(conn,state))
+
+def stop_backup(conn: Connection(), rest: List<&2,String>, now: U32) -> IO(BackupProgress()):
+  (quic,bridge) = conn
+  do IO<BackupProgress()>:
+    _ : Result<&1,&1,U32 & String,Unit> <- stop_bridge(bridge)
+    return ((quic,None{}),DialBackup{rest,now})
+
+def attached_backup(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, quic: Quic.MultipathConnection,
+    rest: List<&2,String>, now: U32) -> BackupProgress():
+  match result:
+    case Done{(bridge,port)}:
+      ((quic,Some{bridge}),ProbeBackup{rest,port,now})
+    case Fail{_}:
+      ((quic,None{}),DialBackup{rest,now})
+
+def open_backup(conn: Connection(), identity: Endpoint.Identity, url: String, rest: List<&2,String>,
+    now: U32) -> IO(BackupProgress()):
+  (quic,_) = conn
+  Endpoint.PeerKeys{seed,peer,_} = identity
+  do IO<BackupProgress()>:
+    result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
+    return attached_backup(result,quic,rest,now)
+
+def dial_backup(conn: Connection(), identity: Endpoint.Identity, urls: List<&2,String>,
+    remaining: List<&2,String>, since: U32, now: U32, retry: Bool) -> IO(BackupProgress()):
+  match remaining retry:
+    case Nil{} False{}:
+      backup_progress(conn,DialBackup{[],since})
+    case Nil{} True{}:
+      backup_progress(conn,DialBackup{urls,now})
+    case Con{url,rest} _:
+      open_backup(conn,identity,url,rest,now)
+
+def finish_backup_probe(outcome: Connection() & Result<&1,&1,U32 & String,Maybe<&1,U32>>,
+    rest: List<&2,String>, port: U32, since: U32, now: U32, expired: Bool) -> IO(BackupProgress()):
+  match outcome expired:
+    case (conn,Done{Some{path}}) _:
+      backup_progress(conn,ValidateBackup{rest,path,since})
+    case (conn,Done{None{}}) False{}:
+      backup_progress(conn,ProbeBackup{rest,port,since})
+    case (conn,_) _:
+      stop_backup(conn,rest,now)
+
+def arm_backup(outcome: Connection() & Result<&1,&1,U32 & String,Unit>, path: U32,
+    rest: List<&2,String>, now: U32) -> IO(BackupProgress()):
+  match outcome:
+    case (conn,Done{_}):
+      do IO<BackupProgress()>:
+        watched : Connection() & Result<&1,&1,U32 & String,Unit> <-
+          use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.set_multipath_keepalive(c,1000))
+        return (without_status(watched),StandbyBackup{path})
+    case (conn,Fail{_}):
+      do IO<BackupProgress()>:
+        kept : Connection() <- retire(conn,path)
+        stop_backup(kept,rest,now)
+
+def finish_backup_validation(outcome: Connection() & Result<&1,&1,U32 & String,U32>,
+    rest: List<&2,String>, +path: U32, since: U32, now: U32, expired: Bool) -> IO(BackupProgress()):
+  match outcome expired:
+    case (conn,Done{1}) _:
+      do IO<BackupProgress()>:
+        marked : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,path,1)
+        arm_backup(marked,path,rest,now)
+    case (conn,Done{0}) False{}:
+      backup_progress(conn,ValidateBackup{rest,path,since})
+    case (conn,_) _:
+      do IO<BackupProgress()>:
+        kept : Connection() <- retire(conn,path)
+        stop_backup(kept,rest,now)
+
+def activate_backup(outcome: Connection() & Result<&1,&1,U32 & String,Unit>, path: U32) -> IO(BackupProgress()):
+  match outcome:
+    case (conn,Done{_}):
+      do IO<BackupProgress()>:
+        relayed : Connection() <- retire(conn,0)
+        return (relayed,ActiveBackup{path})
+    case (conn,Fail{_}):
+      backup_progress(conn,StandbyBackup{path})
+
+def use_backup(conn: Connection(), +path: U32, failed: Bool) -> IO(BackupProgress()):
+  match failed:
+    case False{}:
+      backup_progress(conn,StandbyBackup{path})
+    case True{}:
+      do IO<BackupProgress()>:
+        active : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,path,0)
+        activate_backup(active,path)
+
+def check_direct_progress(progress: Connection() & Result<&1,&1,U32 & String,U32>, path: U32)
+    -> IO(BackupProgress()):
+  match progress:
+    case (conn,Done{count}):
+      use_backup(conn,path,U32.is_ge(count,2))
+    case (conn,Fail{_}):
+      use_backup(conn,path,True{})
+
+def watch_backup(progress: Connection() & Result<&1,&1,U32 & String,U32>, +path: U32,
+    urls: List<&2,String>, now: U32) -> IO(BackupProgress()):
+  match progress:
+    case (conn,Done{1}):
+      do IO<BackupProgress()>:
+        timeouts : Connection() & Result<&1,&1,U32 & String,U32> <-
+          use_connection(Result<&1,&1,U32 & String,U32>,conn,c => Quic.multipath_path_timeouts(c,0))
+        check_direct_progress(timeouts,path)
+    case (conn,_):
+      do IO<BackupProgress()>:
+        kept : Connection() <- retire(conn,path)
+        stop_backup(kept,urls,now)
+
+def advance_backup(conn: Connection(), plan: BackupPlan, phase: BackupState, +now: U32) -> IO(BackupProgress()):
+  BackupRoutes{identity,urls,timeout} = plan
+  match phase:
+    case DialBackup{rest,+since}:
+      dial_backup(conn,identity,urls,rest,since,now,U32.is_ge(U32.sub(now,since),1000))
+    case ProbeBackup{rest,+port,+since}:
+      do IO<BackupProgress()>:
+        probe : Connection() & Result<&1,&1,U32 & String,Maybe<&1,U32>> <-
+          probe_direct(conn,Endpoint.IpAddress{"127.0.0.1",0},Endpoint.IpAddress{"127.0.0.1",port})
+        finish_backup_probe(probe,rest,port,since,now,U32.is_ge(U32.sub(now,since),timeout))
+    case ValidateBackup{rest,+path,+since}:
+      do IO<BackupProgress()>:
+        status : Connection() & Result<&1,&1,U32 & String,U32> <- check_path(conn,path)
+        finish_backup_validation(status,rest,path,since,now,U32.is_ge(U32.sub(now,since),timeout))
+    case StandbyBackup{+path}:
+      do IO<BackupProgress()>:
+        status : Connection() & Result<&1,&1,U32 & String,U32> <- check_path(conn,path)
+        watch_backup(status,path,urls,now)
+    case ActiveBackup{path}:
+      backup_progress(conn,ActiveBackup{path})
+
+def keep_backup(progress: BackupProgress(), plan: BackupPlan) -> Connection() & ProbeState:
+  (conn,next) = progress
+  (conn,Backup{plan,next})
 
 def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState, +now: U32)
     -> IO(Connection() & ProbeState):
@@ -226,11 +381,17 @@ def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: Pr
         keep_direct(status,path,now)
     case Waiting{+since}:
       retry_routes(conn,candidates,since,now,U32.is_ge(U32.sub(now,since),1000))
+    case Backup{+plan,phase}:
+      do IO<Connection() & ProbeState>:
+        progress : BackupProgress() <- advance_backup(conn,plan,phase,now)
+        return keep_backup(progress,plan)
 
 def selected(state: ProbeState) -> SelectedPath:
   match state:
     case DirectPath{id}:
       PromotedPath{id}
+    case Backup{_,ActiveBackup{id}}:
+      RecoveredRelay{id}
     case _:
       InitialPath{}
 
@@ -252,7 +413,7 @@ def advance_routes(outcome: Connection() & Result<&1,&1,U32 & String,U32>, +cand
     case (conn,Fail{error}):
       IO.pure(RoutedConnection & PathResult(),(Routed{conn,candidates,state},Fail{error}))
 
-# Drive QUIC and retry published direct addresses while keeping the relay alive.
+# Drive QUIC and maintain direct and standby relay paths.
 def step_routes(owner: RoutedConnection) -> IO(RoutedConnection & PathResult()):
   Routed{conn,candidates,state} = owner
   do IO<RoutedConnection & PathResult()>:

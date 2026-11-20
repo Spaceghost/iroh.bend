@@ -14,7 +14,7 @@
 require 'C.stdlib'
 require 'C.string'
 local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer, cnx_in_progress:pointer}
-local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize}
+local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64}
 local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
   initial_max_data:uint64,initial_max_stream_data_bidi_local:uint64,initial_max_stream_data_bidi_remote:uint64,
   initial_max_stream_data_uni:uint64,initial_max_streams_bidi:uint64,initial_max_streams_uni:uint64,
@@ -93,6 +93,8 @@ local function real_tls(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, 
     props:*props_t):cint <cimport,codename '__real_ptls_handle_message'> end
 
 local function picoquic_current_time():uint64 <cimport,nodecl> end
+local function picoquic_enable_keep_alive(cnx:*cnx_t,interval:uint64) <cimport,nodecl> end
+local function picoquic_disable_keep_alive(cnx:*cnx_t) <cimport,nodecl> end
 local function picoquic_tls_is_psk_handshake(cnx:*cnx_t):cint <cimport,nodecl> end
 local function picoquic_create(max:uint32, cert:cstring,key:cstring,ca:cstring,alpn:cstring, cb:pointer, cbctx:pointer,
     cidcb:pointer,cidctx:pointer,seed:pointer, now:uint64, sim:pointer,tickets:cstring,enckey:pointer,enclen:csize):*quic_t <cimport,nodecl> end
@@ -237,7 +239,7 @@ local names = {
   'start_multipath', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
-  'step_multipath', 'probe_multipath', 'multipath_status',
+  'step_multipath', 'probe_multipath', 'multipath_status', 'multipath_path_timeouts', 'set_multipath_keepalive',
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
@@ -269,6 +271,8 @@ local iroh_mp_multipath_early_status: uint32 <cimport,nodecl>
 local iroh_mp_step_multipath: uint32 <cimport,nodecl>
 local iroh_mp_probe_multipath: uint32 <cimport,nodecl>
 local iroh_mp_multipath_status: uint32 <cimport,nodecl>
+local iroh_mp_multipath_path_timeouts: uint32 <cimport,nodecl>
+local iroh_mp_set_multipath_keepalive: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_standby: uint32 <cimport,nodecl>
 local iroh_mp_retire_multipath_path: uint32 <cimport,nodecl>
 local iroh_mp_multipath_millis: uint32 <cimport,nodecl>
@@ -1676,6 +1680,27 @@ local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,path.status))
 end
 
+local function path_timeouts_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local paths = (@*[0]*path_t)(conn.cnx.path)
+  for i = 0,<conn.cnx.nb_paths do
+    if paths[i].unique_path_id == args[1] then
+      local count = paths[i].nb_retransmit
+      return io_tup(e,args[0],io_done(e,count > 0xffffffff and 0xffffffff or count))
+    end
+  end
+  return io_tup(e,args[0],io_fail(e,EINVAL,'unknown QUIC path'))
+end
+
+local function keepalive_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  if args[1] == 0 then picoquic_disable_keep_alive(conn.cnx)
+  else picoquic_enable_keep_alive(conn.cnx,args[1] * 1000) end
+  return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
+end
+
 local function probe_alternate(e: Env, conn: *Connection, args: *[0]Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   local current = find_path(conn,args[1])
@@ -2081,6 +2106,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_step_multipath ~= 0xffffffff then io_eff(iroh_mp_step_multipath,step_run) end
   if iroh_mp_probe_multipath ~= 0xffffffff then io_eff(iroh_mp_probe_multipath,probe_run) end
   if iroh_mp_multipath_status ~= 0xffffffff then io_eff(iroh_mp_multipath_status,status_run) end
+  if iroh_mp_multipath_path_timeouts ~= 0xffffffff then io_eff(iroh_mp_multipath_path_timeouts,path_timeouts_run) end
+  if iroh_mp_set_multipath_keepalive ~= 0xffffffff then io_eff(iroh_mp_set_multipath_keepalive,keepalive_run) end
   if iroh_mp_set_multipath_standby ~= 0xffffffff then io_eff(iroh_mp_set_multipath_standby,standby_run) end
   if iroh_mp_retire_multipath_path ~= 0xffffffff then io_eff(iroh_mp_retire_multipath_path,retire_run) end
   if iroh_mp_multipath_millis ~= 0xffffffff then io_eff(iroh_mp_multipath_millis,millis_run) end

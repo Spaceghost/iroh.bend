@@ -85,6 +85,16 @@ def multipath_status(conn: MultipathConnection, path: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
+# Count consecutive timeout retransmissions on a path since its last ACK.
+def multipath_path_timeouts(conn: MultipathConnection, path: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+# Send QUIC keepalives at this interval in milliseconds. Zero disables them.
+def set_multipath_keepalive(conn: MultipathConnection, interval: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
 # Try a second address on the same unvalidated path without consuming a path ID.
 def probe_multipath_alternate(conn: MultipathConnection, path: U32, peer: String, port: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):

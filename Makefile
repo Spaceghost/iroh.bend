@@ -320,6 +320,7 @@ $(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 .PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-quic-multipath-early-streams check-endpoint-multipath
+.PHONY: check-endpoint-multipath-recovery
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -388,18 +389,24 @@ check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
 	python3 -B tests/endpoint_multipath.py "$(BUILD)/iroh-bend-endpoint-multipath" \
 		"$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(if $(UPSTREAM_IROH_RELAY_URL),$(RELAY_URL))" "$(UPSTREAM_IROH_RELAY_URL)"
 
-$(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
-	mkdir -p "$(BUILD)/endpoint-multipath-stage/src" "$(BUILD)/endpoint-multipath-stage/tests"
-	cp $(RELAY_QUIC_SOURCES) src/endpoint_multipath.bend src/quic_multipath.bend "$(BUILD)/endpoint-multipath-stage/src/"
-	cp tests/endpoint_multipath.bend tests/quic_multipath_bend.bend "$(BUILD)/endpoint-multipath-stage/tests/"
+check-endpoint-multipath-recovery: $(BUILD)/iroh-bend-endpoint-multipath-recovery
+	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh relay recovery fixture.' >&2; exit 2; }
+	python3 -B tests/endpoint_multipath.py "$<" "$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --recovery
+
+$(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend
+$(BUILD)/endpoint-multipath-recovery.c: tests/endpoint_multipath_recovery.bend
+$(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-recovery.c: $(BUILD)/%.c: tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp $(RELAY_QUIC_SOURCES) src/endpoint_multipath.bend src/quic_multipath.bend "$(@:.c=-stage)/src/"
+	cp "tests/$(subst -,_,$*).bend" tests/quic_multipath_bend.bend "$(@:.c=-stage)/tests/"
 	for native in $(RELAY_QUIC_EFFECTS) quic_multipath; do \
 		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
-			"$(abspath $(BUILD)/endpoint-multipath-stage/src)/$$native.c" || exit; \
+			"$(abspath $(@:.c=-stage))/src/$$native.c" || exit; \
 	done
-	cd "$(BUILD)/endpoint-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/endpoint_multipath.bend -o "$(abspath $@)"
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) "tests/$(subst -,_,$*).bend" -o "$(abspath $@)"
 
 # Build the endpoint integration fixture without compiler optimizations.
-$(BUILD)/iroh-bend-endpoint-multipath: $(BUILD)/endpoint-multipath.c
+$(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-recovery: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
 	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)

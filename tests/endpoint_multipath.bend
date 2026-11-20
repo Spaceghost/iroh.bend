@@ -102,12 +102,19 @@ def check_route(owner: Multipath.Connection(), fallback: Bool, host: String, por
     case route _:
       fail(Unit,route,1,"endpoint chose the wrong initial route")
 
-def dial_with_alpn(routes: Endpoint.Routes, fallback: Bool, host: String, port: U32, alpn: List<&2,U32>) -> IO(Unit):
+def test_direct_timeout(fallback: Bool) -> U32:
+  match fallback:
+    case True{}:
+      150
+    case False{}:
+      2000
+
+def dial_with_alpn(routes: Endpoint.Routes, +fallback: Bool, host: String, port: U32, alpn: List<&2,U32>) -> IO(Unit):
   do IO<Unit>:
     owner : Multipath.Connection() <- IO.try(Multipath.Connection(),
       Multipath.connect_routes(routes,
         Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),alpn},
-        Endpoint.HandshakeTimeouts{150,6000}))
+        Endpoint.HandshakeTimeouts{test_direct_timeout(fallback),6000}))
     check_route(owner,fallback,host,port)
 
 def fixture_alpn() -> List<&2,U32>:
@@ -141,6 +148,8 @@ def await_promotion(progress: Multipath.RoutedConnection & Multipath.PathResult(
       do IO<Multipath.RoutedConnection>:
         IO.sleep(1)
         retry(owner)
+    case (owner,Done{Multipath.RecoveredRelay{_}}):
+      routed_fail(Multipath.RoutedConnection,owner,1,"relay appeared while waiting for a direct path")
     case (owner,Fail{(code,message)}):
       routed_fail(Multipath.RoutedConnection,owner,code,message)
 
