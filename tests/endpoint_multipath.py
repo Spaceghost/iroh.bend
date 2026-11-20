@@ -5,6 +5,12 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from threading import Event
+
+from endpoint_candidate_lookup import (check_supplied_addresses, direct_ticket, initial_ids,
+                                       ip_ticket, require_exchange, silent_socket, supplied_route)
+from endpoint_lookup_race import dns_proxy
+from endpoint_ticket_urls import ticket
 
 from quic_rebind import bind, process, read_address
 
@@ -29,6 +35,49 @@ def check(client, fixture, host, mode, family, relay, peer_relay, binary=False):
             raise RuntimeError("Iroh rejected the multipath route exchange")
         if binary:
             print(f"PASS Bend endpoint dialed Iroh with a 255-byte binary ALPN on {host}", flush=True)
+
+
+# The upstream multipath fixture binds an endpoint with secret seed [42; 32].
+SERVER_KEY = bytes.fromhex("197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61")
+
+
+def check_ticket_paths(client, fixture, host, mode, both_live):
+    with process(fixture, mode) as server:
+        port = read_address(server)
+        direct = ip_ticket(ticket([], SERVER_KEY), mode, [port])
+        check_supplied_addresses(client, direct, mode, server, both_live, (host, str(port)))
+
+
+def check_ticket_discovery(client, fixture, host, mode, relay="", peer_relay=""):
+    # Release the DNS reply only after the original socket emits its Initial.
+    command = (fixture, mode, peer_relay) if relay else (fixture, mode)
+    supplied = "listen" if mode == "listen6" else "listen6"
+    with process(*command) as server, ExitStack() as stack:
+        port = read_address(server)
+        real = ip_ticket(ticket([], SERVER_KEY), mode, [port])
+        stale = silent_socket(stack, supplied)
+        changed = ip_ticket(real, supplied, [stale.getsockname()[1]])
+        first, discovered = [], []
+
+        def after_initial(*_):
+            first.append(initial_ids(stale.recv(65535)))
+            return True
+
+        if relay:
+            _, dns = dns_proxy(stack, 0, after_initial, relay_url=peer_relay)
+        else:
+            release = Event()
+            release.set()
+            forwarded, _ = stack.enter_context(supplied_route(real, mode, release, discovered))
+            _, (_, proxy_port) = direct_ticket(forwarded, mode, 1)
+            address = f"[{host}]:{proxy_port}" if mode == "listen6" else f"{host}:{proxy_port}"
+            _, dns = dns_proxy(stack, 0, after_initial, address=address)
+        route = "relay" if relay else "direct"
+        subprocess.run((client, "lookup-ticket", changed, route, host, str(port), dns), timeout=10, check=True)
+        require_exchange(server)
+        if not first or (not relay and (not discovered or initial_ids(discovered[0]) != first[0])):
+            raise AssertionError("The discovered multipath route did not continue the original handshake")
+        print(f"PASS {supplied} ticket adopted DNS {route} for {mode} and used two paths", flush=True)
 
 
 def check_relay_nat(client, fixture, host, mode, relay, peer_relay):
@@ -183,6 +232,7 @@ def check_recovery(client, fixture, host, mode, family, relay, peer_relay, resto
 
 if __name__ == "__main__":
     client, fixture, relay, peer_relay, *flags = sys.argv[1:]
+    tickets = flags == ["--tickets"]
     restore = flags == ["--restore-direct"]
     recovery = restore or flags == ["--recovery"]
     relay_nat = flags == ["--relay-nat"]
@@ -207,6 +257,13 @@ if __name__ == "__main__":
             continue
         if recovery:
             check_recovery(client, fixture, host, mode, family, relay, peer_relay, restore)
+            continue
+        if tickets:
+            check_ticket_paths(client, fixture, host, mode, both_live=False)
+            check_ticket_paths(client, fixture, host, mode, both_live=True)
+            check_ticket_discovery(client, fixture, host, mode)
+            if relay:
+                check_ticket_discovery(client, fixture, host, mode, relay, peer_relay)
             continue
         check(client, fixture, host, mode, family, "", "")
         if os.environ.get("CHECK_BINARY_ALPN") == "1":

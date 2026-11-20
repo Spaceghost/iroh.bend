@@ -489,10 +489,12 @@ check-quic-multipath-early-uni: $(BUILD)/iroh-bend-quic-multipath-session
 	@test -x "$(UPSTREAM_QUIC_EARLY)" || { echo 'Set UPSTREAM_QUIC_EARLY to the Iroh resumption fixture with unidirectional modes.' >&2; exit 2; }
 	sh tests/quic_multipath_session.sh "$<" "$(UPSTREAM_QUIC_EARLY)" --early-uni
 
-check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
+check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }
 	python3 -B tests/endpoint_multipath.py "$(BUILD)/iroh-bend-endpoint-multipath" \
 		"$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(if $(UPSTREAM_IROH_RELAY_URL),$(RELAY_URL))" "$(UPSTREAM_IROH_RELAY_URL)"
+	python3 -B tests/endpoint_multipath.py "$(BUILD)/iroh-bend-endpoint-multipath-ticket" \
+		"$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(if $(UPSTREAM_IROH_RELAY_URL),$(RELAY_URL))" "$(UPSTREAM_IROH_RELAY_URL)" --tickets
 
 check-endpoint-multipath-recovery: $(BUILD)/iroh-bend-endpoint-multipath-recovery
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh relay recovery fixture.' >&2; exit 2; }
@@ -553,9 +555,10 @@ $(BUILD)/endpoint-multipath-listener.c: tests/endpoint_multipath_listener.bend t
 $(BUILD)/endpoint-multipath-dual-stack.c: tests/endpoint_multipath_dual_stack.bend tests/quic_multipath_listener.bend
 $(BUILD)/endpoint-multipath-nat.c: tests/endpoint_multipath_nat.bend
 $(BUILD)/endpoint-multipath-options.c: tests/endpoint_multipath_options.bend tests/endpoint_validation.bend
+$(BUILD)/endpoint-multipath-ticket.c: tests/endpoint_multipath_ticket.bend
 $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend
 $(BUILD)/endpoint-multipath-recovery.c: tests/endpoint_multipath_recovery.bend
-$(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-options.c $(BUILD)/endpoint-multipath-recovery.c $(BUILD)/endpoint-multipath-nat.c $(BUILD)/endpoint-multipath-dual-stack.c $(BUILD)/endpoint-multipath-listener.c $(BUILD)/endpoint-multipath-inbound-nat.c: $(BUILD)/%.c: tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
+$(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endpoint-multipath-options.c $(BUILD)/endpoint-multipath-recovery.c $(BUILD)/endpoint-multipath-nat.c $(BUILD)/endpoint-multipath-dual-stack.c $(BUILD)/endpoint-multipath-listener.c $(BUILD)/endpoint-multipath-inbound-nat.c: $(BUILD)/%.c: tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(RELAY_QUIC_SOURCES) src/endpoint_multipath.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(@:.c=-stage)/src/"
 	cp "tests/$(subst -,_,$*).bend" tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend $(filter tests/endpoint_validation.bend,$^) "$(@:.c=-stage)/tests/"
@@ -566,7 +569,7 @@ $(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-options.c $(BUILD)/end
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) "tests/$(subst -,_,$*).bend" -o "$(abspath $@)"
 
 # Build the endpoint integration fixture without compiler optimizations.
-$(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
+$(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
 	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)

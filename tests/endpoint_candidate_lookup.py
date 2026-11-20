@@ -192,7 +192,7 @@ def require_exchange(peer):
         raise AssertionError(f"Iroh rejected the ticket exchange: {transcript!r}")
 
 
-def check_supplied_addresses(client, ticket, family, peer, both_live=False):
+def check_supplied_addresses(client, ticket, family, peer, both_live=False, extra_args=()):
     release = Event()
     with ExitStack() as stack:
         first_packets, second_packets = [], []
@@ -205,7 +205,7 @@ def check_supplied_addresses(client, ticket, family, peer, both_live=False):
         second_ticket, second = stack.enter_context(supplied_route(ticket, family, release, second_packets))
         _, (_, second_port) = direct_ticket(second_ticket, family, 1)
         changed = ip_ticket(ticket, family, [first_port, second_port])
-        with subprocess.Popen([client, "dial-ticket", changed, "direct"], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as bend:
+        with subprocess.Popen([client, "dial-ticket", changed, "direct", *extra_args], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as bend:
             try:
                 if both_live:
                     if not first.wait(1):

@@ -1,5 +1,7 @@
 import Base
 import ./endpoint.bend as Endpoint
+import ./endpoint_ticket.bend as Tickets
+import ./quic_handshake_routes.bend as Race
 import ./quic_multipath.bend as Quic
 import ./quic_multipath_nat.bend as Nat
 import ./quic_nat.bend as NatWire
@@ -259,17 +261,47 @@ def step_nat_relay(owner: NatRelayConnection()) -> IO(NatRelayConnection() & Nat
     result : Nat.Connection() & Nat.NewPathResult() <- Nat.step(connection)
     return keep_nat_relay(result,relay)
 
+def shared_handshake() -> Race.Backend<Quic.MultipathConnection>:
+  Race.Backend{Quic.start_multipath_route_handshake,Quic.open_multipath_handshake_socket,
+    Quic.read_multipath_handshake_socket,Quic.multipath_handshake_output,Quic.adopt_multipath_handshake_socket,
+    Quic.close_multipath,"QUIC multipath handshake timed out"}
+
+def connect_with_lookup(plan: Endpoint.Routes, +identity: Endpoint.Identity, timeouts: Endpoint.Timeouts,
+    sources: List<&2,Endpoint.AddressLookup>) -> IO(ConnectResult()):
+  Endpoint.before_connect(Connection(),identity,u => Endpoint.start_dial_with(~Quic.MultipathConnection,
+    ~shared_handshake(),plan,identity,timeouts,sources))
+
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  Endpoint.dial_plan(~Quic.MultipathConnection,~dial_address,routes,identity,timeouts)
+  connect_with_lookup(routes,identity,timeouts,[])
 
-def lookup_and_connect(+identity: Endpoint.Identity, resolver: Endpoint.DnsSource, timeouts: Endpoint.Timeouts)
+def connect_ticket(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Endpoint.Timeouts) -> IO(ConnectResult()):
+  Endpoint.with_ticket(~Connection(),~connect_routes,text,seed,alpn,timeouts)
+
+def connect_ticket_with_lookup(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Endpoint.Timeouts,
+    sources: List<&2,Endpoint.AddressLookup>) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    ticket : Maybe<&2,Tickets.EndpointTicket> <- Tickets.decode(text)
+    Endpoint.ticket_action(Connection(),ticket,seed,alpn,plan => identity => connect_with_lookup(plan,identity,timeouts,sources))
+
+def lookup_and_connect(identity: Endpoint.Identity, resolver: Endpoint.DnsSource, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  Endpoint.resolve_and_connect(~Quic.MultipathConnection,~dial_address,identity,timeouts,key => Endpoint.lookup_routes(key,resolver))
+  connect_with_lookup(Endpoint.DialRoutes{[],[]},identity,timeouts,[Endpoint.DnsLookup{resolver}])
+
+def dial_verified(result: Result<&1,&1,U32 & String,Endpoint.Routes>, identity: Endpoint.Identity,
+    timeouts: Endpoint.Timeouts) -> IO(ConnectResult()):
+  match result:
+    case Done{plan}:
+      Endpoint.start_dial_with(~Quic.MultipathConnection,~shared_handshake(),plan,identity,timeouts,[])
+    case Fail{error}:
+      IO.pure(ConnectResult(),Fail{error})
 
 def verify_and_connect(+identity: Endpoint.Identity, packet: List<&2,U32>, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):
-  Endpoint.resolve_and_connect(~Quic.MultipathConnection,~dial_address,identity,timeouts,key => Endpoint.verify_routes(key,packet))
+  Endpoint.before_connect(Connection(),identity,u =>
+    do IO<ConnectResult()>:
+      result : Result<&1,&1,U32 & String,Endpoint.Routes> <- Endpoint.verify_routes(identity,packet)
+      dial_verified(result,identity,timeouts))
 
 def keep_relay(-R: Type, outcome: Quic.MultipathConnection & R, bridge: Maybe<&1,Relay.Bridge>) -> Connection() & R:
   (conn,value) = outcome
@@ -361,6 +393,23 @@ def dial_relay_offer(address: Endpoint.Address, identity: Endpoint.Identity, tim
   Endpoint.PeerKeys{seed,peer,alpn} = identity
   Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,routed_nat_limit(),U32.to_nat(timeout))
 
+def start_routed_offer(encoded: Maybe<&2,Race.Packet()>, host: String, port: U32, seed: Race.Packet(), peer: Race.Packet(),
+    alpn: Race.Packet()) -> Race.Started(Quic.MultipathConnection):
+  match encoded:
+    case Some{parameter}:
+      Quic.start_multipath_nat_route_handshake(host,port,seed,peer,alpn,parameter)
+    case None{}:
+      IO.pure(Result<&1,&1,U32 & String,Quic.MultipathConnection & Socket>,Fail{(22,"invalid NAT traversal limit")})
+
+def start_routed_handshake(host: String, port: U32, seed: Race.Packet(), peer: Race.Packet(), alpn: Race.Packet())
+    -> Race.Started(Quic.MultipathConnection):
+  start_routed_offer(NatWire.encode_limit(routed_nat_limit()),host,port,seed,peer,alpn)
+
+def routed_handshake() -> Race.Backend<Quic.MultipathConnection>:
+  Race.Backend{start_routed_handshake,Quic.open_multipath_handshake_socket,
+    Quic.read_multipath_handshake_socket,Quic.multipath_handshake_output,Quic.adopt_multipath_handshake_socket,
+    Quic.close_multipath,"QUIC multipath handshake timed out"}
+
 def configure_relay_qad(conn: Quic.MultipathConnection, +url: String) -> IO(Quic.MultipathConnection):
   # Iroh publishes QAD on its default QUIC port, independent of the WS port.
   Quic.configure_routed_qad(conn,qad_host(url,String.starts_with(url,"wss://")),7842)
@@ -390,7 +439,8 @@ def connect_routed(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +time
     -> IO(RoutedResult()):
   Endpoint.DialRoutes{candidates,urls} = routes
   do IO<RoutedResult()>:
-    result : ConnectResult() <- Endpoint.dial_plan_with(~Quic.MultipathConnection,~dial_address,~dial_relay_offer,routes,identity,timeouts)
+    result : ConnectResult() <- Endpoint.before_connect(Connection(),identity,u =>
+      Endpoint.start_dial_with(~Quic.MultipathConnection,~routed_handshake(),routes,identity,timeouts,[]))
     now : U32 <- Quic.multipath_millis()
     setup_routed(result,candidates,urls,identity,timeouts,now)
 
