@@ -697,6 +697,18 @@ at `ea3bbb6ab41fa23816d7f9e3220ab77d444435b2`. The reference implementations
 for the wire tests are the upstream [relay message codec](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/relay.rs)
 and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-relay/src/protos/handshake.rs).
 
+Full drop-in compatibility remains open. Three known differences affect applications.
+
+- A ticket with missing or stale routes uses the configured DNS and Pkarr services
+  in order. Upstream queries its registered address lookup services concurrently
+  and delivers results as they arrive. [Upstream address lookup](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/address_lookup.rs#L544-L552)
+- The ticket codec preserves the supplied UTF-8 relay URL. Applications currently
+  supply its canonical form. Matching upstream parsing and normalization of other
+  URL spellings remains open. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
+- A listener can advertise its initial observed UDP address. Refreshing that
+  advertisement after a live listener's NAT mapping changes is parked. The
+  outbound routed connection has a separate passing address-refresh test below.
+
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
 | Endpoint tickets | Run `make check-endpoint-ticket` for the upstream wire vector. `make check-endpoint-ticket-dial UPSTREAM_ENDPOINT_TICKET=/path/to/listener` checks authenticated IPv4 and IPv6 stream and datagram exchanges and wrong-key rejection. Set `UPSTREAM_IROH_RELAY_URL` to a local Iroh relay's HTTP or HTTPS base URL to check direct preference, relay-only tickets, and fallback after a silent UDP address. `make check-endpoint-ticket-lookup` requires the local Iroh DNS and Pkarr server's `PKARR_URL` (including `/pkarr`) and `DISCOVERY_DNS_PORT`. Its `UPSTREAM_ENDPOINT_TICKET_LOOKUP` listener takes `listen` or `listen6` and a mode (`id-only`, `stale`, `direct` or `wrong-id`). It prints the ticket, the z-base-32 publication key, and the hex-encoded signed Pkarr relay payload on one line and serves the stream/datagram exchange. |
