@@ -8,7 +8,8 @@ type Action is Data:
   Flush{}
   FinalWrite{count: Nat}
   FinAck{}
-  PendingNotice{}
+  ResetAck{}
+  PendingNotice{message: String}
   Read{}
   SendDatagram{byte: U32}
   ReadDatagram{}
@@ -62,18 +63,24 @@ def scenarios() -> List<&2,Check>:
    Check{Stop{max},Complete{}},Check{Drop{},Complete{}},
    Check{SendDatagram{250},Complete{}},Check{ReadDatagram{},Byte{251}}]
 
-def finish_checks() -> List<&2,Check>:
-  [Check{Open{0},Handle{0}},Check{FinAck{},Flag{0}},Check{Write{31,0},Complete{}},Check{Flush{},Complete{}},
-   Check{ReadDatagram{},Byte{41}},Check{FinalWrite{8192n},Complete{}},Check{Flush{},Complete{}},
-   Check{FinAck{},Flag{0}},Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},
+def completion_checks(+query: Action, first: Action, second: Action, +after_send: Check, +notice: String) -> List<&2,Check>:
+  [Check{Open{0},Handle{0}},Check{query,Flag{0}},Check{Write{31,0},Complete{}},Check{Flush{},Complete{}},
+   Check{ReadDatagram{},Byte{41}},Check{first,Complete{}},after_send,
+   Check{query,Flag{0}},Check{PendingNotice{notice},Complete{}},Check{query,Flag{1}},
    Check{Reset{Wire.Var{0,1}},Error{32,""}},Check{SendDatagram{42},Complete{}},
-   Check{Read{},Byte{33}},Check{Read{},Fin{}},Check{FinAck{},Flag{1}},Check{Drop{},Complete{}},
-   Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},Check{FinAck{},Flag{0}},
-   Check{FinalWrite{0n},Complete{}},Check{Flush{},Complete{}},Check{FinAck{},Flag{0}},
-   Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}},
+   Check{Read{},Byte{33}},Check{Read{},Fin{}},Check{query,Flag{1}},Check{Drop{},Complete{}},
+   Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},Check{query,Flag{0}},
+   Check{second,Complete{}},after_send,Check{query,Flag{0}},
+   Check{PendingNotice{notice},Complete{}},Check{query,Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}},
    Check{SendDatagram{52},Complete{}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{53}},
-   Check{Accept{1},Handle{0}},Check{FinAck{},Error{32,""}},Check{Read{},Byte{61}},
+   Check{Accept{1},Handle{0}},Check{query,Error{32,""}},Check{Read{},Byte{61}},
    Check{Read{},Fin{}},Check{Drop{},Complete{}},Check{SendDatagram{63},Complete{}},Check{ReadDatagram{},Byte{64}}]
+
+def finish_checks() -> List<&2,Check>:
+  completion_checks(FinAck{},FinalWrite{8192n},FinalWrite{0n},Check{Flush{},Complete{}},"FIN_PENDING")
+
+def reset_ack_checks() -> List<&2,Check>:
+  completion_checks(ResetAck{},Reset{Wire.Var{1073741823,4294967295}},Reset{Wire.Var{0,0}},Check{FinAck{},Error{32,""}},"RESET_PENDING")
 
 def Reply(-C: Type) -> Type:
   IO(C & State)

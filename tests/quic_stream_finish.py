@@ -8,7 +8,10 @@ from quic_multipath_early_listener import address
 from quic_rebind import process, read_address
 
 
-def check(sender, iroh, host, family, sender_listens, control_port=None):
+def check(sender, iroh, host, family, sender_listens, kind, control_port):
+    label = "FIN" if kind == "finish" else "RESET"
+    hold_marker = f"HOLD_{label}".encode()
+    pending_marker = f"{label}_PENDING".encode()
     mode = "listen6" if host == "::1" else "listen"
     with ExitStack() as stack:
         front = stack.enter_context(socket.socket(family, socket.SOCK_DGRAM))
@@ -19,8 +22,8 @@ def check(sender, iroh, host, family, sender_listens, control_port=None):
             listen = (sender, mode, "control")
             dial = (sender, "dial", proxy, "control")
         else:
-            listen = (sender, host, "0", "finish")
-            dial = (sender, host, str(port), "finish")
+            listen = (sender, host, "0", kind)
+            dial = (sender, host, str(port), kind)
         server = stack.enter_context(process(*(listen if sender_listens else (iroh, mode))))
         server_addr = (host, read_address(server))
         client = stack.enter_context(process(*((iroh, "dial", proxy) if sender_listens else dial)))
@@ -55,40 +58,41 @@ def check(sender, iroh, host, family, sender_listens, control_port=None):
                     line = channel.readline()
                     if not line:
                         events.unregister(channel)
-                    elif line.strip() == b"HOLD_FIN" and channel is reader.stdout:
+                    elif line.strip() == hold_marker and channel is reader.stdout:
                         if held or len(losses) == 2:
-                            raise AssertionError("unexpected FIN loss round")
+                            raise AssertionError(f"unexpected {label} loss round")
                         held = True
                         pending = False
                         losses.append(0)
                         reader.stdin.write(b"ARMED\n")
                         reader.stdin.flush()
-                    elif line.strip() == b"FIN_PENDING" and channel is writer.stdout:
+                    elif line.strip() == pending_marker and channel is writer.stdout:
                         if not held or pending:
-                            raise AssertionError("unexpected FIN acknowledgement report")
+                            raise AssertionError(f"unexpected {label} acknowledgement report")
                         pending = True
                     else:
                         print(line.decode().strip(), flush=True)
                 if held and pending and losses[-1]:
                     held = False
             if any(p.poll() not in (None, 0) for p in (server, client)):
-                raise RuntimeError(f"QUIC FIN peer exited with status {server.poll()}, {client.poll()}")
+                raise RuntimeError(f"QUIC {label} peer exited with status {server.poll()}, {client.poll()}")
             if all(p.poll() is not None for p in (server, client)) and len(events.get_map()) == 1:
                 break
         else:
-            raise TimeoutError(f"FIN exchange timed out, dropped packets {losses}, pending {pending}")
+            raise TimeoutError(f"{label} exchange timed out, dropped packets {losses}, pending {pending}")
 
         if len(losses) != 2 or not all(losses) or held:
-            raise AssertionError(f"two completed FIN loss rounds required, saw {losses}")
+            raise AssertionError(f"two completed {label} loss rounds required, saw {losses}")
         role = "listener" if sender_listens else "dialer"
-        print(f"PASS {role} on {host} waited for both FIN acknowledgements after packet loss {losses}", flush=True)
+        print(f"PASS {role} on {host} waited for both {label} acknowledgements after packet loss {losses}", flush=True)
 
 
 if __name__ == "__main__":
     sender, iroh, *options = sys.argv[1:]
+    kind = options.pop(0) if options and options[0] in ("finish", "reset-ack") else "finish"
     if options and (len(options) != 2 or options[0] != "control"):
-        sys.exit("usage: quic_stream_finish.py SENDER IROH [control PROXY_PORT]")
+        sys.exit("usage: quic_stream_finish.py SENDER IROH [finish|reset-ack] [control PROXY_PORT]")
     control_port = int(options[1]) if options else None
     for host, family in (("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)):
         for listener in (False, True):
-            check(sender, iroh, host, family, listener, control_port)
+            check(sender, iroh, host, family, listener, kind, control_port)

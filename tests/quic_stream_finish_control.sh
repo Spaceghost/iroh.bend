@@ -15,5 +15,5 @@ table inet iroh_stream_finish {
     }
 }
 RULES
-    exec python3 -B tests/quic_stream_finish.py "$1" "$1" control 24007
-' sh "$1"
+    exec python3 -B tests/quic_stream_finish.py "$1" "$1" "$2" control 24007
+' sh "$1" "${2:-finish}"

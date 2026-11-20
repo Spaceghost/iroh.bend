@@ -36,9 +36,13 @@ def perform(conn: Q.MultipathConnection, id: U32, action: Test.Action) -> Test.R
       do IO<Q.MultipathConnection & Test.State>:
         raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.multipath_stream_fin_acked(conn,id)
         Test.answer(Q.MultipathConnection,U32,raw,value => Test.Flag{value})
-    case Test.PendingNotice{}:
+    case Test.ResetAck{}:
       do IO<Q.MultipathConnection & Test.State>:
-        IO.print("FIN_PENDING")
+        raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.multipath_stream_reset_acked(conn,id)
+        Test.answer(Q.MultipathConnection,U32,raw,value => Test.Flag{value})
+    case Test.PendingNotice{message}:
+      do IO<Q.MultipathConnection & Test.State>:
+        IO.print(message)
         return (conn,Test.Complete{})
     case Test.Flush{}:
       IO.pure(Q.MultipathConnection & Test.State,(conn,Test.Complete{}))
@@ -112,6 +116,8 @@ def run(args: List<String>) -> IO(Unit):
       command(host,U32.read(port),Test.scenarios())
     case Con{_,Con{host,Con{port,Con{"finish",Nil{}}}}}:
       command(host,U32.read(port),Test.finish_checks())
+    case Con{_,Con{host,Con{port,Con{"reset-ack",Nil{}}}}}:
+      command(host,U32.read(port),Test.reset_ack_checks())
     case _:
       IO.die(Unit,1,"expected an IP address and UDP port")
 
