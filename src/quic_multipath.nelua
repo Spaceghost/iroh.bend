@@ -14,7 +14,6 @@
 require 'C.stdlib'
 require 'C.string'
 local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer, cnx_in_progress:pointer}
-local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64}
 local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
   initial_max_data:uint64,initial_max_stream_data_bidi_local:uint64,initial_max_stream_data_bidi_remote:uint64,
   initial_max_stream_data_uni:uint64,initial_max_streams_bidi:uint64,initial_max_streams_uni:uint64,
@@ -23,6 +22,12 @@ local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
 local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
 local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer}
 local packet_context_t <cimport,nodecl,codename 'picoquic_packet_context_t'> = @record{}
+local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{
+  unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64,pkt_ctx:packet_context_t
+}
+local probe_packet_t <cimport,nodecl,codename 'picoquic_packet_t'> = @record{
+  send_path:*path_t,send_time:uint64,offset:csize,ptype:cint,pc:cint,is_ack_eliciting:cuint,bytes:[1536]uint8
+}
 local crypto_context_t <cimport,nodecl,codename 'picoquic_crypto_context_t'> = @record{}
 local tree_t <cimport,nodecl,codename 'picosplay_tree_t'> = @record{}
 local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
@@ -140,6 +145,16 @@ local function real_decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:c
 local picoquic_epoch_1rtt: cint <cimport,nodecl>
 local PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR: uint64 <cimport,nodecl>
 local PICOQUIC_TRANSPORT_INTERNAL_ERROR: uint64 <cimport,nodecl>
+local function picoquic_create_packet(quic:*quic_t):*probe_packet_t <cimport,nodecl> end
+local function picoquic_recycle_packet(quic:*quic_t, packet:*probe_packet_t) <cimport,nodecl> end
+local function picoquic_predict_packet_header_length(cnx:*cnx_t, kind:cint, ctx:*packet_context_t):csize <cimport,nodecl> end
+local function picoquic_get_checksum_length(cnx:*cnx_t, epoch:cint):csize <cimport,nodecl> end
+local function picoquic_finalize_and_protect_packet(cnx:*cnx_t, packet:*probe_packet_t, status:cint,
+    length:csize, header:csize, checksum:csize, sent:*csize, bytes:*uint8, capacity:csize,
+    path:*path_t, clock:uint64, ack:cint) <cimport,nodecl> end
+local picoquic_packet_1rtt_protected: cint <cimport,nodecl>
+local picoquic_frame_type_path_challenge: uint8 <cimport,nodecl>
+local picoquic_frame_type_path_response: uint8 <cimport,nodecl>
 local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
 local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
     index:*cint):cint <cimport,nodecl> end
@@ -256,7 +271,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -303,6 +318,8 @@ local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
+local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
+local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
@@ -361,6 +378,9 @@ local HANDSHAKE_LIMIT: uint64 <comptime> = 10000000
 local DATAGRAM_QUEUE_LIMIT: uint32 <comptime> = 64
 local NAT_PARAMETER_SIZE: csize <comptime> = 10
 local NAT_INBOX_CAPACITY: csize <comptime> = 512
+local NAT_PROBE_CAPACITY: csize <comptime> = 255
+local NAT_PROBE_LIFETIME: uint64 <comptime> = 30000000
+local CHALLENGE_SIZE: csize <comptime> = 9
 local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
 local Listener = @record{
@@ -381,7 +401,11 @@ local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean,
 local PeerParameters = @record{bytes:*uint8, size:csize}
 local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8, nat_enabled:boolean}
 local NatFrame = @record{size:csize, bytes:[30]uint8}
-local NatInbox = @record{frames:[NAT_INBOX_CAPACITY]NatFrame, first:csize, count:csize}
+local NatProbe = @record{peer:storage_t, challenge:[CHALLENGE_SIZE]uint8, expires:uint64, answered:boolean}
+local NatInbox = @record{
+  frames:[NAT_INBOX_CAPACITY]NatFrame, first:csize, count:csize,
+  probes:[NAT_PROBE_CAPACITY]NatProbe
+}
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
   local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32,
@@ -1199,6 +1223,19 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   return on_event(cnx,id,bytes,size,kind,conn,stream_user)
 end
 
+local function match_nat_response(conn:*Connection, source:pointer, destination:pointer, frame:*uint8, now:uint64): csize
+  if source == nilptr or destination == nilptr or picoquic_compare_addr(destination,&conn.listener.local_addr) ~= 0 then return 0 end
+  local bytes = (@*[0]uint8)(frame)
+  for i = 0,<NAT_PROBE_CAPACITY do
+    local probe = &conn.nat_inbox.probes[i]
+    if probe.expires > now and picoquic_compare_addr(source,&probe.peer) == 0 and
+        C.memcmp(&bytes[1],&probe.challenge[1],CHALLENGE_SIZE - 1) == 0 then
+      return i + 1
+    end
+  end
+  return 0
+end
+
 local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize, node:*receive_node_t,
     epoch:cint, src:pointer, dst:pointer, pn:uint64, unallocated:cint, cid:*cid_t, now:uint64):cint
     <cexport,codename '__wrap_picoquic_decode_frames'>
@@ -1213,6 +1250,8 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
   local input = (@*[0]uint8)(bytes)
   local patch: *[0]uint8
   defer C.free(patch) end
+  local received: [NAT_PROBE_CAPACITY]boolean
+  local has_response: boolean
   local count: csize = 0
   local at: csize = 0
   while at < size do
@@ -1250,14 +1289,30 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
       if picoquic_skip_frame(&input[at],remaining,&consumed,&pure_ack) ~= 0 or consumed == 0 or consumed > remaining then
         break
       end
+      if input[at] == picoquic_frame_type_path_response and consumed == CHALLENGE_SIZE then
+        local match = match_nat_response(conn,src,dst,&input[at],now)
+        if match ~= 0 then
+          received[match - 1] = true
+          has_response = true
+        end
+      end
       at = at + consumed
     end
   end
-  if patch == nilptr then return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now) end
-  -- Pass a nil receiver node so Picoquic copies STREAM/CRYPTO bytes from
-  -- the temporary packet if it buffers any out-of-order data.
-  local result = real_decode_frames(cnx,path,&patch[0],size,nilptr,epoch,src,dst,pn,unallocated,cid,now)
-  if result == 0 then inbox.count = inbox.count + count end
+  -- The temporary packet cannot back an out-of-order data node.
+  local result: cint
+  if patch ~= nilptr then
+    result = real_decode_frames(cnx,path,&patch[0],size,nilptr,epoch,src,dst,pn,unallocated,cid,now)
+  else
+    result = real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
+  end
+  if result ~= 0 then return result end
+  inbox.count = inbox.count + count
+  if has_response then
+    for i = 0,<NAT_PROBE_CAPACITY do
+      if received[i] then inbox.probes[i].answered = true end
+    end
+  end
   return result
 end
 
@@ -1887,6 +1942,115 @@ local function probe_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],probe(e,find_connection(e,args[0]),args))
 end
 
+local function nat_address(e:Env, args:*[0]Term, conn:*Connection, output:*storage_t): boolean
+  local ip: [16]uint8
+  local length = bytes_from_list(e,args[1],&ip[0],16)
+  if args[2] == 0 or args[2] > 65535 then return false end
+  if conn.listener.local_addr.ss_family == AF_INET and length == 4 then
+    local v4 = (@*addr_t)(output)
+    v4.sin_family = (@uint16)(AF_INET)
+    v4.sin_port = htons((@uint16)(args[2]))
+    C.memcpy(&v4.sin_addr,&ip[0],4)
+    return true
+  end
+  if conn.listener.local_addr.ss_family ~= AF_INET6 then return false end
+  local v6 = (@*addr6_t)(output)
+  v6.sin6_family = (@uint16)(AF_INET6)
+  v6.sin6_port = htons((@uint16)(args[2]))
+  if length == 16 then
+    C.memcpy(&v6.sin6_addr,&ip[0],16)
+  elseif length == 4 then
+    local bytes = (@*[0]uint8)(&v6.sin6_addr)
+    bytes[10] = 255
+    bytes[11] = 255
+    C.memcpy(&bytes[12],&ip[0],4)
+  else
+    return false
+  end
+  return true
+end
+
+local function nat_probe(inbox:*NatInbox, peer:*storage_t, raw:*uint8, now:uint64): (*NatProbe, *NatProbe)
+  local available: *NatProbe
+  for i = 0,<NAT_PROBE_CAPACITY do
+    local probe = &inbox.probes[i]
+    if probe.expires <= now then
+      if available == nilptr then available = probe end
+    elseif picoquic_compare_addr(&probe.peer,peer) == 0 and C.memcmp(&probe.challenge[0],raw,CHALLENGE_SIZE) == 0 then
+      return probe,available
+    end
+  end
+  return nilptr,available
+end
+
+local function send_nat_probe(conn:*Connection, peer:*storage_t, frame:*uint8, now:uint64): uint32
+  local cnx = conn.cnx
+  local path = ((@*[0]*path_t)(cnx.path))[0]
+  local length = picoquic_predict_packet_header_length(cnx,picoquic_packet_1rtt_protected,&path.pkt_ctx)
+  local checksum = picoquic_get_checksum_length(cnx,picoquic_epoch_1rtt)
+  local output: [IO_CAPACITY]uint8
+  if length + CHALLENGE_SIZE + checksum > #output then return EMSGSIZE end
+  local packet = picoquic_create_packet(conn.quic)
+  if packet == nilptr then return ENOMEM end
+  packet.ptype = picoquic_packet_1rtt_protected
+  packet.pc = picoquic_packet_context_application
+  packet.offset = length
+  packet.send_path = path
+  packet.send_time = now
+  packet.is_ack_eliciting = 1
+  local payload = (@*[0]uint8)(&packet.bytes[0])
+  C.memcpy(&payload[length],frame,CHALLENGE_SIZE)
+  local sent: csize
+  -- Consume the active path's packet number and apply its 1-RTT protection.
+  -- No tuple is registered and the short probe does not validate a QUIC path.
+  picoquic_finalize_and_protect_packet(cnx,packet,0,length + CHALLENGE_SIZE,length,checksum,
+    &sent,&output[0],#output,path,now,1)
+  if sent == 0 then
+    picoquic_recycle_packet(conn.quic,packet)
+    return EIO
+  end
+  local written = sendto(conn.listener.fd,&output[0],sent,0,peer,address_size(peer))
+  if written < 0 then return (@uint32)(errno) end
+  return written == (@isize)(sent) and 0 or EIO
+end
+
+local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready or conn.nat_inbox == nilptr then return io_fail(e,ENOTSUP,'NAT traversal was not negotiated') end
+  local peer: storage_t
+  local raw: [CHALLENGE_SIZE]uint8
+  if not nat_address(e,args,conn,&peer) or
+      bytes_from_list(e,args[3],&raw[0],CHALLENGE_SIZE) ~= CHALLENGE_SIZE or raw[0] ~= picoquic_frame_type_path_challenge then
+    return io_fail(e,EINVAL,'invalid NAT traversal challenge')
+  end
+  local now = picoquic_current_time()
+  local found, available = nat_probe(conn.nat_inbox,&peer,&raw[0],now)
+  if not send_probe then
+    if found == nilptr or not found.answered then return io_done(e,0) end
+    found.expires = 0
+    return io_done(e,1)
+  end
+  if found ~= nilptr then return io_done(e,1) end
+  if available == nilptr then return io_fail(e,ENOBUFS,'too many outstanding NAT challenges') end
+  local error = send_nat_probe(conn,&peer,&raw[0],now)
+  if error == EAGAIN or error == EINTR then return io_done(e,0) end
+  if error ~= 0 then return io_fail(e,error,'could not send NAT traversal challenge') end
+  available.peer = peer
+  C.memcpy(&available.challenge[0],&raw[0],CHALLENGE_SIZE)
+  available.expires = now + NAT_PROBE_LIFETIME
+  available.answered = false
+  return io_done(e,1)
+end
+
+local function send_nat_challenge_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],nat_challenge_effect(e,args,true))
+end
+
+local function take_nat_response_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],nat_challenge_effect(e,args,false))
+end
+
 local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
@@ -2343,6 +2507,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
   if iroh_mp_bind_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer,bind_nat_offer_run) end
   if iroh_mp_read_multipath_nat_frame ~= 0xffffffff then io_eff(iroh_mp_read_multipath_nat_frame,read_nat_frame_run) end
+  if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
+  if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end

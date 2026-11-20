@@ -175,13 +175,83 @@ def exchange_both(peers: Quic.MultipathConnection & Quic.MultipathConnection) ->
     exchange(second,66,33,44)
     IO.print("PASS Bend served both connections after closing the multipath listener")
 
+def check_nonce_reuse(pair: Quic.MultipathConnection & U32, port: U32) -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,0):
+      do IO<Quic.MultipathConnection>:
+        IO.print(String.append("PASS Iroh returned an authenticated PATH_RESPONSE from port ",U32.show(port)))
+        return conn
+    case (conn,_):
+      Fixture.reject(Quic.MultipathConnection,conn,1,"duplicate NAT response reported")
+
+def response_once(conn: Quic.MultipathConnection, ip: List<&2,U32>, +port: U32, challenge: List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+      Quic.take_multipath_nat_response(conn,ip,port,challenge)
+    pair : Quic.MultipathConnection & U32 <- Fixture.ok(U32,result)
+    check_nonce_reuse(pair,port)
+
+def response_result(pair: Quic.MultipathConnection & U32,
+    found: Quic.MultipathConnection -> IO(Quic.MultipathConnection),
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,1):
+      found(conn)
+    case (conn,_):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def wait_nat_response(fuel: Nat, conn: Quic.MultipathConnection, +ip: List<&2,U32>, +port: U32, +challenge: List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"Iroh did not return a matching PATH_RESPONSE")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        stepped : Quic.MultipathConnection <- Fixture.step(conn)
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+          Quic.take_multipath_nat_response(stepped,ip,port,challenge)
+        pair : Quic.MultipathConnection & U32 <- Fixture.ok(U32,result)
+        response_result(pair,ready => response_once(ready,ip,port,challenge),
+          next => wait_nat_response(left,next,ip,port,challenge))
+
+def queue_probe(fuel: Nat, conn: Quic.MultipathConnection, +ip: List<&2,U32>, +port: U32, +challenge: List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      Fixture.reject(Quic.MultipathConnection,conn,1,"could not queue the NAT probe")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+          Quic.send_multipath_nat_challenge(conn,ip,port,challenge)
+        pair : Quic.MultipathConnection & U32 <- Fixture.ok(U32,result)
+        response_result(pair,sent => wait_nat_response(4000n,sent,ip,port,challenge),
+          next => queue_probe(left,next,ip,port,challenge))
+
+def challenge_address(conn: Quic.MultipathConnection, ip: NatWire.Address, port: U32, packet: List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  match ip:
+    case NatWire.IPv4{bytes}:
+      queue_probe(1000n,conn,bytes,port,packet)
+    case NatWire.IPv6{bytes}:
+      queue_probe(1000n,conn,bytes,port,packet)
+
+def challenge_candidate(conn: Quic.MultipathConnection, target: NatState.Candidate) -> IO(Quic.MultipathConnection):
+  NatState.Socket{ip,port} = target
+  do IO<Quic.MultipathConnection>:
+    high : U32 <- IO.try(U32,IO.random_u32())
+    low : U32 <- IO.try(U32,IO.random_u32())
+    challenge_address(conn,NatState.canonical(ip),port,Con{26,NatWire.append_word(high,NatWire.append_word(low,[]))})
+
 def server_decision(conn: Quic.MultipathConnection, event: NatState.Transition)
     -> IO(Quic.MultipathConnection):
   match event:
-    case NatState.Received{_,NatState.Probe{_,_,_}}:
+    case NatState.Received{_,NatState.Probe{_,target,_}}:
       do IO<Quic.MultipathConnection>:
         IO.print("PASS Bend decoded Iroh's authenticated REACH_OUT and selected a probe target")
-        return conn
+        challenge_candidate(conn,target)
     case _:
       Fixture.reject(Quic.MultipathConnection,conn,1,"expected a NAT probe target")
 
@@ -220,8 +290,7 @@ def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mod
     case (left,right) 6:
       do IO<Unit>:
         first : Quic.MultipathConnection <- wait_nat_frame(6000n,left)
-        second : Quic.MultipathConnection <- wait_nat_frame(6000n,right)
-        exchange_both((first,second))
+        exchange_both((first,right))
     case active _:
       exchange_both(active)
 
