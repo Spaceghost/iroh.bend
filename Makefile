@@ -478,11 +478,12 @@ check-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-endpoint-multipath-inbo
 
 .PHONY: check-endpoint-multipath-inbound-failback
 UPSTREAM_INBOUND_FAILBACK_RELAY ?=
+INBOUND_FAILBACK_FAULT ?= drop
 INBOUND_FAILBACK_SCHEME ?= ws
 INBOUND_FAILBACK_RELAY_CONFIG ?=
 check-endpoint-multipath-inbound-failback: $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat
 	@test -x "$(UPSTREAM_INBOUND_NAT)" && test -x "$(UPSTREAM_INBOUND_FAILBACK_RELAY)" || { echo 'Set UPSTREAM_INBOUND_NAT and UPSTREAM_INBOUND_FAILBACK_RELAY to the Iroh fixtures.' >&2; exit 2; }
-	python3 -B tests/endpoint_multipath_inbound_failback.py "$<" "$(UPSTREAM_INBOUND_NAT)" "$(UPSTREAM_INBOUND_FAILBACK_RELAY)" "$(INBOUND_FAILBACK_SCHEME)" "$(INBOUND_FAILBACK_RELAY_CONFIG)"
+	python3 -B tests/endpoint_multipath_inbound_failback.py "$<" "$(UPSTREAM_INBOUND_NAT)" "$(UPSTREAM_INBOUND_FAILBACK_RELAY)" "$(INBOUND_FAILBACK_SCHEME)" "$(INBOUND_FAILBACK_RELAY_CONFIG)" "$(INBOUND_FAILBACK_FAULT)"
 
 $(BUILD)/endpoint-multipath-inbound-nat.c: tests/endpoint_multipath_inbound_nat.bend tests/quic_multipath_listener.bend
 $(BUILD)/endpoint-multipath-listener.c: tests/endpoint_multipath_listener.bend tests/quic_multipath_listener.bend

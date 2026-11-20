@@ -259,6 +259,9 @@ local PICOQUIC_ERROR_PATH_NOT_READY: cint <cimport,nodecl>
 local errno: cint <cimport,nodecl>
 local EAGAIN: cint <cimport,nodecl>
 local EINTR: cint <cimport,nodecl>
+local EPERM: cint <cimport,nodecl>
+local EADDRNOTAVAIL: cint <cimport,nodecl>
+local ENETDOWN: cint <cimport,nodecl>
 local ECONNREFUSED: cint <cimport,nodecl>
 local ENETUNREACH: cint <cimport,nodecl>
 local EHOSTUNREACH: cint <cimport,nodecl>
@@ -2191,6 +2194,11 @@ local function send_listener(listener:*Listener, peer:*storage_t, source:*storag
   return (@isize)(sent)
 end
 
+local function local_path_error(conn:*Connection, code:cint):boolean
+  return conn.ready and conn.cnx.is_multipath_enabled ~= 0 and conn.cnx.nb_paths > 1 and
+    (code == EPERM or code == EACCES or code == EADDRNOTAVAIL or code == ENETDOWN)
+end
+
 local function flush_output(conn: *Connection): uint32
   if conn.output_size == 0 then return 0 end
   local path = conn.output_path
@@ -2208,7 +2216,10 @@ local function flush_output(conn: *Connection): uint32
   else
     sent = send(path.fd,&conn.output[0],conn.output_size,0)
   end
-  if sent == (@isize)(conn.output_size) or (sent < 0 and socket_unreachable(errno)) then
+  -- The frame is already queued in Picoquic for loss detection. Clearing
+  -- the staged packet lets QUIC retransmit its stream bytes on another path.
+  if sent == (@isize)(conn.output_size) or
+      (sent < 0 and (socket_unreachable(errno) or local_path_error(conn,errno))) then
     conn.output_size = 0
     return 0
   end

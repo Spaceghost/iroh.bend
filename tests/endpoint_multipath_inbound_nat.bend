@@ -146,7 +146,7 @@ def run_bound(bound: Endpoint.NatRelayedListener() & U32, ip: Wire.Address) -> I
   (owner,+port) = bound
   do IO<Unit>:
     IO.print(String.append("inbound NAT listener ready ",U32.show(port)))
-    result : Endpoint.NatRelayedListener() & Nat.ListenerConnection() <- accept(12000n,owner)
+    result : Endpoint.NatRelayedListener() & Nat.ListenerConnection() <- accept(30000n,owner)
     connected(result,State.Socket{ip,port})
 
 def listen(url: String, ip: Wire.Address) -> IO(Unit):
