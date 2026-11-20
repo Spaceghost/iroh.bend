@@ -198,6 +198,7 @@ exercise_disconnect() {
 }
 
 start ws
+python3 -B tests/relay_server_http.py "http://127.0.0.1:$port"
 python3 tests/relay_server_auth.py "$port"
 python3 tests/relay_client_poll.py "$client"
 exercise ws
@@ -218,6 +219,7 @@ printf '%s\n' 'basicConstraints=critical,CA:FALSE' 'extendedKeyUsage=serverAuth'
 openssl x509 -req -in "$scratch/leaf.csr" -CA "$scratch/ca.pem" -CAkey "$scratch/ca.key" \
     -CAcreateserial -days 1 -extfile "$scratch/leaf.ext" -out "$scratch/cert.pem" 2>> "$scratch/openssl.log"
 start wss "$scratch/cert.pem" "$scratch/key.pem"
+python3 -B tests/relay_server_http.py "https://127.0.0.1:$port" "$scratch/ca.pem"
 untrusted=0
 timeout 8 "$client" "wss://127.0.0.1:$port/relay" 2> "$scratch/untrusted.log" || untrusted=$?
 if [ "$untrusted" -eq 0 ] || [ "$untrusted" -eq 124 ] ||

@@ -99,6 +99,7 @@ local LWS_CALLBACK_RECEIVE: cint <cimport,nodecl>
 local LWS_CALLBACK_CLOSED: cint <cimport,nodecl>
 local LWS_CALLBACK_SERVER_WRITEABLE: cint <cimport,nodecl>
 local LWS_CALLBACK_HTTP: cint <cimport,nodecl>
+local LWS_CALLBACK_HTTP_WRITEABLE: cint <cimport,nodecl>
 local SSL <cimport,nodecl> = @record{}
 local function lws_get_ssl(wsi: *lws): *SSL <cimport,nodecl> end
 local function SSL_export_keying_material(ssl: *SSL, out: *cuchar, len: csize,
@@ -110,6 +111,7 @@ local WSI_TOKEN_COUNT: cint <cimport,nodecl>
 local WSI_TOKEN_HTTP_AUTHORIZATION: cint <cimport,nodecl>
 local WSI_TOKEN_HTTP_URI_ARGS: cint <cimport,nodecl>
 local LWS_WRITE_BINARY: cint <cimport,nodecl>
+local LWS_WRITE_HTTP_FINAL: cint <cimport,nodecl>
 local LWS_PRE: csize <cimport,nodecl>
 local LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT: uint64 <cimport,nodecl>
 local PENDING_TIMEOUT_USER_OK: cint <cimport,nodecl>
@@ -138,7 +140,12 @@ local function lws_write(wsi: *lws, bytes: *cuchar, size: csize, kind: cint): ci
 local function lws_cancel_service(ctx: *lws_context) <cimport,nodecl> end
 local function lws_service(ctx: *lws_context, timeout: cint): cint <cimport,nodecl> end
 local function lws_set_timeout(wsi: *lws, reason: cint, seconds: cint) <cimport,nodecl> end
-local function lws_return_http_status(wsi: *lws, code: cuint, text: cstring): cint <cimport,nodecl> end
+local function lws_add_http_header_status(wsi: *lws, code: cuint, p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
+local function lws_add_http_header_content_length(wsi: *lws, len: uint64, p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
+local function lws_add_http_header_by_name(wsi: *lws, name: *cuchar, value: *cuchar, len: cint,
+    p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
+local function lws_finalize_write_http_header(wsi: *lws, start: *cuchar, p: **cuchar, stop: *cuchar): cint <cimport,nodecl> end
+local function lws_http_transaction_completed(wsi: *lws): cint <cimport,nodecl> end
 
 local MAX_FRAME <comptime> = 65544
 local MAX_PEERS <comptime> = 128
@@ -155,7 +162,8 @@ local Peer = @record{
   metered: boolean, rx_held: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer, headers: pointer,
-  body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer
+  body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer,
+  http_body: cstring
 }
 local Event = @record{next: pointer, tag: uint32, id: uint32, version: uint32, body: cstring, size: csize}
 local Server = @record{
@@ -413,11 +421,93 @@ local function capture_request(peer: *Peer, ws: *lws)
   if not ok then clear_request(peer) end
 end
 
+local function http_header(ws: *lws, name: cstring, value: cstring, p: **cuchar, stop: *cuchar): cint
+  return lws_add_http_header_by_name(ws,(@*cuchar)(name),(@*cuchar)(value),(@cint)(C.strlen(value)),p,stop)
+end
+
+local function portal_challenge(ws: *lws, response: cstring): boolean
+  local challenge: [64]cchar
+  local size = lws_hdr_custom_copy(ws,(@cstring)(&challenge[0]),64,'x-iroh-challenge:',17)
+  if size < 1 then return false end
+  for i = 0,<size do
+    local ch = challenge[i]
+    if not ((ch >= 48 and ch <= 57) or (ch >= 65 and ch <= 90) or
+        (ch >= 97 and ch <= 122) or ch == 45 or ch == 46 or ch == 95) then return false end
+  end
+  C.memcpy(response,(@cstring)('response '),9)
+  local bytes = (@*[0]cchar)(response)
+  C.memcpy(&bytes[9],&challenge[0],(@csize)(size + 1))
+  return true
+end
+
+local function http_response(ws: *lws, peer: *Peer): cint
+  local path: [32]cchar
+  local uri = (@cstring)(&path[0])
+  local status: cuint = 404
+  local body: cstring = 'Not Found'
+  local content_type: cstring
+  local probe = false
+  if lws_hdr_copy(ws,uri,32,WSI_TOKEN_GET_URI) >= 0 then
+    if C.strcmp(uri,'/ping') == 0 then
+      status = 200
+      body = ''
+      probe = true
+    elseif C.strcmp(uri,'/generate_204') == 0 and lws_get_ssl(ws) == nilptr then
+      status = 204
+      body = ''
+    elseif C.strcmp(uri,'/healthz') == 0 then
+      status = 200
+      body = '{"status":"ok","version":"iroh.bend","git_hash":"unknown"}'
+      content_type = 'application/json'
+    elseif C.strcmp(uri,'/robots.txt') == 0 then
+      status = 200
+      body = 'User-agent: *\nDisallow: /\n'
+    elseif C.strcmp(uri,'/') == 0 or C.strcmp(uri,'/index.html') == 0 then
+      status = 200
+      body = '<html><body><h1>Iroh Relay</h1><p><a href="https://iroh.computer/">Iroh</a></p></body></html>'
+      content_type = 'text/html'
+    end
+  end
+  local buffer: [1024]cuchar
+  local start = &buffer[LWS_PRE]
+  local p = start
+  local stop = &buffer[1023]
+  if lws_add_http_header_status(ws,status,&p,stop) ~= 0 or
+      http_header(ws,'strict-transport-security:','max-age=63072000; includeSubDomains',&p,stop) ~= 0 or
+      http_header(ws,'content-security-policy:',"default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",&p,stop) ~= 0 or
+      (content_type ~= nilptr and http_header(ws,'content-type:',content_type,&p,stop) ~= 0) or
+      (probe and http_header(ws,'access-control-allow-origin:','*',&p,stop) ~= 0) or
+      (status ~= 204 and lws_add_http_header_content_length(ws,C.strlen(body),&p,stop) ~= 0) then return -1 end
+  if status == 204 then
+    local response: [73]cchar
+    local value = (@cstring)(&response[0])
+    if portal_challenge(ws,value) and http_header(ws,'x-iroh-response:',value,&p,stop) ~= 0 then return -1 end
+  end
+  if lws_finalize_write_http_header(ws,start,&p,stop) ~= 0 then return -1 end
+  if C.strlen(body) == 0 then return -lws_http_transaction_completed(ws) end
+  peer.http_body = body
+  lws_callback_on_writable(ws)
+  return 0
+end
+
+local function http_write(ws: *lws, peer: *Peer): cint
+  if peer == nilptr or peer.http_body == nilptr then return 0 end
+  local len = C.strlen(peer.http_body)
+  local buffer: [128]cuchar
+  if len + LWS_PRE > 128 then return -1 end
+  local start = &buffer[LWS_PRE]
+  C.memcpy(start,peer.http_body,len)
+  peer.http_body = nilptr
+  if lws_write(ws,start,len,LWS_WRITE_HTTP_FINAL) < (@cint)(len) then return -1 end
+  return -lws_http_transaction_completed(ws)
+end
+
 local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, len: csize): cint
   if reason == LWS_CALLBACK_HTTP then
-    lws_return_http_status(ws,404,nilptr)
-    return -1
+    if user == nilptr then return -1 end
+    return http_response(ws,(@*Peer)(user))
   end
+  if reason == LWS_CALLBACK_HTTP_WRITEABLE then return http_write(ws,(@*Peer)(user)) end
   if reason == LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION then
     local uri: [24]cchar
     if lws_hdr_copy(ws,(@cstring)(&uri[0]),24,WSI_TOKEN_GET_URI) < 0 or
