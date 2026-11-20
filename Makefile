@@ -332,7 +332,7 @@ $(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 .PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-quic-multipath-early-streams check-endpoint-multipath
 .PHONY: check-quic-multipath-early-uni
-.PHONY: check-endpoint-multipath-recovery check-endpoint-multipath-restore-direct check-endpoint-multipath-nat
+.PHONY: check-endpoint-multipath-recovery check-endpoint-multipath-restore-direct check-endpoint-multipath-nat check-endpoint-multipath-qad
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -366,6 +366,10 @@ UPSTREAM_QUIC_MULTIPATH ?=
 UPSTREAM_QUIC_MULTIPATH_DIAL ?=
 UPSTREAM_QUIC_MULTIPATH_SESSION ?=
 UPSTREAM_ENDPOINT_MULTIPATH ?=
+QAD_TEST_IP ?= 127.0.0.1
+QAD_TEST_PORT ?=
+QAD_TEST_TLS_NAME ?=
+QAD_TEST_CA_BUNDLE ?=
 PICOQUIC_FLAGS = -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include"
 PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--wrap=picoquic_decode_frames -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
 	"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
@@ -416,6 +420,11 @@ check-endpoint-multipath-restore-direct: $(BUILD)/iroh-bend-endpoint-multipath-r
 check-endpoint-multipath-nat: $(BUILD)/iroh-bend-endpoint-multipath-nat
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }
 	python3 -B tests/endpoint_multipath.py "$<" "$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --relay-nat
+
+check-endpoint-multipath-qad: $(BUILD)/iroh-bend-endpoint-multipath-nat
+	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }
+	python3 -B tests/endpoint_multipath.py "$<" "$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(RELAY_URL)" \
+		"$(UPSTREAM_IROH_RELAY_URL)" --relay-qad "$(QAD_TEST_IP)" "$(QAD_TEST_PORT)" "$(QAD_TEST_TLS_NAME)" "$(QAD_TEST_CA_BUNDLE)"
 
 $(BUILD)/endpoint-multipath-nat.c: tests/endpoint_multipath_nat.bend
 $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend

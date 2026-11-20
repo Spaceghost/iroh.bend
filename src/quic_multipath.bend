@@ -84,6 +84,15 @@ def bind_multipath_nat_source(conn: MultipathConnection, host: String, port: U32
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_multipath.c"
 
+# Query the relay's /iroh-qad/0 service on the same UDP socket used for probes.
+def start_multipath_qad(conn: MultipathConnection, ip: String, port: U32, tls_name: String, roots: String)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+def poll_multipath_qad(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>>):
+  import "./quic_multipath.c"
+
 def multipath_nat_local_candidate(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"

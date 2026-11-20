@@ -41,6 +41,26 @@ def check_relay_nat(client, fixture, host, mode, relay, peer_relay):
             raise RuntimeError(f"Iroh rejected the relay-to-NAT exchange on {host}")
 
 
+def check_relay_qad(client, fixture, host, mode, relay, peer_relay, port, name, ca):
+    with process(fixture, mode, peer_relay) as server:
+        read_address(server)
+        subprocess.run((client, host, relay, port, name, ca), timeout=28, check=True)
+        transcript, _ = server.communicate(timeout=5)
+        print(transcript.decode(), end="", flush=True)
+        if server.returncode:
+            raise RuntimeError(f"Iroh rejected the discovered UDP route on {host}")
+    for tls_name, roots, expected in (
+        ("invalid.iroh.example", ca, b"address discovery closed before an authenticated report"),
+        (name, ca + ".missing", b"could not start authenticated address discovery"),
+    ):
+        with process(fixture, mode, peer_relay) as server:
+            read_address(server)
+            rejected = subprocess.run((client, host, relay, port, tls_name, roots), timeout=25, capture_output=True)
+            if rejected.returncode == 0 or expected not in rejected.stderr:
+                raise RuntimeError(f"unexpected QAD authentication result on {host}: {rejected.stderr!r}")
+    print(f"PASS address discovery rejected the wrong TLS name and missing trust roots on {host}", flush=True)
+
+
 def check_routed(client, fixture, host, mode, family, relay, peer_relay):
     with ExitStack() as stack:
         server = stack.enter_context(process(fixture, mode, peer_relay))
@@ -155,14 +175,22 @@ if __name__ == "__main__":
     restore = flags == ["--restore-direct"]
     recovery = restore or flags == ["--recovery"]
     relay_nat = flags == ["--relay-nat"]
+    relay_qad = len(flags) == 5 and flags[0] == "--relay-qad"
+    if relay_qad and (flags[1] not in ("127.0.0.1", "::1") or not all(flags[2:])):
+        raise SystemExit("Set QAD_TEST_IP, QAD_TEST_PORT, QAD_TEST_TLS_NAME and QAD_TEST_CA_BUNDLE")
     if bool(relay) != bool(peer_relay):
         raise SystemExit("Set both RELAY_URL and UPSTREAM_IROH_RELAY_URL for relay cases")
-    if (recovery or relay_nat) and not relay:
+    if (recovery or relay_nat or relay_qad) and not relay:
         raise SystemExit("Relay tests require RELAY_URL and UPSTREAM_IROH_RELAY_URL")
     for host, mode, family in (
         ("127.0.0.1", "listen", socket.AF_INET),
         ("::1", "listen6", socket.AF_INET6),
     ):
+        if relay_qad:
+            _, local_ip, port, name, ca = flags
+            if host == local_ip:
+                check_relay_qad(client, fixture, host, mode, relay, peer_relay, port, name, ca)
+            continue
         if relay_nat:
             check_relay_nat(client, fixture, host, mode, relay, peer_relay)
             continue

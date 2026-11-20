@@ -31,8 +31,18 @@ def NatRelayConnection() -> Type:
 def NatRelayResult() -> Type:
   Endpoint.TransportResult(Nat.Connection())
 
+def observe_nat_relay(outcome: Nat.ConnectResult(), relay: Relay.Bridge, discovery: Maybe<&2,Nat.DiscoveryOptions>)
+    -> IO(NatRelayResult()):
+  match outcome discovery:
+    case Done{(conn,state)} Some{server}:
+      do IO<NatRelayResult()>:
+        observed : Nat.ConnectResult() <- Nat.discover_address(conn,state,server)
+        Endpoint.attach_connection(Nat.Connection(),observed,relay)
+    case result _:
+      Endpoint.attach_connection(Nat.Connection(),result,relay)
+
 def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, identity: Endpoint.Identity,
-    source: Endpoint.Address, limit: U32, timeout: U32) -> IO(NatRelayResult()):
+    source: Endpoint.Address, limit: U32, timeout: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
   match result:
     case Done{(bridge,port)}:
       Endpoint.PeerKeys{seed,peer,alpn} = identity
@@ -40,18 +50,26 @@ def attach_nat_relay(result: Result<&1,&1,U32 & String,Relay.Bridge & U32>, iden
       do IO<NatRelayResult()>:
         connected : Nat.ConnectResult() <-
           Nat.connect_from("127.0.0.1",port,seed,peer,alpn,local_ip,local_port,limit,U32.to_nat(timeout))
-        Endpoint.attach_connection(Nat.Connection(),connected,bridge)
+        observe_nat_relay(connected,bridge,discovery)
     case Fail{error}:
       IO.pure(NatRelayResult(),Fail{error})
 
-# Bootstrap through an authenticated relay and probe with a separate UDP
-# socket. Supply a reachable local address and use port 0 for ephemeral bind.
-def connect_nat_relay(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
-    timeout: U32, limit: U32) -> IO(NatRelayResult()):
+def connect_nat_relay_using(url: String, +identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32, discovery: Maybe<&2,Nat.DiscoveryOptions>) -> IO(NatRelayResult()):
   Endpoint.PeerKeys{seed,peer,_} = identity
   do IO<NatRelayResult()>:
     result : Result<&1,&1,U32 & String,Relay.Bridge & U32> <- Relay.start(url,seed,peer,0)
-    attach_nat_relay(result,identity,source,limit,timeout)
+    attach_nat_relay(result,identity,source,limit,timeout,discovery)
+
+# Bootstrap through an authenticated relay and probe with a reachable UDP source.
+def connect_nat_relay(url: String, identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32) -> IO(NatRelayResult()):
+  connect_nat_relay_using(url,identity,source,timeout,limit,None{})
+
+# Discover the public mapping of the probe socket via a configured QUIC service.
+def connect_nat_relay_observed(url: String, identity: Endpoint.Identity, source: Endpoint.Address,
+    timeout: U32, limit: U32, discovery: Nat.DiscoveryOptions) -> IO(NatRelayResult()):
+  connect_nat_relay_using(url,identity,source,timeout,limit,Some{discovery})
 
 def keep_nat_relay(result: Nat.Connection() & Nat.NewPathResult(), relay: Maybe<&1,Relay.Bridge>)
     -> NatRelayConnection() & Nat.NewPathResult():

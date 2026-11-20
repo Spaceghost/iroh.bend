@@ -76,8 +76,23 @@ def relayed_nat(host: String, url: String) -> IO(Unit):
     exercise_relay(owner)
 
 
+def relayed_observed(+host: String, url: String, port: Maybe<&2,U32>, name: String, ca: String) -> IO(Unit):
+  match port:
+    case Some{qad_port}:
+      do IO<Unit>:
+        owner : Multipath.NatRelayConnection() <- IO.try(Multipath.NatRelayConnection(),
+          Multipath.connect_nat_relay_observed(url,
+            Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn()},
+            Endpoint.IpAddress{host,0},6000,64,Nat.DiscoveryServer{host,qad_port,name,ca,5000n}))
+        IO.print("PASS endpoint received an authenticated relay address report")
+        exercise_relay(owner)
+    case None{}:
+      IO.die(Unit,2,"expected the QAD port")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,host,url,port,tls_name,ca]:
+      relayed_observed(host,url,U32.read(port),tls_name,ca)
     case [_,host,url]:
       relayed_nat(host,url)
     case _:

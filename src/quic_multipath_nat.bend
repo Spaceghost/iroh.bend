@@ -202,6 +202,8 @@ def initialize_local(conn: Quic.MultipathConnection, local: Send.Change, peer: S
   match local:
     case Send.Changed{state,Send.Updated{}}:
       (conn,Done{Dialer{peer,state,ipv6,False{},Waiting{}}})
+    case Send.Changed{state,Send.Unchanged{}}:
+      (conn,Done{Dialer{peer,state,ipv6,False{},Waiting{}}})
     case _:
       (conn,Fail{(22,"could not register the local NAT candidate")})
 
@@ -834,3 +836,91 @@ def step_listener(connection: ListenerConnection()) -> IO(ListenerProgress()):
   do IO<ListenerProgress()>:
     ready : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
     listener_step_ready(ready,state)
+
+
+type DiscoveryOptions is Data:
+  DiscoveryServer{ip: String, port: U32, tls_name: String, ca_bundle: String, timeout: Nat}
+
+def Observed() -> Type:
+  Result<&1,&1,U32 & String,State.Candidate>
+
+def close_discovery_error(conn: Quic.MultipathConnection, error: U32 & String) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    Quic.close_multipath(conn)
+    return Fail{error}
+
+def add_observation(local: Send.LocalState, address: State.Candidate) -> Send.Change:
+  match local:
+    case Send.Client{1,round,_}:
+      Send.add(Send.Client{1,round,[]},address)
+    case existing:
+      Send.add(existing,address)
+
+def complete_observation(result: Quic.MultipathConnection & Observed(), state: Dialer) -> IO(ConnectResult()):
+  match result state:
+    case (conn,Done{address}) Dialer{peer,local,ipv6,_,Waiting{}}:
+      initialized(initialize_local(conn,add_observation(local,address),peer,ipv6))
+    case (conn,Fail{error}) _:
+      close_discovery_error(conn,error)
+    case (conn,Done{_}) _:
+      close_discovery_error(conn,(22,"address discovery must finish before NAT probes start"))
+
+def decode_observed(conn: Quic.MultipathConnection, raw: List<&2,U32> & U32, state: Dialer)
+    -> IO(ConnectResult()):
+  complete_observation(local_address((conn,Done{raw})),state)
+
+def discovery_progress(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,
+    Maybe<&1,List<&2,U32> & U32>>, state: Dialer, retry: Quic.MultipathConnection -> Dialer -> IO(ConnectResult()))
+    -> IO(ConnectResult()):
+  match pair:
+    case (conn,Done{Some{address}}):
+      decode_observed(conn,address,state)
+    case (conn,Done{None{}}):
+      do IO<ConnectResult()>:
+        IO.sleep(1)
+        retry(conn,state)
+    case (conn,Fail{error}):
+      close_discovery_error(conn,error)
+
+def discovery_step(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, state: Dialer,
+    retry: Quic.MultipathConnection -> Dialer -> IO(ConnectResult())) -> IO(ConnectResult()):
+  match pair:
+    case (conn,Done{_}):
+      do IO<ConnectResult()>:
+        polled : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>> <-
+          Quic.poll_multipath_qad(conn)
+        discovery_progress(polled,state,retry)
+    case (conn,Fail{error}):
+      close_discovery_error(conn,error)
+
+def wait_discovery(fuel: Nat, conn: Quic.MultipathConnection, state: Dialer) -> IO(ConnectResult()):
+  match fuel:
+    case 0n:
+      close_discovery_error(conn,(110,"relay address discovery timed out"))
+    case 1n+left:
+      do IO<ConnectResult()>:
+        ready : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
+        discovery_step(ready,state,next => driver => wait_discovery(left,next,driver))
+
+def observed_dial(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit>, state: Dialer, timeout: Nat)
+    -> IO(ConnectResult()):
+  match pair:
+    case (conn,Done{_}):
+      wait_discovery(timeout,conn,state)
+    case (conn,Fail{error}):
+      close_discovery_error(conn,error)
+
+# Prefer the relay's authenticated mapping in the first reach-out round.
+# Run before driving the dialer's NAT state and while it owns the probe socket.
+def discover_address(conn: Quic.MultipathConnection, state: Dialer, server: DiscoveryOptions) -> IO(ConnectResult()):
+  match state:
+    case Unavailable{}:
+      IO.pure(ConnectResult(),Done{(conn,Unavailable{})})
+    case Dialer{peer,local,ipv6,dirty,Waiting{}}:
+      DiscoveryServer{ip,port,name,roots,timeout} = server
+      do IO<ConnectResult()>:
+        start : Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit> <-
+          Quic.start_multipath_qad(conn,ip,port,name,roots)
+        observed_dial(start,Dialer{peer,local,ipv6,dirty,Waiting{}},timeout)
+    case _:
+      close_discovery_error(conn,(22,"address discovery must start before NAT probes"))

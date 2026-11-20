@@ -222,6 +222,8 @@ local function picoquic_delete_cnx(cnx: *cnx_t) <cimport,nodecl> end
 local function picoquic_get_cnx_start_time(cnx: *cnx_t): uint64 <cimport,nodecl> end
 local function picoquic_get_cnx_state(cnx: *cnx_t): cint <cimport,nodecl> end
 local function picoquic_get_path_addr(cnx: *cnx_t, id: uint64, which: cint, addr: *storage_t): cint <cimport,nodecl> end
+local function picoquic_set_default_address_discovery_mode(quic:*quic_t, mode:cint) <cimport,nodecl> end
+local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
 local function picoquic_set_client_authentication(quic: *quic_t, required: cint) <cimport,nodecl> end
 local function picoquic_set_accept_0rtt(quic: *quic_t, enabled: cint) <cimport,nodecl> end
 local function picoquic_set_max_half_open_retry_threshold(quic: *quic_t, limit: uint32) <cimport,nodecl> end
@@ -279,7 +281,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -334,6 +336,8 @@ local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_address: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_nat_source: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_qad: uint32 <cimport,nodecl>
+local iroh_mp_poll_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
@@ -432,6 +436,9 @@ local Session = @record{
   max_data:uint64,stream_bidi_local:uint64,stream_bidi_remote:uint64,stream_uni:uint64,streams_bidi:uint64,streams_uni:uint64,
   active_connection_id_limit:uint32,max_packet_size:uint32
 }
+local AddressDiscovery = @record{
+  quic:*quic_t, cnx:*cnx_t, peer:storage_t, ready:boolean, closed:boolean
+}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
@@ -439,7 +446,7 @@ local Connection = @record{
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
-  nat_inbox: *NatInbox, nat_source: *Path,
+  nat_inbox: *NatInbox, nat_source: *Path, discovery: *AddressDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
 }
@@ -1018,7 +1025,16 @@ local function receive_datagram(conn: *Connection, bytes: *uint8, size: csize)
   conn.datagram_count = conn.datagram_count + 1
 end
 
+local function release_discovery(conn:*Connection)
+  local discovery = conn.discovery
+  if discovery == nilptr then return end
+  conn.discovery = nilptr
+  if discovery.quic ~= nilptr then picoquic_free(discovery.quic) end
+  C.free(discovery)
+end
+
 local function destroy(conn: *Connection)
+  release_discovery(conn)
   if conn.listener ~= nilptr then
     picoquic_set_callback(conn.cnx,nilptr,nilptr)
     picoquic_delete_cnx(conn.cnx)
@@ -1743,7 +1759,12 @@ local function read_from_path(conn: *Connection, path: *Path, bytes: *uint8, cap
     size = recv(path.fd,bytes,capacity,0)
   end
   if size > 0 then
-    picoquic_incoming_packet(conn.quic,bytes,(@csize)(size),name,&path.local_addr,0,0,now)
+    local quic = conn.quic
+    local discovery = conn.discovery
+    if path == conn.nat_source and discovery ~= nilptr and picoquic_compare_addr(name,&discovery.peer) == 0 then
+      quic = discovery.quic
+    end
+    picoquic_incoming_packet(quic,bytes,(@csize)(size),name,&path.local_addr,0,0,now)
   elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
     return (@uint32)(errno)
   end
@@ -2328,23 +2349,112 @@ local function bind_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],bind_nat_source(e,find_connection(e,args[0]),args))
 end
 
+local function discovery_event(cnx:*cnx_t, id:uint64, bytes:*uint8, size:csize, kind:cint, ctx:pointer,
+    stream_user:pointer): cint
+  local discovery = (@*AddressDiscovery)(ctx)
+  if kind == picoquic_callback_ready then
+    discovery.ready = true
+  elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
+      kind == picoquic_callback_stateless_reset then
+    discovery.closed = true
+  end
+  return 0
+end
+
+local function start_discovery(e:Env, conn:*Connection, args:*[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if conn.nat_source == nilptr then return io_fail(e,ENOTSUP,'address discovery requires an independent UDP source') end
+  if conn.discovery ~= nilptr then return io_fail(e,EBUSY,'address discovery is in progress') end
+  local peer: storage_t
+  local size = numeric_argument(e,args[1],args[2],&peer)
+  local name_size: uint64, roots_size: uint64
+  local name = io_cstr(e,args[3],&name_size)
+  defer C.free(name) end
+  local roots = io_cstr(e,args[4],&roots_size)
+  defer C.free(roots) end
+  if size == 0 or args[2] == 0 or peer.ss_family ~= conn.nat_source.local_addr.ss_family or
+      name_size == 0 or roots_size == 0 or io_nul(name,name_size) or io_nul(roots,roots_size) then
+    return io_fail(e,EINVAL,'invalid address discovery server, TLS name, or CA bundle')
+  end
+  local discovery = (@*AddressDiscovery)(C.calloc(1,#AddressDiscovery))
+  if discovery == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  conn.discovery = discovery
+  discovery.peer = peer
+  local now = picoquic_current_time()
+  discovery.quic = picoquic_create(1,nilptr,nilptr,roots,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
+  if discovery.quic ~= nilptr then
+    picoquic_set_client_cert_verification_policy(discovery.quic,1)
+    picoquic_set_default_address_discovery_mode(discovery.quic,2)
+    discovery.cnx = picoquic_create_client_cnx(discovery.quic,&peer,now,1,name,'/iroh-qad/0',
+      (@pointer)(discovery_event),discovery)
+  end
+  if discovery.cnx == nilptr then
+    release_discovery(conn)
+    return io_fail(e,EACCES,'could not start authenticated address discovery')
+  end
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function start_discovery_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],start_discovery(e,find_connection(e,args[0]),args))
+end
+
+local function send_discovery(path:*Path, discovery:*AddressDiscovery): uint32
+  local data: [IO_CAPACITY]uint8
+  local from: storage_t, to: storage_t
+  local length: csize
+  local iface: cint
+  local now = picoquic_current_time()
+  if picoquic_prepare_packet(discovery.cnx,now,&data[0],#data,&length,&to,&from,&iface) ~= 0 then return EIO end
+  if length == 0 then return 0 end
+  local written = sendto(path.fd,&data[0],length,0,&discovery.peer,address_size(&discovery.peer))
+  if written == (@isize)(length) then return 0 end
+  if written < 0 and (errno == EAGAIN or errno == EINTR) then return 0 end
+  return written < 0 and (@uint32)(errno) or EIO
+end
+
+local function socket_candidate(e:Env, addr:*storage_t): Term
+  if addr.ss_family == AF_INET then
+    local v4 = (@*addr_t)(addr)
+    return io_tup(e,io_list(e,(@cstring)(&v4.sin_addr),4),ntohs(v4.sin_port))
+  end
+  local v6 = (@*addr6_t)(addr)
+  return io_tup(e,io_list(e,(@cstring)(&v6.sin6_addr),16),ntohs(v6.sin6_port))
+end
+
+local function poll_discovery(e:Env, conn:*Connection): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  local discovery = conn.discovery
+  if discovery == nilptr then return io_fail(e,EINVAL,'address discovery has not started') end
+  if discovery.closed or picoquic_get_cnx_state(discovery.cnx) == picoquic_state_disconnected then
+    release_discovery(conn)
+    return io_fail(e,EACCES,'address discovery closed before an authenticated report')
+  end
+  local observed: storage_t
+  if discovery.ready and picoquic_get_path_addr(discovery.cnx,0,3,&observed) == 0 and
+      (observed.ss_family == AF_INET or observed.ss_family == AF_INET6) then
+    local candidate = socket_candidate(e,&observed)
+    picoquic_close(discovery.cnx,0)
+    send_discovery(conn.nat_source,discovery)
+    release_discovery(conn)
+    return io_done(e,io_box(e,iroh_mp_Some,candidate))
+  end
+  local error = send_discovery(conn.nat_source,discovery)
+  if error == 0 then return none(e) end
+  release_discovery(conn)
+  return io_fail(e,error,'address discovery UDP I/O failed')
+end
+
+local function poll_discovery_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],poll_discovery(e,find_connection(e,args[0])))
+end
+
 local function local_nat_candidate_run(e:Env, args:*[0]Term, work:*IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
   local addr = nat_local_address(conn)
   if addr == nilptr then return io_tup(e,args[0],io_fail(e,ENOTSUP,'no UDP source address is available')) end
-  local ip: Term
-  local port: uint16
-  if addr.ss_family == AF_INET then
-    local v4 = (@*addr_t)(addr)
-    ip = io_list(e,(@cstring)(&v4.sin_addr),4)
-    port = v4.sin_port
-  else
-    local v6 = (@*addr6_t)(addr)
-    ip = io_list(e,(@cstring)(&v6.sin6_addr),16)
-    port = v6.sin6_port
-  end
-  return io_tup(e,args[0],io_done(e,io_tup(e,ip,ntohs(port))))
+  return io_tup(e,args[0],io_done(e,socket_candidate(e,addr)))
 end
 
 local function verified_nat_peer(conn:*Connection, peer:*storage_t, now:uint64): boolean
@@ -2864,6 +2974,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end
   if iroh_mp_take_multipath_nat_response ~= 0xffffffff then io_eff(iroh_mp_take_multipath_nat_response,take_nat_response_run) end
   if iroh_mp_send_multipath_nat_address ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_address,advertise_nat_run) end
+  if iroh_mp_start_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_start_multipath_qad,start_discovery_run) end
+  if iroh_mp_poll_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_poll_multipath_qad,poll_discovery_run) end
   if iroh_mp_bind_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_source,bind_nat_source_run) end
   if iroh_mp_multipath_nat_local_candidate ~= 0xffffffff then io_eff(iroh_mp_multipath_nat_local_candidate,local_nat_candidate_run) end
   if iroh_mp_open_multipath_nat_path ~= 0xffffffff then io_eff(iroh_mp_open_multipath_nat_path,open_nat_path_run) end
