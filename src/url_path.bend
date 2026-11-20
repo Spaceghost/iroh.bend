@@ -33,12 +33,19 @@ def drop_slashes(s: String) -> String:
     case _:
       s
 
-def shorten(reversed: List<&2,String>, file: Bool) -> List<&2,String>:
+# url 2.5.8 retains the slash after a drive segment during double-dot
+# shortening, including in hierarchical URLs with schemes other than file.
+def drive_prefix(s: String) -> Bool:
+  match s:
+    case SCon{c,SCon{+d,SCon{'\\',_}}}:
+      T.letter(Char.to_u32(c)) && (Char.is_eq(d,':') || Char.is_eq(d,'|'))
+    case _:
+      drive(s)
+
+def shorten(+reversed: List<&2,String>) -> List<&2,String>:
   match reversed:
-    case [+root]:
-      Bool.pick(List<&2,String>,file && drive(root),[root],[])
-    case Con{_,tail}:
-      tail
+    case Con{head,tail}:
+      Bool.pick(List<&2,String>,drive_prefix(head),reversed,tail)
     case Nil{}:
       []
 
@@ -46,8 +53,6 @@ def push(reversed: List<&2,String>, +part: String, file: Bool) -> List<&2,String
   match reversed part file:
     case Nil{} SNil{} True{}:
       []
-    case Nil{} _ True{}:
-      [Bool.pick(String,drive(part),drive_segment(part),T.encode(T.Path{},part))]
     case _ _ _:
       Con{T.encode(T.Path{},part),reversed}
 
@@ -73,7 +78,7 @@ def segment(reversed: List<&2,String>, text: String, dots: U32, file: Bool) -> L
     case 1:
       reversed
     case 2:
-      shorten(reversed,file)
+      shorten(reversed)
     case _:
       push(reversed,text,file)
 
@@ -82,7 +87,7 @@ def last_segment(reversed: List<&2,String>, part: String, dots: U32, +file: Bool
     case 1:
       push(reversed,"",file)
     case 2:
-      push(shorten(reversed,file),"",file)
+      push(shorten(reversed),"",file)
     case _:
       push(reversed,part,file)
 
@@ -108,8 +113,20 @@ type Path is Data:
 def trailing(+s: String) -> String:
   Bool.pick(String,String.ends_with(s,"/"),s,s ++ "/")
 
-def joined(+parts: List<&2,String>, file: Bool) -> Path:
-  Path{trailing("/" ++ String.join(parts,"/")),file && first_drive(parts)}
+def normalize_root(parts: List<&2,String>, change: Bool) -> List<&2,String>:
+  match parts change:
+    case Con{head,tail} True{}:
+      Con{drive_segment(head),tail}
+    case _ _:
+      parts
+
+def joined(+parts: List<&2,String>, file: Bool, force_drive: Bool) -> Path:
+  +drive = file && first_drive(parts)
+  +raw = "/" ++ String.join(parts,"/")
+  # Iroh sets the path a second time when appending a slash. That setter
+  # normalizes a leading file drive even for a URL with an empty authority.
+  change = drive && (force_drive || Bool.not(String.ends_with(raw,"/")))
+  Path{trailing("/" ++ String.join(normalize_root(parts,change),"/")),drive}
 
 def without_leading(s: String) -> String:
   match s:
@@ -118,5 +135,8 @@ def without_leading(s: String) -> String:
     case _:
       s
 
-def parse(s: String, +file: Bool) -> Path:
-  joined(segments(String.split(without_leading(s),'/'),[],file),file)
+def parse_mode(s: String, +file: Bool, force_drive: Bool) -> Path:
+  joined(segments(String.split(without_leading(s),'/'),[],file),file,force_drive)
+
+def parse(s: String, file: Bool) -> Path:
+  parse_mode(s,file,True{})

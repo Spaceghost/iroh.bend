@@ -154,8 +154,12 @@ def credentials(parts: T.Split) -> String:
     case T.Split{user,_}:
       T.encode(T.UserInfo{},user) ++ "@"
 
-def authority(parts: T.Split, scheme: Scheme) -> Maybe<&2,String>:
+def authority(parts: T.Split, scheme: Scheme, terminated: Bool) -> Maybe<&2,String>:
   match parts scheme:
+    case T.Split{SNil{},"@:"} Other{}:
+      Some{""}
+    case T.Split{SNil{},"@"} Other{}:
+      Bool.pick(Maybe<&2,String>,terminated,None{},Some{""})
     case T.Split{host,SNil{}} _:
       host_port(String.reverse(host),scheme,False{})
     case _ FileUrl{}:
@@ -170,18 +174,59 @@ def with_path(+auth: String, path: P.Path, +file: Bool) -> String:
   P.Path{s,drive} = path
   "//" ++ (Bool.pick(String,file && (drive || String.eq(auth,"localhost")),"",auth) ++ s)
 
-def with_authority(parts: T.Split, +scheme: Scheme) -> Maybe<&2,String>:
-  T.Split{+auth,path} = parts
-  +file = is_file(scheme)
-  Maybe.map(&2,String,String,h => with_path(h,P.parse(path,file),file),
-    authority(T.split(~at_sign,String.reverse(auth)),scheme))
+def authority_path(+h: String, path: String, +file: Bool) -> String:
+  force_drive = Bool.not(String.is_empty(h)) && Bool.not(String.eq(h,"localhost"))
+  with_path(h,P.parse_mode(path,file,force_drive),file)
+
+def with_authority(parts: T.Split, +scheme: Scheme, suffix: Bool) -> Maybe<&2,String>:
+  T.Split{auth,+path} = parts
+  Maybe.map(&2,String,String,h => authority_path(h,path,is_file(scheme)),
+    authority(T.split(~at_sign,String.reverse(auth)),scheme,suffix || Bool.not(String.is_empty(path))))
+
+def backslash(n: U32) -> Bool:
+  U32.is_eq(n,92)
+
+def port_start(parts: T.Split) -> Bool:
+  match parts:
+    case T.Split{_,SCon{']',SCon{':',_}}}:
+      True{}
+    case T.Split{_,SCon{':',_}}:
+      True{}
+    case _:
+      False{}
+
+def has_port(s: String) -> Bool:
+  match s:
+    case SCon{'[',rest}:
+      port_start(T.split(~bracket,rest))
+    case _:
+      port_start(T.split(~colon,s))
+
+def port_path(before: String, after: String, user: String, path: String, split: Bool) -> T.Split:
+  match split:
+    case True{}:
+      T.Split{user ++ before,after ++ path}
+    case False{}:
+      T.Split{user ++ (before ++ after),path}
+
+def split_port_path(parts: T.Split, user: String, path: String) -> T.Split:
+  T.Split{+before,+after} = parts
+  port_path(before,after,user,path,Bool.not(String.is_empty(after)) && has_port(before))
+
+def other_host(reversed: T.Split, path: String) -> T.Split:
+  T.Split{host,user} = reversed
+  split_port_path(T.split(~backslash,String.reverse(host)),String.reverse(user),path)
+
+def other_authority(parts: T.Split, suffix: Bool) -> Maybe<&2,String>:
+  T.Split{auth,path} = parts
+  with_authority(other_host(T.split(~at_sign,String.reverse(auth)),path),Other{},suffix)
 
 def file_authority(+parts: T.Split, is_drive: Bool) -> Maybe<&2,String>:
   match parts is_drive:
     case T.Split{drive,rest} True{}:
       Some{with_path("",P.parse(drive ++ rest,True{}),True{})}
     case _ False{}:
-      with_authority(parts,FileUrl{})
+      with_authority(parts,FileUrl{},False{})
 
 def file_parts(+parts: T.Split) -> Maybe<&2,String>:
   T.Split{head,_} = parts
@@ -198,10 +243,10 @@ def hostless(path: P.Path) -> String:
   P.Path{+s,_} = path
   Bool.pick(String,String.starts_with(s,"//"),"/." ++ s,s)
 
-def body(s: String, +scheme: Scheme) -> Maybe<&2,String>:
+def body(s: String, +scheme: Scheme, terminated: Bool) -> Maybe<&2,String>:
   match s scheme:
     case SCon{'/',SCon{'/',t}} Other{}:
-      with_authority(T.split(~slash,t),scheme)
+      other_authority(T.split(~slash,t),terminated)
     case SCon{'/',_} Other{}:
       Some{hostless(P.parse(s,False{}))}
     case _ Other{}:
@@ -209,7 +254,7 @@ def body(s: String, +scheme: Scheme) -> Maybe<&2,String>:
     case _ FileUrl{}:
       file(P.slashes(s))
     case _ Special{_}:
-      with_authority(T.split(~slash,P.drop_slashes(P.slashes(s))),scheme)
+      with_authority(T.split(~slash,P.drop_slashes(P.slashes(s))),scheme,terminated)
 
 def suffix(s: String, component: T.Component) -> String:
   match s:
@@ -220,8 +265,8 @@ def suffix(s: String, component: T.Component) -> String:
 
 def with_query(parts: T.Split, +scheme: Scheme, name: String, fragment: String) -> Maybe<&2,String>:
   T.Split{path,query} = parts
-  tail = suffix(query,T.Query{special(scheme)}) ++ suffix(fragment,T.Fragment{})
-  Maybe.map(&2,String,String,s => name ++ (":" ++ (s ++ tail)),body(path,scheme))
+  +tail = suffix(query,T.Query{special(scheme)}) ++ suffix(fragment,T.Fragment{})
+  Maybe.map(&2,String,String,s => name ++ (":" ++ (s ++ tail)),body(path,scheme,Bool.not(String.is_empty(tail))))
 
 def with_fragment(parts: T.Split, +name: String) -> Maybe<&2,String>:
   T.Split{head,fragment} = parts
