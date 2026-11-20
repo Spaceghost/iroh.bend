@@ -7,6 +7,30 @@ def start_quic_datagram(host: String, port: U32, secret: List<&2,U32>, peer: Lis
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
   import "./quic_datagram.c"
 
+# Initial route selection uses one ngtcp2/TLS session. Bend owns the connected
+# UDP sockets until the socket carrying the authenticated handshake is adopted.
+def start_route_handshake(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,DatagramConnection & Socket>):
+  import "./quic_datagram.c"
+
+def open_handshake_socket(host: String, port: U32) -> IO(Result<&1,&1,U32 & String,Socket>):
+  import "./quic_datagram.c"
+
+# Read at most one datagram on this socket. Zero means pending, one means the
+# pinned handshake completed on this route.
+def read_handshake_socket(conn: DatagramConnection, socket: Socket)
+    -> IO(DatagramConnection & (Socket & Result<&1,&1,U32 & String,U32>)):
+  import "./quic_datagram.c"
+
+# Advance the QUIC timer and return the next outbound datagram, or [].
+def route_handshake_output(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_datagram.c"
+
+def adopt_handshake_socket(conn: DatagramConnection, socket: Socket)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_datagram.c"
+
 # Process UDP input, timer expiry, and one outgoing packet.
 # The result is 1 once the peer key and QUIC handshake are verified.
 def step_quic_datagram(conn: DatagramConnection)

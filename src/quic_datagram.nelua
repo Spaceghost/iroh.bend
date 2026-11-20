@@ -167,6 +167,7 @@ local function ntohs(port: cushort): cushort <cimport,nodecl> end
 local function socket(family: cint, kind: cint, proto: cint): cint <cimport,nodecl> end
 local function bind(fd: cint, address: pointer, n: cuint): cint <cimport,nodecl> end
 local function connect(fd: cint, address: pointer, n: cuint): cint <cimport,nodecl> end
+local function getpeername(fd: cint, address: pointer, n: *cuint): cint <cimport,nodecl> end
 local function getsockname(fd: cint, address: pointer, n: *cuint): cint <cimport,nodecl> end
 local function close(fd: cint): cint <cimport,nodecl> end
 local function send(fd: cint, data: pointer, n: csize, flags: cint): isize <cimport,nodecl> end
@@ -261,6 +262,7 @@ local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 ##[[
 for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram','start_quic_migration','start_quic_path_migration','quic_migration_status',
     'monitor_quic_path','quic_path_timing','quic_millis',
+    'start_route_handshake','open_handshake_socket','read_handshake_socket','route_handshake_output','adopt_handshake_socket',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
@@ -271,6 +273,11 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     name,name,name,name))
 end
 ]]
+local iroh_dgram_start_route_handshake: uint32 <cimport,nodecl>
+local iroh_dgram_open_handshake_socket: uint32 <cimport,nodecl>
+local iroh_dgram_read_handshake_socket: uint32 <cimport,nodecl>
+local iroh_dgram_route_handshake_output: uint32 <cimport,nodecl>
+local iroh_dgram_adopt_handshake_socket: uint32 <cimport,nodecl>
 local iroh_dgram_take_quic_session: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_resume: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_session: uint32 <cimport,nodecl>
@@ -318,6 +325,8 @@ local Env <cimport,nodecl> = @record{mem: *[0]uint64}
 local IoWork <cimport,nodecl> = @record{}
 local Term = @uint64
 local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_hand(fd: uint64): Term <cimport,nodecl> end
+local function io_hand_v(handle: Term): uint64 <cimport,nodecl> end
 local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
 local function io_tick(): uint64 <cimport,nodecl> end
 local function io_cstr(e: Env, term: Term, size: *uint64): cstring <cimport,nodecl> end
@@ -395,7 +404,14 @@ local Session = @record{
   local_key: [32]cuchar, peer: [32]cuchar, alpn: [255]cuchar, alpn_size: cuint,
   parameters: [256]cuchar, parameters_size: csize
 }
+-- ngtcp2 sees one path while Bend delivers its handshake across the available
+-- transports. Keep that initial tuple until ordinary QUIC path migration succeeds.
+local HandshakeTuple = @record{
+  local_addr: iroh_datagram_address, remote_addr: iroh_datagram_address,
+  local_size: cuint, remote_size: cuint
+}
 local Connection = @record{
+  initial_path: *HandshakeTuple,
   next: pointer,
   id: uint32,
   fd: cint,
@@ -655,6 +671,11 @@ local function stream_closed(engine: *ngtcp2_conn, flags: uint32, id: int64, app
 end
 
 local function connection_path(conn: *Connection): ngtcp2_path
+  if conn.initial_path ~= nilptr then
+    local path = conn.initial_path
+    return {iroh_datagram_local_path = {addr = &path.local_addr,addrlen = path.local_size},
+      remote = {addr = &path.remote_addr,addrlen = path.remote_size}}
+  end
   return {
     iroh_datagram_local_path = {addr = &conn.local_addr, addrlen = conn.local_size},
     remote = {addr = &conn.remote_addr, addrlen = conn.remote_size}
@@ -737,13 +758,23 @@ local function udp_socket(addr: *iroh_datagram_address): cint
   return socket((@cint)(addr.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
 end
 
+local function connected_udp(peer: *iroh_datagram_address, size: cuint): cint
+  local fd = udp_socket(peer)
+  if fd >= 0 and connect(fd,peer,size) ~= 0 then
+    local code = errno
+    close(fd)
+    errno = code
+    return -1
+  end
+  return fd
+end
+
 local function open_udp(conn: *Connection, host: cstring, port: cushort): boolean
   conn.remote_size = numeric_address(host,port,&conn.remote_addr)
   if conn.remote_size == 0 then return false end
-  conn.fd = udp_socket(&conn.remote_addr)
+  conn.fd = connected_udp(&conn.remote_addr,conn.remote_size)
   conn.local_size = #iroh_datagram_address
-  return conn.fd >= 0 and connect(conn.fd,&conn.remote_addr,conn.remote_size) == 0 and
-    getsockname(conn.fd,&conn.local_addr,&conn.local_size) == 0
+  return conn.fd >= 0 and getsockname(conn.fd,&conn.local_addr,&conn.local_size) == 0
 end
 
 local function authenticated_pin(conn: *Connection): boolean
@@ -947,6 +978,7 @@ local function release_listener(listener: *Listener)
 end
 
 local function destroy(conn: *Connection)
+  C.free(conn.initial_path)
   if conn.engine ~= nilptr then ngtcp2_conn_del(conn.engine) end
   if conn.ssl ~= nilptr then SSL_set_app_data(conn.ssl,nilptr) end
   if conn.tls ~= nilptr then ngtcp2_crypto_ossl_ctx_del(conn.tls) end
@@ -1088,7 +1120,7 @@ local function open_resumed_tls(conn: *Connection, config: *QuicConfig, ticket: 
   return nilptr
 end
 
-local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boolean, resuming: boolean): Term
+local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boolean, resuming: boolean, detached: boolean): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
@@ -1131,17 +1163,23 @@ local function start_client(e: Env, args: *[0]Term, ticket: *Session, early: boo
     return io_fail(e,EIO,ngtcp2_strerror(status))
   end
   register_connection(conn)
-  return io_done(e,term_pak(iroh_dgram_DatagramConnection,conn.id))
+  local handle = term_pak(iroh_dgram_DatagramConnection,conn.id)
+  if detached then
+    local fd = conn.fd
+    conn.fd = -1
+    return io_done(e,io_tup(e,handle,io_hand((@uint64)(fd))))
+  end
+  return io_done(e,handle)
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,nilptr,false,false)
+  return start_client(e,args,nilptr,false,false,false)
 end
 
 local function resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local ticket = pop_session(e,args[5])
   defer free_session(ticket) end
-  return start_client(e,args,ticket,args[6] ~= 0,true)
+  return start_client(e,args,ticket,args[6] ~= 0,true,false)
 end
 
 local function drop_session_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -1284,7 +1322,10 @@ local function send_packet(conn: *Connection, size: csize): isize
     return sendto(listener.fd,&conn.output[0],size,0,remote.addr,remote.addrlen)
   end
   if output_on_candidate(conn) then return send(conn.candidate_fd,&conn.output[0],size,0) end
-  if conn.migration_state ~= 0 and not same_path(&conn.output_path,&conn.local_addr,&conn.remote_addr) then
+  local original = conn.initial_path
+  if conn.migration_state ~= 0 and
+      ((original == nilptr and not same_path(&conn.output_path,&conn.local_addr,&conn.remote_addr)) or
+       (original ~= nilptr and not same_path(&conn.output_path,&original.local_addr,&original.remote_addr))) then
     -- A response queued before validation can refer to an already retired socket.
     return (@isize)(size)
   end
@@ -1302,7 +1343,7 @@ local function migration_can_lose(conn: *Connection, candidate: boolean): boolea
 end
 
 local function close_transport(conn: *Connection, error: cint)
-  if error == NGTCP2_ERR_DRAINING then return end
+  if error == NGTCP2_ERR_DRAINING or (conn.fd < 0 and conn.listener == nilptr) then return end
   local err: ngtcp2_ccerr
   ngtcp2_ccerr_default(&err)
   if error == NGTCP2_ERR_CRYPTO then
@@ -1474,6 +1515,8 @@ end
 local function settle_migration(conn: *Connection)
   if conn.listener ~= nilptr or conn.candidate_fd < 0 or conn.migration_state == 1 or conn.output_size ~= 0 then return end
   if conn.migration_state == 2 then
+    C.free(conn.initial_path)
+    conn.initial_path = nilptr
     close(conn.fd)
     conn.fd = conn.candidate_fd
     conn.local_addr = conn.candidate_addr
@@ -1550,6 +1593,105 @@ local function step(e: Env, conn: *Connection): Term
   if status > 0 then return socket_error(e,conn,status) end
   settle_migration(conn)
   return io_done(e,authenticated(conn) and 1 or 0)
+end
+
+local function start_route_handshake_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,nilptr,false,false,true)
+end
+
+local function open_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local length: uint64
+  local text = io_cstr(e,args[0],&length)
+  defer C.free(text) end
+  if io_nul(text,length) or args[1] == 0 or args[1] > 65535 then
+    return io_fail(e,EINVAL,'invalid QUIC address')
+  end
+  local peer: iroh_datagram_address
+  local size = numeric_address(text,(@cushort)(args[1]),&peer)
+  if size == 0 then return io_fail(e,EINVAL,'invalid QUIC address') end
+  local fd = connected_udp(&peer,size)
+  if fd < 0 then return io_fail(e,(@uint32)(errno),nilptr) end
+  return io_done(e,io_hand((@uint64)(fd)))
+end
+
+local function handshake_input(e: Env, conn: *Connection, fd: cint): Term
+  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e) end
+  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  local packet: [65536]cuchar
+  local n = recv(fd,&packet[0],#packet,0)
+  if n < 0 and errno ~= EAGAIN and errno ~= EINTR then return io_fail(e,(@uint32)(errno),nilptr) end
+  if n <= 0 then return io_done(e,0) end
+  local path = connection_path(conn)
+  local info: ngtcp2_pkt_info = {}
+  local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,&packet[0],(@csize)(n),io_tick())
+  if status == NGTCP2_ERR_DISCARD_PKT then return io_done(e,0) end
+  if status < 0 then
+    conn.read_failure = status
+    return engine_error(e,conn,status)
+  end
+  return io_done(e,authenticated(conn) and 1 or 0)
+end
+
+local function read_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local result = handshake_input(e,find(e,args[0]),(@cint)(io_hand_v(args[1])))
+  return io_tup(e,args[0],io_tup(e,args[1],result))
+end
+
+local function handshake_output(e: Env, conn: *Connection): Term
+  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e) end
+  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  local now = io_tick()
+  if ngtcp2_conn_get_expiry2(conn.engine) <= now then
+    local code = ngtcp2_conn_handle_expiry(conn.engine,now)
+    if code < 0 then return engine_error(e,conn,code) end
+  end
+  local packet: [PACKET_CAPACITY]cuchar
+  local size = ngtcp2_conn_write_pkt(conn.engine,nilptr,nilptr,&packet[0],#packet,now)
+  if size < 0 then return engine_error(e,conn,(@cint)(size)) end
+  if size > 0 then ngtcp2_conn_update_pkt_tx_time(conn.engine,now) end
+  return io_done(e,io_list(e,(@cstring)(&packet[0]),(@uint64)(size)))
+end
+
+local function route_handshake_output_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],handshake_output(e,find(e,args[0])))
+end
+
+local function adopt_socket(e: Env, conn: *Connection, fd: cint): Term
+  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 or not authenticated(conn) then
+    close(fd)
+    return io_fail(e,EINVAL,'QUIC route handshake is incomplete')
+  end
+  local addresses: HandshakeTuple
+  addresses.local_size = #iroh_datagram_address
+  addresses.remote_size = #iroh_datagram_address
+  if getsockname(fd,&addresses.local_addr,&addresses.local_size) ~= 0 or
+      getpeername(fd,&addresses.remote_addr,&addresses.remote_size) ~= 0 then
+    local code = errno
+    close(fd)
+    return io_fail(e,(@uint32)(code),nilptr)
+  end
+  if not same_address(&conn.local_addr,&addresses.local_addr) or not same_address(&conn.remote_addr,&addresses.remote_addr) then
+    local original = (@*HandshakeTuple)(C.malloc(#HandshakeTuple))
+    if original == nilptr then
+      close(fd)
+      return io_fail(e,ENOMEM,nilptr)
+    end
+    original.local_addr = conn.local_addr
+    original.remote_addr = conn.remote_addr
+    original.local_size = conn.local_size
+    original.remote_size = conn.remote_size
+    conn.initial_path = original
+  end
+  conn.fd = fd
+  conn.local_addr = addresses.local_addr
+  conn.remote_addr = addresses.remote_addr
+  conn.local_size = addresses.local_size
+  conn.remote_size = addresses.remote_size
+  return io_done(e,term_pak(iroh_dgram_Unit,0))
+end
+
+local function adopt_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],adopt_socket(e,find(e,args[0]),(@cint)(io_hand_v(args[1]))))
 end
 
 local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2097,6 +2239,11 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_try_accept_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_try_accept_shared_quic,accept_run) end
   if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end
   if iroh_dgram_start_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram,start_run) end
+  if iroh_dgram_start_route_handshake ~= 0xffffffff then io_eff(iroh_dgram_start_route_handshake,start_route_handshake_run) end
+  if iroh_dgram_open_handshake_socket ~= 0xffffffff then io_eff(iroh_dgram_open_handshake_socket,open_handshake_socket_run) end
+  if iroh_dgram_read_handshake_socket ~= 0xffffffff then io_eff(iroh_dgram_read_handshake_socket,read_handshake_socket_run) end
+  if iroh_dgram_route_handshake_output ~= 0xffffffff then io_eff(iroh_dgram_route_handshake_output,route_handshake_output_run) end
+  if iroh_dgram_adopt_handshake_socket ~= 0xffffffff then io_eff(iroh_dgram_adopt_handshake_socket,adopt_handshake_socket_run) end
   if iroh_dgram_step_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_step_quic_datagram,step_run) end
   if iroh_dgram_start_quic_migration ~= 0xffffffff then io_eff(iroh_dgram_start_quic_migration,start_migration_run) end
   if iroh_dgram_start_quic_path_migration ~= 0xffffffff then io_eff(iroh_dgram_start_quic_path_migration,start_path_migration_run) end
