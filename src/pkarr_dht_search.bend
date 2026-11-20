@@ -1,4 +1,5 @@
 import Base
+import ./ip.bend as Ip
 import ./bencode.bend as Ben
 import ./discovery.bend as Bytes
 import ./krpc.bend as Krpc
@@ -81,31 +82,19 @@ def add_contact(+queue: List<&2,Contact>, seen: List<&2,Dht.Peer>, +peer: Dht.Pe
     List.contains(Dht.Peer,peer_eq,seen,peer))
 
 def ipv4(a: U32, b: U32, c: U32, d: U32) -> String:
-  left = String.append(U32.show(a),String.append(".",U32.show(b)))
-  right = String.append(U32.show(c),String.append(".",U32.show(d)))
-  String.append(left,String.append(".",right))
+  Ip.ipv4(a,b,c,d)
 
-def hex_digit(+n: U32, digit: Bool) -> Char:
-  match digit:
-    case True{}:
-      Char.from_u32(U32.add(48,n))
-    case False{}:
-      Char.from_u32(U32.add(87,n))
+def hex_digit(n: U32, digit: Bool) -> Char:
+  Ip.hex_digit(n,digit)
 
-def hex_char(+n: U32) -> Char:
-  hex_digit(n,U32.is_lt(n,10))
+def hex_char(n: U32) -> Char:
+  Ip.hex_char(n)
 
-def hex_byte(+byte: U32, rest: List<&2,Char>) -> List<&2,Char>:
-  Con{hex_char(U32.shrn(byte,4n)),Con{hex_char(U32.and(byte,15)),rest}}
+def hex_byte(byte: U32, rest: List<&2,Char>) -> List<&2,Char>:
+  Ip.hex_byte(byte,rest)
 
 def ipv6_chars(bytes: List<&2,U32>) -> List<&2,Char>:
-  match bytes:
-    case [hi,lo]:
-      hex_byte(hi,hex_byte(lo,[]))
-    case Con{hi,Con{lo,tail}}:
-      hex_byte(hi,hex_byte(lo,Con{Char.from_u32(58),ipv6_chars(tail)}))
-    case _:
-      []
+  Ip.ipv6_chars(bytes)
 
 def ipv6_usable(bytes: List<&2,U32>) -> Bool:
   match bytes:

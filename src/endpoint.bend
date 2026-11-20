@@ -1,4 +1,6 @@
 import Base
+import ./endpoint_ticket.bend as Tickets
+import ./ip.bend as Ip
 import ./direct.bend as Direct
 import ./discovery.bend as Dns
 import ./pkarr.bend as Pkarr
@@ -191,6 +193,36 @@ def routes(records: List<&2,Dns.Attribute>) -> Routes:
     case Nil{}:
       DialRoutes{[],[]}
 
+# Project a decoded ticket onto the endpoint's built-in transports.
+def ticket_routes(addresses: List<&2,Tickets.TransportAddress>) -> Routes:
+  match addresses:
+    case Nil{}:
+      DialRoutes{[],[]}
+    case Con{Tickets.IPv4{[a,b,c,d],port},rest}:
+      add_ip(ip_port(Ip.ipv4(a,b,c,d),Some{port}),ticket_routes(rest))
+    case Con{Tickets.IPv6{ip,port},rest}:
+      add_ip(ip_port(String.from_list(Ip.ipv6_chars(ip)),Some{port}),ticket_routes(rest))
+    case Con{Tickets.Relay{url},rest}:
+      add_relay(relay_url(url),ticket_routes(rest))
+    case Con{_,rest}:
+      ticket_routes(rest)
+
+def use_ticket(~C: Type, ~dial: Routes -> Identity -> Timeouts -> IO(Result<&1,&1,U32 & String,C>),
+    ticket: Maybe<&2,Tickets.EndpointTicket>, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts)
+    -> IO(Result<&1,&1,U32 & String,C>):
+  match ticket:
+    case Some{Tickets.Ticket{peer,addresses}}:
+      dial(ticket_routes(addresses),PeerKeys{seed,peer,alpn},timeouts)
+    case None{}:
+      IO.pure(Result<&1,&1,U32 & String,C>,Fail{(1,"invalid endpoint ticket")})
+
+def with_ticket(~C: Type, ~dial: Routes -> Identity -> Timeouts -> IO(Result<&1,&1,U32 & String,C>),
+    text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts)
+    -> IO(Result<&1,&1,U32 & String,C>):
+  do IO<Result<&1,&1,U32 & String,C>>:
+    ticket : Maybe<&2,Tickets.EndpointTicket> <- Tickets.decode(text)
+    use_ticket(~C,~dial,ticket,seed,alpn,timeouts)
+
 def direct_stream(address: Address, identity: Identity, ms: U32)
     -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection>):
   IpAddress{host,port} = address
@@ -282,6 +314,9 @@ def dial(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts
 # QUIC connection exposes both streams and application datagrams.
 def connect_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
   dial_plan(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+
+def connect_ticket(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
+  with_ticket(~Connection(),~connect_routes,text,seed,alpn,timeouts)
 
 def connect(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
   connect_routes(routes(records),identity,timeouts)

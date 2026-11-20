@@ -174,12 +174,18 @@ UPSTREAM_RELAY_QUIC ?=
 UPSTREAM_QUIC_ROUTE_MIGRATION ?=
 UPSTREAM_IROH_RELAY_URL ?=
 DISCOVERY_DNS_PORT ?=
-RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
+RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/endpoint_ticket.bend src/endpoint_id.bend src/ip.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
 RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_http pkarr_publisher
 
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic
 	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)" \
 		"$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)" "$(UPSTREAM_QUIC_SHARED)" "$(UPSTREAM_QUIC_SHARED_DIAL)"
+
+.PHONY: check-endpoint-ticket-dial
+UPSTREAM_ENDPOINT_TICKET ?=
+check-endpoint-ticket-dial: $(BUILD)/iroh-bend-relay-quic
+	@test -x "$(UPSTREAM_ENDPOINT_TICKET)" || { echo 'Set UPSTREAM_ENDPOINT_TICKET to the Iroh endpoint ticket listener.' >&2; exit 2; }
+	python3 -B tests/endpoint_ticket_dial.py "$<" "$(UPSTREAM_ENDPOINT_TICKET)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 .PHONY: check-relay-quic-inbound check-relay-quic-reconnect check-relay-quic-direct-relay check-relay-quic-startup
 UPSTREAM_RELAY_INBOUND ?=
@@ -287,7 +293,7 @@ $(BUILD)/iroh-bend-pkarr-http: $(BUILD)/pkarr-http.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
 .PHONY: check-pkarr-dht
-PKARR_DHT_SOURCES = $(PKARR_SOURCES) src/bencode.bend src/krpc.bend src/pkarr_dht.bend src/pkarr_dht_search.bend src/pkarr_dht_socket.bend
+PKARR_DHT_SOURCES = $(PKARR_SOURCES) src/bencode.bend src/krpc.bend src/ip.bend src/pkarr_dht.bend src/pkarr_dht_search.bend src/pkarr_dht_socket.bend
 
 check-pkarr-dht: $(BUILD)/iroh-bend-pkarr-dht
 	"$(BUILD)/iroh-bend-pkarr-dht"

@@ -341,6 +341,13 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   constructing a ticket. The codec preserves them as UTF-8. Run
   `make check-endpoint-ticket` for the upstream snapshot and mixed-address
   round-trip checks.
+- `Endpoint.connect_ticket(text, seed, alpn, timeouts)` dials a ticket with the
+  caller's seed and ALPN. It pins the remote key from the ticket, tries the
+  published IP addresses in order, then tries its relay URLs. Custom addresses
+  can coexist with usable IP or relay addresses. An ID-only or custom-only
+  ticket requires a separate address lookup or a custom transport.
+  `Endpoint.with_ticket` accepts a route dialer such as
+  `EndpointMultipath.connect_routed` for callers that retain a routed connection.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
@@ -687,6 +694,7 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
+| Endpoint tickets | Run `make check-endpoint-ticket` for the upstream wire vector. `make check-endpoint-ticket-dial UPSTREAM_ENDPOINT_TICKET=/path/to/listener` checks authenticated IPv4 and IPv6 stream and datagram exchanges and wrong-key rejection. Set `UPSTREAM_IROH_RELAY_URL` to a local Iroh relay's HTTP or HTTPS base URL to check direct preference, relay-only tickets, and fallback after a silent UDP address. |
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. The endpoint ID codec matched Iroh 1.5.0 on 4,711 hexadecimal and base32 inputs, including malformed strings and invalid curve points. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits charge challenge proofs, binary WebSocket data, fragment overhead, and masked Pong frames before message delivery. Tests cover post-confirmation notices before application traffic, notices on incomplete messages, and live updates. The HTTP and HTTPS relay routes pass the same latency, health, robots, and index checks as Iroh 1.5.0. Plain HTTP also passes the upstream captive portal challenge checks. The default listener uses Bend HTTP and WebSocket framing. It exposes ordered repeated custom headers and charges post-upgrade transport reads before decoding, including partial and control frames. Ordinary HTTP requests support reuse and pipelining on both cleartext and TLS connections. |

@@ -261,6 +261,12 @@ def endpoint_direct(host: String, port: Maybe<&2,U32>) -> IO(Unit):
     case None{}:
       IO.die(Unit,2,"expected a UDP port")
 
+def dial_ticket(ticket: String, relayed: Bool) -> IO(Unit):
+  do IO<Unit>:
+    outcome : Endpoint.ConnectResult() <- Endpoint.connect_ticket(ticket,List.replicate(U32,32n,73),
+      Fixture.alpn(),Endpoint.HandshakeTimeouts{900,6000})
+    check_endpoint(outcome,relayed)
+
 def endpoint_fallback(url: String, bound: Socket & Result<&1,&1,U32 & String,U32>) -> IO(Unit):
   match bound:
     case (socket,Done{port}):
@@ -591,6 +597,10 @@ def listen_mixed(url: String, outage: Bool) -> IO(Unit):
 
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_, "dial-ticket", ticket, "direct"]:
+      dial_ticket(ticket,False{})
+    case [_, "dial-ticket", ticket, "relay"]:
+      dial_ticket(ticket,True{})
     case [_, "listen-relay-identity", url]:
       listen_inbound(url,False{})
     case [_, "listen-relay-reconnect", url]:
