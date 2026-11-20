@@ -289,6 +289,59 @@ def wait_stream_reply(fuel: Nat, conn: Quic.MultipathConnection, +id: U32) -> IO
         progress : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
         read_stream_reply(progress,id,c => wait_stream_reply(left,c,id))
 
+def check_uni_ack(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>,
+    retry: Quic.MultipathConnection -> IO(Unit)) -> IO(Unit):
+  match outcome:
+    case (conn,Done{Some{[5,0,255]}}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.print("PASS Iroh confirmed the Picoquic unidirectional stream")
+    case (conn,Done{None{}}):
+      do IO<Unit>:
+        IO.sleep(1)
+        retry(conn)
+    case (conn,Done{_}):
+      fail_connection(conn,"unexpected acknowledgement for the unidirectional stream")
+    case (conn,Fail{(_,error)}):
+      fail_connection(conn,error)
+
+def receive_uni_ack(progress: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>,
+    retry: Quic.MultipathConnection -> IO(Unit)) -> IO(Unit):
+  match progress:
+    case (conn,Done{_}):
+      do IO<Unit>:
+        reply : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
+          Quic.read_multipath_datagram(conn)
+        check_uni_ack(reply,retry)
+    case (conn,Fail{(_,error)}):
+      fail_connection(conn,error)
+
+def wait_uni_ack(fuel: Nat, conn: Quic.MultipathConnection) -> IO(Unit):
+  match fuel:
+    case 0n:
+      fail_connection(conn,"Iroh did not acknowledge the unidirectional stream")
+    case 1n+left:
+      do IO<Unit>:
+        progress : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
+        receive_uni_ack(progress,c => wait_uni_ack(left,c))
+
+def check_send_only(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Quic.MultipathRead>) -> IO(Unit):
+  match outcome:
+    case (conn,Fail{(32,_)}):
+      wait_uni_ack(4000n,conn)
+    case (conn,_):
+      fail_connection(conn,"the unidirectional stream was not send-only")
+
+def await_stream_completion(conn: Quic.MultipathConnection, id: U32, direction: U32) -> IO(Unit):
+  match direction:
+    case 0:
+      wait_stream_reply(4000n,conn,id)
+    case _:
+      do IO<Unit>:
+        readable : Quic.MultipathConnection & Result<&1,&1,U32 & String,Quic.MultipathRead> <-
+          Quic.read_multipath_stream(conn,id,3)
+        check_send_only(readable)
+
 def await_queue(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>,
     ready: Quic.MultipathConnection -> IO(Unit)) -> IO(Unit):
   match outcome:
@@ -299,80 +352,102 @@ def await_queue(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,U3
     case (conn,Fail{(_,error)}):
       fail_connection(conn,error)
 
-def retry_stream_data(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>) -> IO(Unit):
-  match outcome:
-    case (conn,Done{Some{0}}):
+def write_retry(conn: Quic.MultipathConnection, +id: U32, direction: U32, same: Bool) -> IO(Unit):
+  match same:
+    case True{}:
       do IO<Unit>:
         sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
-          Quic.write_multipath_stream(conn,0,[8,0,255],1)
-        await_queue(sent,c => wait_stream_reply(4000n,c,0))
+          Quic.write_multipath_stream(conn,id,[8,0,255],1)
+        await_queue(sent,c => await_stream_completion(c,id,direction))
+    case False{}:
+      fail_connection(conn,"rejected 0-RTT stream ID was not reset")
+
+def retry_stream_data(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>, +direction: U32)
+    -> IO(Unit):
+  match outcome:
+    case (conn,Done{Some{+id}}):
+      write_retry(conn,id,direction,U32.is_eq(id,U32.mul(direction,2)))
     case (conn,Done{_}):
       fail_connection(conn,"rejected 0-RTT stream ID was not reset")
     case (conn,Fail{(_,error)}):
       fail_connection(conn,error)
 
-def retry_stream(conn: Quic.MultipathConnection) -> IO(Unit):
+def retry_stream(conn: Quic.MultipathConnection, +direction: U32) -> IO(Unit):
   do IO<Unit>:
-    opened : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>> <- Quic.open_multipath_stream(conn,0)
-    retry_stream_data(opened)
+    opened : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>> <- Quic.open_multipath_stream(conn,direction)
+    retry_stream_data(opened,direction)
+
+def accepted_stream(conn: Quic.MultipathConnection, id: U32, direction: U32, same: Bool) -> IO(Unit):
+  match same:
+    case True{}:
+      await_stream_completion(conn,id,direction)
+    case False{}:
+      fail_connection(conn,"unexpected 0-RTT stream ID after authentication")
 
 def check_stream_resolution(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>,
-    status: U32) -> IO(Unit):
+    status: U32, +direction: U32) -> IO(Unit):
   match outcome status:
-    case (conn,Done{Some{id}}) 1:
-      wait_stream_reply(4000n,conn,id)
+    case (conn,Done{Some{+id}}) 1:
+      accepted_stream(conn,id,direction,U32.is_eq(id,U32.mul(direction,2)))
     case (conn,Done{None{}}) 0:
       do IO<Unit>:
         sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.write_multipath_datagram(conn,[6,0,255])
-        await_queue(sent,retry_stream)
+        await_queue(sent,c => retry_stream(c,direction))
     case (conn,Fail{(_,error)}) _:
       fail_connection(conn,error)
     case (conn,Done{_}) _:
       fail_connection(conn,"stream resolution disagreed with the TLS early-data status")
 
-def stream_authenticated(conn: Quic.MultipathConnection, stream: Quic.MultipathEarlyStream, status: U32) -> IO(Unit):
+def stream_authenticated(conn: Quic.MultipathConnection, stream: Quic.MultipathEarlyStream, status: U32, direction: U32)
+    -> IO(Unit):
   do IO<Unit>:
     resolved : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>> <-
       Quic.resolve_multipath_early_stream(conn,stream)
-    check_stream_resolution(resolved,status)
+    check_stream_resolution(resolved,status,direction)
 
-def queue_early_datagram(conn: Quic.MultipathConnection, stream: Quic.MultipathEarlyStream, expected: U32) -> IO(Unit):
+def queue_early_datagram(conn: Quic.MultipathConnection, stream: Quic.MultipathEarlyStream, expected: U32, direction: U32)
+    -> IO(Unit):
   do IO<Unit>:
     sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
       Quic.write_multipath_early_datagram(conn,[4,0,255])
-    await_queue(sent,c => wait_resume(4000n,c,expected,True{},next => status => stream_authenticated(next,stream,status)))
+    await_queue(sent,c => wait_resume(4000n,c,expected,True{},next => status => stream_authenticated(next,stream,status,direction)))
 
 def queued_early_stream(outcome: Quic.MultipathConnection & (Quic.MultipathEarlyStream & Result<&1,&1,U32 & String,U32>),
-    expected: U32) -> IO(Unit):
+    expected: U32, direction: U32) -> IO(Unit):
   match outcome:
     case (conn,(stream,Done{1})):
-      queue_early_datagram(conn,stream,expected)
+      queue_early_datagram(conn,stream,expected,direction)
     case (conn,(_,Done{_})):
       fail_connection(conn,"could not queue early Picoquic stream bytes")
     case (conn,(_,Fail{(_,error)})):
       fail_connection(conn,error)
 
 def initial_early_stream(outcome: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathEarlyStream>>,
-    expected: U32) -> IO(Unit):
+    expected: U32, direction: U32) -> IO(Unit):
   match outcome:
     case (conn,Done{Some{stream}}):
       do IO<Unit>:
         sent : Quic.MultipathConnection & (Quic.MultipathEarlyStream & Result<&1,&1,U32 & String,U32>) <-
           Quic.write_multipath_early_stream(conn,stream,[7,0,255],1)
-        queued_early_stream(sent,expected)
+        queued_early_stream(sent,expected,direction)
     case (conn,Done{None{}}):
       fail_connection(conn,"Picoquic did not open the early stream")
     case (conn,Fail{(_,error)}):
       fail_connection(conn,error)
 
-def probe_early(conn: Quic.MultipathConnection, expected: U32, streams: Bool) -> IO(Unit):
-  match streams:
-    case True{}:
-      do IO<Unit>:
-        opened : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathEarlyStream>> <-
-          Quic.open_multipath_early_stream(conn,0)
-        initial_early_stream(opened,U32.sub(9,expected))
-    case False{}:
+def probe_early_stream(conn: Quic.MultipathConnection, expected: U32, +direction: U32) -> IO(Unit):
+  do IO<Unit>:
+    opened : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathEarlyStream>> <-
+      Quic.open_multipath_early_stream(conn,direction)
+    initial_early_stream(opened,expected,direction)
+
+def probe_early(conn: Quic.MultipathConnection, expected: U32, streams: Bool, uni: Bool) -> IO(Unit):
+  match streams uni:
+    case True{} True{}:
+      probe_early_stream(conn,U32.sub(11,expected),1)
+    case True{} False{}:
+      probe_early_stream(conn,U32.sub(9,expected),0)
+    case False{} _:
       do IO<Unit>:
         sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
           Quic.write_multipath_early_datagram(conn,[4,0,255])
@@ -384,7 +459,7 @@ def resume(host: String, port: U32, ticket: Quic.MultipathSession, +expected: U3
       do IO<Unit>:
         conn : Quic.MultipathConnection <- IO.try(Quic.MultipathConnection,Quic.start_multipath_early(
           host,port,local_seed(expected),peer_key(expected),offered_alpn(expected),ticket))
-        probe_early(conn,expected,U32.is_ge(expected,8))
+        probe_early(conn,expected,U32.is_ge(expected,8),U32.is_ge(expected,10))
     case False{}:
       do IO<Unit>:
         started : Quic.ConnectResult() <- Quic.start_multipath_resume(

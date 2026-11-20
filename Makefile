@@ -324,6 +324,7 @@ $(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 .PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-quic-multipath-early-streams check-endpoint-multipath
+.PHONY: check-quic-multipath-early-uni
 .PHONY: check-endpoint-multipath-recovery check-endpoint-multipath-restore-direct
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
@@ -387,6 +388,10 @@ check-quic-multipath-early: $(BUILD)/iroh-bend-quic-multipath-session
 check-quic-multipath-early-streams: $(BUILD)/iroh-bend-quic-multipath-session
 	@test -x "$(UPSTREAM_QUIC_EARLY)" || { echo 'Set UPSTREAM_QUIC_EARLY to the Iroh early-stream and datagram fixture.' >&2; exit 2; }
 	sh tests/quic_multipath_session.sh "$<" "$(UPSTREAM_QUIC_EARLY)" --early-streams
+
+check-quic-multipath-early-uni: $(BUILD)/iroh-bend-quic-multipath-session
+	@test -x "$(UPSTREAM_QUIC_EARLY)" || { echo 'Set UPSTREAM_QUIC_EARLY to the Iroh resumption fixture with unidirectional modes.' >&2; exit 2; }
+	sh tests/quic_multipath_session.sh "$<" "$(UPSTREAM_QUIC_EARLY)" --early-uni
 
 check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }
