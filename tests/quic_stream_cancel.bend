@@ -6,7 +6,7 @@ type Action is Data:
   Accept{direction: U32}
   Write{byte: U32, fin: U32}
   Flush{}
-  EmptyFin{}
+  FinalWrite{count: Nat}
   FinAck{}
   PendingNotice{}
   Read{}
@@ -64,12 +64,12 @@ def scenarios() -> List<&2,Check>:
 
 def finish_checks() -> List<&2,Check>:
   [Check{Open{0},Handle{0}},Check{FinAck{},Flag{0}},Check{Write{31,0},Complete{}},Check{Flush{},Complete{}},
-   Check{ReadDatagram{},Byte{41}},Check{Write{32,1},Complete{}},Check{Flush{},Complete{}},
+   Check{ReadDatagram{},Byte{41}},Check{FinalWrite{8192n},Complete{}},Check{Flush{},Complete{}},
    Check{FinAck{},Flag{0}},Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},
    Check{Reset{Wire.Var{0,1}},Error{32,""}},Check{SendDatagram{42},Complete{}},
    Check{Read{},Byte{33}},Check{Read{},Fin{}},Check{FinAck{},Flag{1}},Check{Drop{},Complete{}},
    Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},Check{FinAck{},Flag{0}},
-   Check{EmptyFin{},Complete{}},Check{Flush{},Complete{}},Check{FinAck{},Flag{0}},
+   Check{FinalWrite{0n},Complete{}},Check{Flush{},Complete{}},Check{FinAck{},Flag{0}},
    Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}},
    Check{SendDatagram{52},Complete{}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{53}},
    Check{Accept{1},Handle{0}},Check{FinAck{},Error{32,""}},Check{Read{},Byte{61}},

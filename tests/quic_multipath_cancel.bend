@@ -28,9 +28,9 @@ def perform(conn: Q.MultipathConnection, id: U32, action: Test.Action) -> Test.R
       do IO<Q.MultipathConnection & Test.State>:
         raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.write_multipath_stream(conn,id,[byte],fin)
         Test.answer(Q.MultipathConnection,U32,raw,Test.queued)
-    case Test.EmptyFin{}:
+    case Test.FinalWrite{count}:
       do IO<Q.MultipathConnection & Test.State>:
-        raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.write_multipath_stream(conn,id,[],1)
+        raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.write_multipath_stream(conn,id,List.replicate(U32,count,32),1)
         Test.answer(Q.MultipathConnection,U32,raw,Test.queued)
     case Test.FinAck{}:
       do IO<Q.MultipathConnection & Test.State>:

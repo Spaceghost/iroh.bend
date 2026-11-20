@@ -34,9 +34,9 @@ def perform(conn: Q.DatagramConnection, id: U32, action: Test.Action) -> Test.Re
       do IO<Q.DatagramConnection & Test.State>:
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.queue_quic_stream(conn,id,[byte],fin)
         Test.answer(Q.DatagramConnection,U32,raw,Test.queued)
-    case Test.EmptyFin{}:
+    case Test.FinalWrite{count}:
       do IO<Q.DatagramConnection & Test.State>:
-        raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.queue_quic_stream(conn,id,[],1)
+        raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.queue_quic_stream(conn,id,List.replicate(U32,count,32),1)
         Test.answer(Q.DatagramConnection,U32,raw,Test.queued)
     case Test.FinAck{}:
       do IO<Q.DatagramConnection & Test.State>:
