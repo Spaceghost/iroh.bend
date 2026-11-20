@@ -2,6 +2,7 @@ import Base
 import ./endpoint.bend as Endpoint
 import ./quic_multipath.bend as Quic
 import ./quic_multipath_nat.bend as Nat
+import ./quic_nat.bend as NatWire
 import ./relay_quic.bend as Relay
 import ./relay_quic_inbound.bend as Inbound
 
@@ -61,6 +62,68 @@ def close_listener(owner: RelayedListener) -> IO(Result<&1,&1,U32 & String,Unit>
   do IO<Result<&1,&1,U32 & String,Unit>>:
     Quic.close_multipath_listener(listener)
     Relay.stop(bridge)
+
+def NatRelayedListener() -> Type:
+  RelayedListener & U32
+
+def BindNatRelayed() -> Type:
+  Result<&1,&1,U32 & String,NatRelayedListener() & U32>
+
+def AcceptNatRelayed() -> Type:
+  NatRelayedListener() & Result<&1,&1,U32 & String,Maybe<&1,Nat.ListenerConnection()>>
+
+def nat_listener_bound(bound: Result<&1,&1,U32 & String,RelayedListener & U32>, limit: U32) -> BindNatRelayed():
+  match bound:
+    case Done{(owner,port)}:
+      Done{((owner,limit),port)}
+    case Fail{error}:
+      Fail{error}
+
+def bind_nat_listener_offer(offer: Maybe<&2,List<&2,U32>>, port: U32, url: String, +seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32, limit: U32) -> IO(BindNatRelayed()):
+  match offer:
+    case Some{parameter}:
+      do IO<BindNatRelayed()>:
+        bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
+          Quic.bind_dual_multipath_nat_identity("::",port,seed,alpns,early_data,parameter)
+        attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_listener(bound,url,seed)
+        return nat_listener_bound(attached,limit)
+    case None{}:
+      IO.pure(BindNatRelayed(),Fail{(22,"invalid NAT traversal limit")})
+
+# Applications advertise reachable addresses on each accepted connection.
+def bind_nat_listener(port: U32, url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>,
+    early_data: U32, +limit: U32) -> IO(BindNatRelayed()):
+  bind_nat_listener_offer(NatWire.encode_limit(limit),port,url,seed,alpns,early_data,limit)
+
+def accepted_nat(outcome: Nat.ListenerResult(), owner: NatRelayedListener()) -> AcceptNatRelayed():
+  match outcome:
+    case Done{connection}:
+      (owner,Done{Some{connection}})
+    case Fail{error}:
+      (owner,Fail{error})
+
+def accept_nat_result(result: RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>, +limit: U32)
+    -> IO(AcceptNatRelayed()):
+  match result:
+    case (owner,Done{Some{connection}}):
+      do IO<AcceptNatRelayed()>:
+        initialized : Nat.ListenerResult() <- Nat.initialize_listener(connection,limit,True{})
+        return accepted_nat(initialized,(owner,limit))
+    case (owner,Done{None{}}):
+      IO.pure(AcceptNatRelayed(),((owner,limit),Done{None{}}))
+    case (owner,Fail{error}):
+      IO.pure(AcceptNatRelayed(),((owner,limit),Fail{error}))
+
+def accept_nat_listener(owner: NatRelayedListener()) -> IO(AcceptNatRelayed()):
+  (listener,limit) = owner
+  do IO<AcceptNatRelayed()>:
+    result : RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>> <- accept_listener(listener)
+    accept_nat_result(result,limit)
+
+def close_nat_listener(owner: NatRelayedListener()) -> IO(Result<&1,&1,U32 & String,Unit>):
+  (listener,_) = owner
+  close_listener(listener)
 
 def dial(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
   Endpoint.IpAddress{host,port} = address

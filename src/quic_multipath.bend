@@ -340,6 +340,11 @@ def bind_dual_multipath_identity(host: String, port: U32, seed: List<&2,U32>,
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+def bind_dual_multipath_nat_identity(host: String, port: U32, seed: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, early_data: U32, parameter: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 def multipath_remote_id(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_multipath.c"
