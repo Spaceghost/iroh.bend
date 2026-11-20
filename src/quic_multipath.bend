@@ -84,9 +84,9 @@ def bind_multipath_nat_source(conn: MultipathConnection, host: String, port: U32
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_multipath.c"
 
-# Bind an independent UDP source selected by the OS route to a peer candidate.
+# Find or bind the UDP source for this peer candidate's address family.
 def route_multipath_nat_source(conn: MultipathConnection, address: List<&2,U32>, port: U32)
-    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"
 
 # Query the relay's /iroh-qad/0 service on the same UDP socket used for probes.

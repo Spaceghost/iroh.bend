@@ -462,7 +462,7 @@ local Connection = @record{
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
-  nat_inbox: *NatInbox, nat_source: *Path, discovery: *AddressDiscovery,
+  nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
 }
@@ -1075,6 +1075,8 @@ local function destroy(conn: *Connection)
   C.free(conn.peer_parameters.bytes)
   C.free(conn.nat_inbox)
   if conn.nat_source ~= nilptr then release_path(conn.nat_source) end
+  if conn.nat_route_v4 ~= nilptr then release_path(conn.nat_route_v4) end
+  if conn.nat_route_v6 ~= nilptr then release_path(conn.nat_route_v6) end
   C.free(conn)
 end
 
@@ -1355,10 +1357,29 @@ local function nat_local_address(conn:*Connection): *storage_t
   return &path.local_addr
 end
 
+local function has_nat_routes(conn:*Connection): boolean
+  return conn.nat_route_v4 ~= nilptr or conn.nat_route_v6 ~= nilptr
+end
+
+local function routed_nat_socket(conn:*Connection, family:uint16): *Path
+  if family == AF_INET then return conn.nat_route_v4 end
+  if family == AF_INET6 then return conn.nat_route_v6 end
+  return nilptr
+end
+
+local function nat_socket_for_peer(conn:*Connection, family:uint16): *Path
+  if has_nat_routes(conn) then return routed_nat_socket(conn,family) end
+  return nat_probe_socket(conn)
+end
+
 local function match_nat_response(conn:*Connection, source:pointer, destination:pointer, frame:*uint8, now:uint64): csize
+  if source == nilptr or destination == nilptr then return 0 end
   local local_addr = nat_local_address(conn)
-  if local_addr == nilptr or source == nilptr or destination == nilptr or
-      picoquic_compare_addr(destination,local_addr) ~= 0 then return 0 end
+  if has_nat_routes(conn) then
+    local socket = routed_nat_socket(conn,((@*storage_t)(source)).ss_family)
+    local_addr = socket ~= nilptr and &socket.local_addr or nilptr
+  end
+  if local_addr == nilptr or picoquic_compare_addr(destination,local_addr) ~= 0 then return 0 end
   local bytes = (@*[0]uint8)(frame)
   for i = 0,<NAT_PROBE_CAPACITY do
     local probe = &conn.nat_inbox.probes[i]
@@ -1795,8 +1816,12 @@ local function read_packets(conn: *Connection, now: uint64): uint32
     if error ~= 0 then return error end
     path = (@*Path)(path.next)
   end
-  if conn.nat_source ~= nilptr and not conn.closed then
-    return read_from_path(conn,conn.nat_source,&bytes[0],#bytes,now)
+  local probes: [3]*Path = {conn.nat_source,conn.nat_route_v4,conn.nat_route_v6}
+  for i = 0,<3 do
+    if probes[i] ~= nilptr and not conn.closed then
+      local error = read_from_path(conn,probes[i],&bytes[0],#bytes,now)
+      if error ~= 0 then return error end
+    end
   end
   return 0
 end
@@ -2173,6 +2198,9 @@ local function packed_nat_address(e:Env, args:*[0]Term, family:uint16, output:*s
 end
 
 local function nat_address(e:Env, args:*[0]Term, conn:*Connection, output:*storage_t): boolean
+  if has_nat_routes(conn) then
+    return packed_nat_address(e,args,0,output) and routed_nat_socket(conn,output.ss_family) ~= nilptr
+  end
   local local_addr = nat_local_address(conn)
   return local_addr ~= nilptr and packed_nat_address(e,args,local_addr.ss_family,output)
 end
@@ -2195,7 +2223,8 @@ local function send_nat_packet(conn:*Connection, peer:*storage_t, frame:*uint8, 
   local fd: cint
   if conn.listener ~= nilptr then fd = conn.listener.fd
   else
-    local udp = tracking == nilptr and nat_probe_socket(conn) or find_path(conn,0)
+    local udp = find_path(conn,0)
+    if tracking == nilptr then udp = nat_socket_for_peer(conn,peer.ss_family) end
     if udp == nilptr or not udp.unconnected then return ENOTSUP end
     fd = udp.fd
   end
@@ -2349,7 +2378,7 @@ local function bind_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
     return io_fail(e,ENOTSUP,'NAT source requires an authenticated QUIC dial')
   end
   if conn.nat_inbox == nilptr then return io_done(e,term_pak(iroh_mp_Unit,0)) end
-  if conn.nat_source ~= nilptr then return io_fail(e,EINVAL,'NAT source is already bound') end
+  if conn.nat_source ~= nilptr or has_nat_routes(conn) then return io_fail(e,EINVAL,'NAT source is already bound') end
   local addr: storage_t
   local size = numeric_argument(e,args[1],args[2],&addr)
   if size == 0 or unspecified_address(&addr) then
@@ -2373,20 +2402,40 @@ local function bind_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],bind_nat_source(e,find_connection(e,args[0]),args))
 end
 
+local function socket_candidate(e:Env, addr:*storage_t): Term
+  if addr.ss_family == AF_INET then
+    local v4 = (@*addr_t)(addr)
+    return io_tup(e,io_list(e,(@cstring)(&v4.sin_addr),4),ntohs(v4.sin_port))
+  end
+  local v6 = (@*addr6_t)(addr)
+  return io_tup(e,io_list(e,(@cstring)(&v6.sin6_addr),16),ntohs(v6.sin6_port))
+end
+
 local function route_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   if conn.listener ~= nilptr or not conn.ready or conn.nat_inbox == nilptr then
     return io_fail(e,ENOTSUP,'NAT source selection requires an authenticated NAT dial')
   end
-  if conn.nat_source ~= nilptr then return io_fail(e,EINVAL,'NAT source is already bound') end
+  if conn.nat_source ~= nilptr then return io_fail(e,EINVAL,'an explicit NAT source is already bound') end
   local peer: storage_t
   if not packed_nat_address(e,args,0,&peer) or unspecified_address(&peer) then
     return io_fail(e,EINVAL,'invalid NAT route address')
   end
-  local path,error = open_nat_path(&peer,address_size(&peer))
-  if path == nilptr then return io_fail(e,error,'could not select a direct NAT source') end
-  adopt_nat_source(conn,path)
-  return io_done(e,term_pak(iroh_mp_Unit,0))
+  local path = routed_nat_socket(conn,peer.ss_family)
+  if path == nilptr then
+    local error: uint32
+    path,error = open_nat_path(&peer,address_size(&peer))
+    if path == nilptr then return io_fail(e,error,'could not select a direct NAT source') end
+    if peer.ss_family == AF_INET then conn.nat_route_v4 = path
+    else conn.nat_route_v6 = path end
+    if conn.nat_route_v4 == nilptr or conn.nat_route_v6 == nilptr then
+      -- The first routed source replaces any probes made on the bootstrap socket.
+      for i = 0,<NAT_PROBE_CAPACITY do
+        conn.nat_inbox.probes[i].expires = 0
+      end
+    end
+  end
+  return io_done(e,socket_candidate(e,&path.local_addr))
 end
 
 local function route_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
@@ -2570,15 +2619,6 @@ local function send_discovery(path:*Path, discovery:*AddressDiscovery): uint32
   return written < 0 and (@uint32)(errno) or EIO
 end
 
-local function socket_candidate(e:Env, addr:*storage_t): Term
-  if addr.ss_family == AF_INET then
-    local v4 = (@*addr_t)(addr)
-    return io_tup(e,io_list(e,(@cstring)(&v4.sin_addr),4),ntohs(v4.sin_port))
-  end
-  local v6 = (@*addr6_t)(addr)
-  return io_tup(e,io_list(e,(@cstring)(&v6.sin6_addr),16),ntohs(v6.sin6_port))
-end
-
 local function poll_discovery(e:Env, conn:*Connection): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   local discovery = conn.discovery
@@ -2627,12 +2667,12 @@ local function open_nat_candidate(e:Env, conn:*Connection, args:*[0]Term): Term
   if conn.listener ~= nilptr or conn.nat_inbox == nilptr or not conn.ready then
     return io_fail(e,ENOTSUP,'a negotiated NAT traversal dialer is required')
   end
-  local source = nat_probe_socket(conn)
+  local peer: storage_t
+  if not nat_address(e,args,conn,&peer) then return io_fail(e,EINVAL,'invalid NAT candidate address') end
+  local source = nat_socket_for_peer(conn,peer.ss_family)
   if source == nilptr or not source.unconnected or source.status == 3 then
     return io_fail(e,ENOTSUP,'the UDP probe socket is unavailable')
   end
-  local peer: storage_t
-  if not nat_address(e,args,conn,&peer) then return io_fail(e,EINVAL,'invalid NAT candidate address') end
   if not verified_nat_peer(conn,&peer,picoquic_current_time()) then
     return io_fail(e,EACCES,'NAT candidate has no recent authenticated response')
   end
