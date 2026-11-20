@@ -6,6 +6,9 @@ type MultipathConnection is Type:
 type MultipathListener is Type:
   MultipathListener{id: U32}
 
+type MultipathSession is Type:
+  MultipathSession{id: U32}
+
 type MultipathRead is Data:
   MultipathReadPending{}
   MultipathReadFin{}
@@ -33,6 +36,26 @@ def negotiated_multipath_alpn(conn: MultipathConnection)
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+# Step the authenticated client connection until its peer sends a ticket.
+# A returned session owns the ticket independently of the connection.
+def take_multipath_session(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,MultipathSession>>):
+  import "./quic_multipath.c"
+
+def drop_multipath_session(session: MultipathSession) -> IO(Unit):
+  import "./quic_multipath.c"
+
+# Consume a session for the same local identity, peer key, and ALPN bytes.
+# If the peer rejects it, Picoquic attempts the pinned full handshake.
+def start_multipath_resume(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
+# None while handshaking. After authentication, 1 means TLS resumed.
+def multipath_resumption_status(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
   import "./quic_multipath.c"
 
 # An empty bind host lets the OS select the local address and port.
