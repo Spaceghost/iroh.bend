@@ -350,6 +350,13 @@ check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram $(QUIC_EARLY_LISTENER)
 		"$(UPSTREAM_DATAGRAM_V6)" "$(UPSTREAM_DATAGRAM_ECHO)" "$(UPSTREAM_QUIC_SHARED)" \
 		"$(UPSTREAM_QUIC_SHARED_DIAL)" "$(UPSTREAM_QUIC_EARLY)" "$(UPSTREAM_QUIC_EARLY_DIAL)" "$(QUIC_EARLY_LISTENER)"
 
+.PHONY: check-quic-listener-identity
+UPSTREAM_QUIC_IDENTITY_DIAL ?=
+check-quic-listener-identity: $(BUILD)/iroh-bend-quic-early-listener $(BUILD)/iroh-bend-quic-multipath-early-listener
+	@test -x "$(UPSTREAM_QUIC_IDENTITY_DIAL)" || { echo 'Set UPSTREAM_QUIC_IDENTITY_DIAL to the seed-selectable Iroh early-data dialer.' >&2; exit 2; }
+	python3 -B tests/quic_listener_identity.py "$(BUILD)/iroh-bend-quic-early-listener" "$(UPSTREAM_QUIC_IDENTITY_DIAL)"
+	python3 -B tests/quic_listener_identity.py "$(BUILD)/iroh-bend-quic-multipath-early-listener" "$(UPSTREAM_QUIC_IDENTITY_DIAL)"
+
 check-quic-rebind: $(BUILD)/iroh-bend-quic-datagram
 	@test -x "$(UPSTREAM_QUIC_REBIND)" || { echo 'Set UPSTREAM_QUIC_REBIND to the executable Iroh dial-rebind fixture.' >&2; exit 2; }
 	python3 tests/quic_rebind.py "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_QUIC_REBIND)"

@@ -96,8 +96,78 @@ def choose_resumable(mode: Maybe<&2,U32>) -> IO(Unit):
     case _:
       IO.die(Unit,2,"expected a resumption listener mode")
 
+def confirmed_peer(conn: Quic.DatagramConnection, same: Bool) -> IO(Quic.DatagramConnection):
+  match same:
+    case True{}:
+      IO.pure(Quic.DatagramConnection,conn)
+    case False{}:
+      do IO<Quic.DatagramConnection>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.DatagramConnection,1,"authenticated peer identity differs")
+
+def peer_result(pair: Quic.DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>,
+    expected: List<&2,U32>) -> IO(Quic.DatagramConnection):
+  match pair:
+    case (conn,Done{key}):
+      confirmed_peer(conn,Fixture.same_bytes(expected,key))
+    case (conn,Fail{(_,message)}):
+      do IO<Quic.DatagramConnection>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.DatagramConnection,1,message)
+
+def verify_peer(conn: Quic.DatagramConnection, expected: List<&2,U32>) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    identity : Quic.DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>> <- Quic.quic_remote_id(conn)
+    peer_result(identity,expected)
+
+def finish_identity_resume(pair: Quic.QuicDatagramListener & Quic.DatagramConnection,
+    key: List<&2,U32>) -> IO(Quic.QuicDatagramListener):
+  (listener,conn) = pair
+  do IO<Quic.QuicDatagramListener>:
+    authenticated : Quic.DatagramConnection <- verify_peer(conn,key)
+    status : Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>> <-
+      Quic.quic_resumption_status(authenticated)
+    server_resume_status(status,True{})
+    return listener
+
+def identity_peer(pair: Quic.QuicDatagramListener & Quic.DatagramConnection, +key: List<&2,U32>)
+    -> IO(Quic.QuicDatagramListener):
+  (listener,conn) = pair
+  do IO<Quic.QuicDatagramListener>:
+    authenticated : Quic.DatagramConnection <- verify_peer(conn,key)
+    warm_session(authenticated)
+    resume : Quic.QuicDatagramListener & Quic.DatagramConnection <- Fixture.server_accept(12000n,listener)
+    finish_identity_resume(resume,key)
+
+def identity_sequence(keys: List<&2,List<&2,U32>>, listener: Quic.QuicDatagramListener) -> IO(Unit):
+  match keys:
+    case Nil{}:
+      do IO<Unit>:
+        Quic.close_shared_quic(listener)
+        IO.print("PASS listener reported both authenticated peers before and after resumption")
+    case Con{key,rest}:
+      do IO<Unit>:
+        incoming : Quic.QuicDatagramListener & Quic.DatagramConnection <- Fixture.server_accept(12000n,listener)
+        next : Quic.QuicDatagramListener <- identity_peer(incoming,key)
+        identity_sequence(rest,next)
+
+def announce_identity(bound: Quic.QuicDatagramListener & U32) -> IO(Unit):
+  (listener,port) = bound
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    identity_sequence([Fixture.public_key(True{}),[53,60,138,127,238,202,56,178,196,83,110,11,210,88,111,219,
+     24,208,112,229,14,5,159,29,67,248,191,239,185,122,124,225]],listener)
+
+def listen_identity(host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.QuicDatagramListener & U32 <- IO.try(Quic.QuicDatagramListener & U32,
+      Quic.bind_quic_identity(host,0,List.replicate(U32,32n,42),Fixture.fixture_alpn(),1))
+    announce_identity(bound)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,host,"identity"]:
+      listen_identity(host)
     case Con{_,Con{mode,Nil{}}}:
       choose_resumable(U32.read(mode))
     case _:

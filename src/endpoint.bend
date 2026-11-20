@@ -689,6 +689,14 @@ def bind(address: Address, identity: Identity) -> IO(Result<&1,&1,U32 & String,Q
   PeerKeys{seed,peer,alpn} = identity
   Quic.bind_shared_quic(host,port,seed,peer,alpn)
 
+def bind_identity(address: Address, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
+  IpAddress{host,port} = address
+  Quic.bind_quic_identity(host,port,seed,alpn,early_data)
+
+def remote_id(owner: Connection()) -> IO(Connection() & Result<&1,&1,U32 & String,List<&2,U32>>):
+  use_connection(Result<&1,&1,U32 & String,List<&2,U32>>,owner,Quic.quic_remote_id)
+
 def accepted(listener: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>>)
     -> Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>:
   match listener:

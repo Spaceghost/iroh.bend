@@ -213,6 +213,15 @@ def open_early_quic_stream(conn: DatagramConnection, direction: U32)
 
 # Opt in to TLS tickets and early data. Connections are handed to the
 # application after authentication, including any buffered early data.
+# Authenticate each connecting Ed25519 identity. Set early_data to 1 to issue 0-RTT tickets.
+def bind_quic_identity(host: String, port: U32, secret: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"
+
+def quic_remote_id(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_datagram.c"
+
 def bind_resumable_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
   import "./quic_datagram.c"

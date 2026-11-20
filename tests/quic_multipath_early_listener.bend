@@ -111,8 +111,63 @@ def announce(pair: Quic.MultipathListener & U32, mode: String) -> IO(Unit):
     incoming : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
     serve(incoming,mode)
 
+def identity_result(pair: Quic.MultipathConnection & List<&2,U32>, expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
+  (conn,key) = pair
+  Fixture.checked_datagram(conn,Fixture.same_bytes(key,expected))
+
+def verify_peer(conn: Quic.MultipathConnection, expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <- Quic.multipath_remote_id(conn)
+    identity : Quic.MultipathConnection & List<&2,U32> <- Fixture.ok(List<&2,U32>,result)
+    identity_result(identity,expected)
+
+def finish_identity_resume(pair: Quic.MultipathListener & Quic.MultipathConnection,
+    key: List<&2,U32>) -> IO(Quic.MultipathListener):
+  (listener,conn) = pair
+  do IO<Quic.MultipathListener>:
+    authenticated : Quic.MultipathConnection <- verify_peer(conn,key)
+    status : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>> <-
+      Quic.multipath_resumption_status(authenticated)
+    verify_resumed(status,1)
+    return listener
+
+def identity_peer(pair: Quic.MultipathListener & Quic.MultipathConnection, +key: List<&2,U32>) -> IO(Quic.MultipathListener):
+  (listener,conn) = pair
+  do IO<Quic.MultipathListener>:
+    authenticated : Quic.MultipathConnection <- verify_peer(conn,key)
+    warm(authenticated)
+    resumed : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
+    finish_identity_resume(resumed,key)
+
+def identity_sequence(keys: List<&2,List<&2,U32>>, listener: Quic.MultipathListener) -> IO(Unit):
+  match keys:
+    case Nil{}:
+      do IO<Unit>:
+        Quic.close_multipath_listener(listener)
+        IO.print("PASS listener reported both authenticated peers before and after resumption")
+    case Con{key,rest}:
+      do IO<Unit>:
+        incoming : Quic.MultipathListener & Quic.MultipathConnection <- Listener.accept(9000n,listener)
+        next : Quic.MultipathListener <- identity_peer(incoming,key)
+        identity_sequence(rest,next)
+
+def announce_identity(bound: Quic.MultipathListener & U32) -> IO(Unit):
+  (listener,port) = bound
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    identity_sequence([Listener.fixture_peer(),[53,60,138,127,238,202,56,178,196,83,110,11,210,88,111,219,
+     24,208,112,229,14,5,159,29,67,248,191,239,185,122,124,225]],listener)
+
+def listen_identity(host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_multipath_identity(host,0,List.replicate(U32,32n,42),[Fixture.text_alpn()],1))
+    announce_identity(bound)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,host,"identity"]:
+      listen_identity(host)
     case [_,host,mode]:
       do IO<Unit>:
         listener : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,

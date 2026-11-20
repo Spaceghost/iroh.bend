@@ -32,6 +32,8 @@ local function SSL_get_SSL_CTX(ssl: *SSL): *SSL_CTX <cimport,nodecl> end
 local function SSL_get_privatekey(ssl: *SSL): *EVP_PKEY <cimport,nodecl> end
 local function SSL_get0_alpn_selected(ssl: *SSL, alpn: **cuchar, size: *cuint) <cimport,nodecl> end
 local function SSL_set_session(ssl: *SSL, session: *SSL_SESSION): cint <cimport,nodecl> end
+local function SSL_get0_peer_rpk(ssl: *SSL): *EVP_PKEY <cimport,nodecl> end
+local function EVP_PKEY_is_a(key: *EVP_PKEY, name: cstring): cint <cimport,nodecl> end
 local function SSL_session_reused(ssl: *SSL): cint <cimport,nodecl> end
 local function SSL_SESSION_is_resumable(session: *SSL_SESSION): cint <cimport,nodecl> end
 local function SSL_SESSION_get_max_early_data(session: *SSL_SESSION): uint32 <cimport,nodecl> end
@@ -233,7 +235,7 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
-    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
+    'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','bind_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
     'drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
@@ -247,6 +249,8 @@ local iroh_dgram_write_early_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_quic_resumption_status: uint32 <cimport,nodecl>
 local iroh_dgram_open_early_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_QuicSession: uint32 <cimport,nodecl>
+local iroh_dgram_bind_quic_identity: uint32 <cimport,nodecl>
+local iroh_dgram_quic_remote_id: uint32 <cimport,nodecl>
 local iroh_dgram_bind_resumable_quic: uint32 <cimport,nodecl>
 local iroh_dgram_bind_shared_quic: uint32 <cimport,nodecl>
 local iroh_dgram_try_accept_shared_quic: uint32 <cimport,nodecl>
@@ -428,7 +432,9 @@ local function verify_peer(store: *X509_STORE_CTX, data: pointer): cint
   local expected = conn.expected_key
   if conn.listener ~= nilptr then expected = conn.listener.expected_key end
   local key = X509_STORE_CTX_get0_rpk(store)
-  if key ~= nilptr and expected ~= nilptr and EVP_PKEY_eq(key,expected) == 1 then
+  if key ~= nilptr and EVP_PKEY_is_a(key,'ED25519') == 1 and
+      ((expected ~= nilptr and EVP_PKEY_eq(key,expected) == 1) or
+       (expected == nilptr and conn.listener ~= nilptr)) then
     conn.pin_status = 1
     X509_STORE_CTX_set_error(store,X509_V_OK)
     return 1
@@ -710,7 +716,11 @@ local function open_udp(conn: *Connection, host: cstring, port: cushort): boolea
 end
 
 local function authenticated_pin(conn: *Connection): boolean
-  -- A listener TLS context and its ticket cache are scoped to one pinned peer.
+  if conn.listener ~= nilptr and conn.listener.expected_key == nilptr then
+    -- OpenSSL retains the authenticated raw key in the resumed session.
+    local key = SSL_get0_peer_rpk(conn.ssl)
+    if key == nilptr or EVP_PKEY_is_a(key,'ED25519') ~= 1 then return false end
+  end
   local allowed = conn.resume_attempted or (conn.listener ~= nilptr and conn.listener.resumable)
   return conn.pin_status == 1 or (conn.pin_status == 0 and allowed and SSL_session_reused(conn.ssl) == 1)
 end
@@ -988,14 +998,17 @@ end
 
 local QuicConfig = @record{seed: [32]cuchar, peer: [32]cuchar, alpn: [256]cuchar, size: cuint}
 
-local function unpack_config(e: Env, args: *[0]Term, config: *QuicConfig): boolean
-  local seed_size = unpack(e,args[2],&config.seed[0],32)
-  local peer_size = unpack(e,args[3],&config.peer[0],32)
-  local alpn_size = unpack(e,args[4],&config.alpn[1],255)
-  if seed_size ~= 32 or peer_size ~= 32 or alpn_size <= 0 then return false end
-  config.alpn[0] = (@cuchar)(alpn_size)
-  config.size = (@cuint)(alpn_size + 1)
+local function unpack_alpn(e: Env, value: Term, config: *QuicConfig): boolean
+  local size = unpack(e,value,&config.alpn[1],255)
+  if size <= 0 then return false end
+  config.alpn[0] = (@cuchar)(size)
+  config.size = (@cuint)(size + 1)
   return true
+end
+
+local function unpack_config(e: Env, args: *[0]Term, config: *QuicConfig): boolean
+  return unpack(e,args[2],&config.seed[0],32) == 32 and
+    unpack(e,args[3],&config.peer[0],32) == 32 and unpack_alpn(e,args[4],config)
 end
 
 local function owns_ticket(config: *QuicConfig, ticket: *Session): boolean
@@ -1525,6 +1538,24 @@ local function early_datagram_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],write(e,find(e,args[0]),args[1],true))
 end
 
+local function remote_id_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find(e,args[0])
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if not authenticated(conn) then
+    return io_tup(e,args[0],io_fail(e,EAGAIN,'QUIC handshake is incomplete'))
+  end
+  local peer = conn.expected_key
+  if conn.listener ~= nilptr then
+    peer = conn.listener.expected_key
+    if peer == nilptr then peer = SSL_get0_peer_rpk(conn.ssl) end
+  end
+  local key: [32]cuchar
+  if not public_key(peer,&key[0]) then
+    return io_tup(e,args[0],io_fail(e,EIO,'authenticated QUIC peer identity unavailable'))
+  end
+  return io_tup(e,args[0],io_done(e,io_list(e,(@cstring)(&key[0]),#key)))
+end
+
 local function take_session_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
@@ -1771,12 +1802,18 @@ local function configure_tickets(ctx: *SSL_CTX, resume: boolean): boolean
   return SSL_CTX_set_max_early_data(ctx,0xffffffff) == 1 and SSL_CTX_set_num_tickets(ctx,2) == 1
 end
 
-local function bind_listener(e: Env, args: *[0]Term, resume: boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, resume: boolean, discover_peer: boolean): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
   local config: QuicConfig
-  if not unpack_config(e,args,&config) or args[1] > 65535 or io_nul(host,host_size) then
+  local configured: boolean
+  if discover_peer then
+    configured = unpack(e,args[2],&config.seed[0],32) == 32 and unpack_alpn(e,args[3],&config)
+  else
+    configured = unpack_config(e,args,&config)
+  end
+  if not configured or args[1] > 65535 or io_nul(host,host_size) then
     return io_fail(e,EINVAL,'invalid QUIC listen address, Ed25519 key, or ALPN')
   end
   if next_listener_id == 0 then return io_fail(e,ENOMEM,'QUIC listener handles exhausted') end
@@ -1798,8 +1835,11 @@ local function bind_listener(e: Env, args: *[0]Term, resume: boolean): Term
     return io_fail(e,code,nilptr)
   end
   listener.ctx = create_tls_ctx(&config.seed[0],SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-  listener.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,&config.peer[0],32)
-  if listener.ctx == nilptr or listener.expected_key == nilptr or not configure_tickets(listener.ctx,resume) then
+  if not discover_peer then
+    listener.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,&config.peer[0],32)
+  end
+  if listener.ctx == nilptr or (not discover_peer and listener.expected_key == nilptr) or
+      not configure_tickets(listener.ctx,resume) then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure QUIC listener TLS')
   end
@@ -1816,11 +1856,16 @@ local function bind_listener(e: Env, args: *[0]Term, resume: boolean): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,false)
+  return bind_listener(e,args,false,false)
 end
 
 local function bind_resumable_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,true)
+  return bind_listener(e,args,true,false)
+end
+
+local function bind_identity_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
+  return bind_listener(e,args,args[4] == 1,true)
 end
 
 local function try_accept(e: Env, listener: *Listener): Term
@@ -1896,6 +1941,8 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_write_early_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_early_datagram,early_datagram_run) end
   if iroh_dgram_quic_resumption_status ~= 0xffffffff then io_eff(iroh_dgram_quic_resumption_status,resumption_run) end
   if iroh_dgram_bind_resumable_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_resumable_quic,bind_resumable_run) end
+  if iroh_dgram_bind_quic_identity ~= 0xffffffff then io_eff(iroh_dgram_bind_quic_identity,bind_identity_run) end
+  if iroh_dgram_quic_remote_id ~= 0xffffffff then io_eff(iroh_dgram_quic_remote_id,remote_id_run) end
   if iroh_dgram_bind_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_shared_quic,bind_run) end
   if iroh_dgram_try_accept_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_try_accept_shared_quic,accept_run) end
   if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end

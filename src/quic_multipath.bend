@@ -330,6 +330,15 @@ def bind_resumable_multipath(host: String, port: U32, seed: List<&2,U32>, peer: 
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+# Authenticate each connecting Ed25519 peer. List ALPNs in server preference order.
+def bind_multipath_identity(host: String, port: U32, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
+def multipath_remote_id(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_multipath.c"
+
 # List protocols in server preference order.
 def bind_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):

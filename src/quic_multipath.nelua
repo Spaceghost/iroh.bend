@@ -34,7 +34,7 @@ local probe_packet_t <cimport,nodecl,codename 'picoquic_packet_t'> = @record{
 local crypto_context_t <cimport,nodecl,codename 'picoquic_crypto_context_t'> = @record{}
 local tree_t <cimport,nodecl,codename 'picosplay_tree_t'> = @record{}
 local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
-  is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64,cnx_state:cint,tls_stream:[4]native_stream_t,
+  is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64,cnx_state:cint,tls_stream:[4]native_stream_t,tls_ctx:pointer,
   remote_parameters:transport_t,first_datagram:*frame_t,
   max_early_data_size:csize,zero_rtt_data_accepted:cuint,first_misc_frame:*frame_t,last_misc_frame:*frame_t,
   maxdata_remote:uint64,max_streams_bidir_remote:uint64,max_streams_unidir_remote:uint64,data_sent:uint64,
@@ -44,7 +44,7 @@ local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
 local buffer_t <cimport,nodecl,codename 'ptls_buffer_t'> = @record{base:*uint8,off:csize}
 local iov_t <cimport,nodecl,codename 'ptls_iovec_t'> = @record{base:*uint8,len:csize}
 local client_tls_t <cimport,nodecl,codename 'picoquic_tls_ctx_t'> = @record{
-  alpn_vec:*[0]iov_t, alpn_vec_size:csize, alpn_count:csize
+  alpn_vec:*[0]iov_t, alpn_vec_size:csize, alpn_count:csize, tls:*tls_t
 }
 local ext_t <cimport,nodecl,codename 'ptls_raw_extension_t'> = @record{type:uint16,data:iov_t}
 ## cdefine 'iroh_mp_client_props __typeof__(((ptls_handshake_properties_t*)0)->client)'
@@ -290,7 +290,7 @@ local names = {
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
-  'bind_resumable_multipath', 'accept_multipath', 'close_multipath_listener',
+  'bind_resumable_multipath', 'bind_multipath_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -358,6 +358,8 @@ local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_identity: uint32 <cimport,nodecl>
+local iroh_mp_multipath_remote_id: uint32 <cimport,nodecl>
 local iroh_mp_bind_resumable_multipath: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath: uint32 <cimport,nodecl>
@@ -443,6 +445,8 @@ local function SSL_do_handshake(ssl:*mp_ssl):cint <cimport,nodecl> end
 local function SSL_get_error(ssl:*mp_ssl,status:cint):cint <cimport,nodecl> end
 local picoquic_state_server_false_start:cint <cimport,nodecl>
 local picoquic_state_server_handshake:cint <cimport,nodecl>
+local function SSL_get0_peer_rpk(ssl:*mp_ssl):*evp_t <cimport,nodecl> end
+local function EVP_PKEY_is_a(key:*evp_t,name:cstring):cint <cimport,nodecl> end
 local function SSL_session_reused(ssl:*mp_ssl):cint <cimport,nodecl> end
 local function SSL_is_init_finished(ssl:*mp_ssl):cint <cimport,nodecl> end
 local function SSL_get_current_cipher(ssl:*mp_ssl):*mp_ssl_cipher <cimport,nodecl> end
@@ -501,7 +505,7 @@ local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
 local Listener = @record{
   next: pointer, id: uint32, fd: cint, quic: *quic_t, local_addr: storage_t,
-  refs: uint32, stopped: boolean, ossl:*mp_ssl_ctx, ossl_peer:*evp_t,
+  refs: uint32, stopped: boolean, ossl:*mp_ssl_ctx, ossl_peer:*evp_t, resumable:boolean,
   nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer: boolean
 }
 local Path = @record{
@@ -739,8 +743,8 @@ end
 
 local function verify_raw(self: *verify_t, tls: *tls_t, server: cstring,
     verify_sign: pointer, verify_data: pointer, certs: *iov_t, count: csize): cint
-  if count ~= 1 then return PTLS_ALERT_BAD_CERTIFICATE end
   local pin = (@*PinnedKey)(self)
+  if count ~= 1 or pin.original == nilptr then return PTLS_ALERT_BAD_CERTIFICATE end
   return pin.original(self,tls,server,verify_sign,verify_data,certs,count)
 end
 
@@ -788,16 +792,22 @@ local function install_identity(quic: *quic_t, seed: *uint8, peer: *uint8, alpns
   end
   cert.len = 44
   picoquic_set_tls_certificate_chain(quic,cert,1)
-  local public = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
-  if public == nilptr then return false end
+  local public:*evp_t
+  if peer ~= nilptr then
+    public = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+    if public == nilptr then return false end
+  end
   defer EVP_PKEY_free(public) end
   local pin = (@*PinnedKey)(C.calloc(1,#PinnedKey))
   if pin == nilptr then return false end
-  if ptls_openssl_raw_pubkey_init_verify_certificate(&pin.backend,public) ~= 0 then
+  -- An identity listener always verifies with OpenSSL. The Picotls object
+  -- still supplies Picoquic's packet protection and listener ALPN state.
+  local shadow_key = public ~= nilptr and public or private
+  if ptls_openssl_raw_pubkey_init_verify_certificate(&pin.backend,shadow_key) ~= 0 then
     C.free(pin)
     return false
   end
-  pin.original = (@VerifyCallback)(pin.backend.super.cb)
+  if public ~= nilptr then pin.original = (@VerifyCallback)(pin.backend.super.cb) end
   pin.backend.super.cb = (@pointer)(verify_raw)
   pin.alpns = $alpns
   $alpns = nilptr
@@ -1150,7 +1160,7 @@ local function mp_tls_alert(ssl:*mp_ssl,alert:uint8,arg:pointer):cint
   return 1
 end
 
-local function mp_tls_open(tls:*tls_t,cnx:*cnx_t,ctx:*mp_ssl_ctx,props:*props_t):*MpTls
+local function mp_tls_open(tls:*tls_t,cnx:*cnx_t,ctx:*mp_ssl_ctx,props:*props_t,resumable:boolean):*MpTls
   local mp_tls_callbacks:[7]mp_dispatch = {
     {function_id=OSSL_FUNC_SSL_QUIC_TLS_CRYPTO_SEND,iroh_mp_dispatch_fn=(@MpDispatchFn)(mp_crypto_send)},
     {function_id=OSSL_FUNC_SSL_QUIC_TLS_CRYPTO_RECV_RCD,iroh_mp_dispatch_fn=(@MpDispatchFn)(mp_crypto_receive)},
@@ -1168,7 +1178,8 @@ local function mp_tls_open(tls:*tls_t,cnx:*cnx_t,ctx:*mp_ssl_ctx,props:*props_t)
   state.props = props
   if state.ssl ~= nilptr then SSL_set_accept_state(state.ssl) end
   if state.ssl == nilptr or SSL_set_quic_tls_cbs(state.ssl,&mp_tls_callbacks[0],state) ~= 1 or
-      SSL_set_app_data(state.ssl,state) ~= 1 or SSL_set_quic_tls_early_data_enabled(state.ssl,1) ~= 1 then
+      SSL_set_app_data(state.ssl,state) ~= 1 or
+      (resumable and SSL_set_quic_tls_early_data_enabled(state.ssl,1) ~= 1) then
     SSL_free(state.ssl)
     C.free(state)
     return nilptr
@@ -1214,7 +1225,8 @@ end
 
 local function mp_tls_verify(store:*mp_store,expected:pointer):cint
   local offered = X509_STORE_CTX_get0_rpk(store)
-  if offered ~= nilptr and EVP_PKEY_eq(offered,(@*evp_t)(expected)) == 1 then
+  if offered ~= nilptr and EVP_PKEY_is_a(offered,'ED25519') == 1 and
+      (expected == nilptr or EVP_PKEY_eq(offered,(@*evp_t)(expected)) == 1) then
     X509_STORE_CTX_set_error(store,X509_V_OK)
     return 1
   end
@@ -1253,18 +1265,23 @@ local function mp_tls_listener(listener:*Listener,seed:*uint8,peer:*uint8):boole
   local private = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,seed,32)
   if private == nilptr then return false end
   defer EVP_PKEY_free(private) end
-  listener.ossl_peer = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+  if peer ~= nilptr then
+    listener.ossl_peer = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+    if listener.ossl_peer == nilptr then return false end
+  end
   listener.ossl = SSL_CTX_new(TLS_method())
-  if listener.ossl_peer == nilptr or listener.ossl == nilptr then return false end
+  if listener.ossl == nilptr then return false end
   local raw:uint8 = 2
-  local realm:[32]uint8
   if SSL_CTX_use_PrivateKey(listener.ossl,private) ~= 1 or
-      SSL_CTX_set1_server_cert_type(listener.ossl,&raw,1) ~= 1 or SSL_CTX_set1_client_cert_type(listener.ossl,&raw,1) ~= 1 or
-      RAND_bytes(&realm[0],32) ~= 1 or SSL_CTX_set_session_id_context(listener.ossl,&realm[0],32) ~= 1 or
-      SSL_CTX_set_max_early_data(listener.ossl,0xffffffff) ~= 1 or SSL_CTX_set_num_tickets(listener.ossl,2) ~= 1 then return false end
+      SSL_CTX_set1_server_cert_type(listener.ossl,&raw,1) ~= 1 or
+      SSL_CTX_set1_client_cert_type(listener.ossl,&raw,1) ~= 1 then return false end
   SSL_CTX_set_verify(listener.ossl,SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,nilptr)
   SSL_CTX_set_cert_verify_callback(listener.ossl,(@pointer)(mp_tls_verify),listener.ossl_peer)
   SSL_CTX_set_alpn_select_cb(listener.ossl,(@pointer)(mp_tls_alpn),listener)
+  if not listener.resumable then return SSL_CTX_set_num_tickets(listener.ossl,0) == 1 end
+  local realm:[32]uint8
+  if RAND_bytes(&realm[0],32) ~= 1 or SSL_CTX_set_session_id_context(listener.ossl,&realm[0],32) ~= 1 or
+      SSL_CTX_set_max_early_data(listener.ossl,0xffffffff) ~= 1 or SSL_CTX_set_num_tickets(listener.ossl,2) ~= 1 then return false end
   -- Keep OpenSSL's single-use early-data ticket cache scoped to the listener.
   SSL_CTX_set_session_cache_mode(listener.ossl,SSL_SESS_CACHE_SERVER)
   SSL_CTX_sess_set_cache_size(listener.ossl,1024)
@@ -1282,7 +1299,7 @@ local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:c
     local listener = (@*Listener)(picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
     if listener.ossl ~= nilptr then
       local state = find_mp_tls(tls)
-      if state == nilptr then state = mp_tls_open(tls,cnx,listener.ossl,props) end
+      if state == nilptr then state = mp_tls_open(tls,cnx,listener.ossl,props,listener.resumable) end
       if state == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
       return mp_tls_message(state,buf,offsets,bytes,len)
     end
@@ -1623,6 +1640,17 @@ local function update_path(conn: *Connection, id: uint64, kind: cint)
   end
 end
 
+local function authenticated_peer_key(conn:*Connection):*evp_t
+  if conn.listener == nilptr or conn.listener.ossl == nilptr then
+    return pinned(conn.quic).backend.expected_pubkey
+  end
+  local tls = (@*client_tls_t)(conn.cnx.tls_ctx)
+  if tls == nilptr then return nilptr end
+  local state = find_mp_tls(tls.tls)
+  if state == nilptr or SSL_is_init_finished(state.ssl) == 0 then return nilptr end
+  return SSL_get0_peer_rpk(state.ssl)
+end
+
 local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
     user: pointer, stream_user: pointer): cint
   local conn = (@*Connection)(user)
@@ -1649,7 +1677,8 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
         end
       end
     end
-    if conn.selected_alpn == nilptr then
+    local peer = authenticated_peer_key(conn)
+    if conn.selected_alpn == nilptr or peer == nilptr or EVP_PKEY_is_a(peer,'ED25519') ~= 1 then
       conn.closed = true
       return -1
     end
@@ -2071,6 +2100,19 @@ local function start_early_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return start_resume(e,args,true)
 end
 
+local function remote_id_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  if not conn.ready then return io_tup(e,args[0],io_fail(e,EAGAIN,'QUIC handshake is incomplete')) end
+  local bytes:[32]uint8
+  local length:csize = #bytes
+  local key = authenticated_peer_key(conn)
+  if key == nilptr or EVP_PKEY_get_raw_public_key(key,&bytes[0],&length) ~= 1 or length ~= #bytes then
+    return io_tup(e,args[0],io_fail(e,EIO,'authenticated QUIC peer identity unavailable'))
+  end
+  return io_tup(e,args[0],io_done(e,io_list(e,(@cstring)(&bytes[0]),length)))
+end
+
 local function negotiated_alpn_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
@@ -2363,17 +2405,19 @@ local function unspecified_address(addr:*storage_t): boolean
   return C.memcmp(&((@*addr6_t)(addr)).sin6_addr,&zero[0],16) == 0
 end
 
-local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
-  local alpns = read_alpns(e,args[4],mode)
+  local alpn_term = args[discover_peer and 3 or 4]
+  local alpns = read_alpns(e,alpn_term,mode)
   defer free_alpns(alpns) end
   local seed: [32]uint8
   local key: [32]uint8
   local seed_size = bytes_from_list(e,args[2],&seed[0],32)
-  local key_size = bytes_from_list(e,args[3],&key[0],32)
-  local empty = mode == 2 and term_aux(args[4]) == iroh_mp_Nil
-  if size == 0 or seed_size ~= 32 or key_size ~= 32 or (alpns == nilptr and not empty) then
+  local peer:*uint8
+  if not discover_peer and bytes_from_list(e,args[3],&key[0],32) == 32 then peer = &key[0] end
+  local empty = mode == 2 and term_aux(alpn_term) == iroh_mp_Nil
+  if size == 0 or seed_size ~= 32 or (not discover_peer and peer == nilptr) or (alpns == nilptr and not empty) then
     return io_fail(e,EINVAL,'invalid numeric listen address, Ed25519 key, or ALPN')
   end
   if unspecified_address(&local_addr) then
@@ -2401,12 +2445,13 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat
   local now = picoquic_current_time()
   listener.quic = picoquic_create(LISTENER_LIMIT,nilptr,nilptr,nilptr,nilptr,(@pointer)(server_event),listener,
     nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],&key[0],&alpns,nilptr) or
+  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],peer,&alpns,nilptr) or
       picoquic_set_default_tp_value(listener.quic,picoquic_tp_max_datagram_frame_size,IO_CAPACITY) ~= 0 then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure pinned QUIC listener')
   end
-  if resumable and not mp_tls_listener(listener,&seed[0],&key[0]) then
+  listener.resumable = resumable
+  if (resumable or discover_peer) and not mp_tls_listener(listener,&seed[0],peer) then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure OpenSSL server TLS')
   end
@@ -2445,27 +2490,32 @@ local function accept_connection(e: Env, listener: *Listener): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,false,false)
+  return bind_listener(e,args,0,false,false,false)
 end
 
 local function bind_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,true,false)
+  return bind_listener(e,args,0,true,false,false)
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,1,false,false)
+  return bind_listener(e,args,1,false,false,false)
 end
 
 local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,false,false)
+  return bind_listener(e,args,2,false,false,false)
 end
 
 local function bind_resumable_run(e:Env, args:*[0]Term, work:*IoWork):Term
-  return bind_listener(e,args,1,false,true)
+  return bind_listener(e,args,1,false,true,false)
+end
+
+local function bind_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
+  if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
+  return bind_listener(e,args,2,false,args[4] == 1,true)
 end
 
 local function bind_nat_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,true,false)
+  return bind_listener(e,args,2,true,false,false)
 end
 
 local function used_alpns(listener: *Listener)
@@ -3771,6 +3821,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_bind_resumable_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_resumable_multipath,bind_resumable_run) end
+  if iroh_mp_bind_multipath_identity ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_identity,bind_identity_run) end
+  if iroh_mp_multipath_remote_id ~= 0xffffffff then io_eff(iroh_mp_multipath_remote_id,remote_id_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end
   if iroh_mp_accept_multipath ~= 0xffffffff then io_eff(iroh_mp_accept_multipath,accept_run) end
   if iroh_mp_close_multipath_listener ~= 0xffffffff then io_eff(iroh_mp_close_multipath_listener,close_listener_run) end
