@@ -61,6 +61,17 @@ def check_relay_qad(client, fixture, host, mode, relay, peer_relay, port, name, 
     print(f"PASS address discovery rejected the wrong TLS name and missing trust roots on {host}", flush=True)
 
 
+def check_routed_nat(client, fixture, host, mode, relay, peer_relay):
+    with process(fixture, mode, peer_relay) as server:
+        read_address(server)
+        subprocess.run((client, host, "0", "0", relay, "auto"), timeout=20, check=True)
+        transcript, _ = server.communicate(timeout=5)
+        print(transcript.decode(), end="", flush=True)
+        if server.returncode:
+            raise RuntimeError(f"Iroh rejected the automatic NAT path on {host}")
+        print(f"PASS default routed dial promoted an authenticated NAT candidate on {host}", flush=True)
+
+
 def check_routed(client, fixture, host, mode, family, relay, peer_relay):
     with ExitStack() as stack:
         server = stack.enter_context(process(fixture, mode, peer_relay))
@@ -203,3 +214,4 @@ if __name__ == "__main__":
         if relay:
             check(client, fixture, host, mode, family, relay, peer_relay)
             check_routed(client, fixture, host, mode, family, relay, peer_relay)
+            check_routed_nat(client, fixture, host, mode, relay, peer_relay)

@@ -153,6 +153,7 @@ type ProbeState is Data:
   Waiting{since: U32}
   Backup{plan: BackupPlan, phase: BackupState}
   Rechecking{relay: U32, direct: ProbeState}
+  RelayNat{direct: ProbeState, driver: Nat.Dialer}
 
 type RoutedConnection is Type:
   Routed{transport: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState}
@@ -179,14 +180,41 @@ def route_state(base: Connection(), +candidates: List<&2,Endpoint.Address>, urls
       Endpoint.HandshakeTimeouts{_,timeout} = timeouts
       Routed{(conn,None{}),candidates,Backup{BackupRoutes{identity,Con{url,rest},timeout},DialBackup{Con{url,rest},now}}}
 
+def routed_nat_limit() -> U32:
+  64
+
+def dial_relay_offer(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
+  Endpoint.IpAddress{host,port} = address
+  Endpoint.PeerKeys{seed,peer,alpn} = identity
+  Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,routed_nat_limit(),U32.to_nat(timeout))
+
+def relay_route_ready(pair: Quic.MultipathConnection & Nat.DialerResult(), bridge: Relay.Bridge,
+    +candidates: List<&2,Endpoint.Address>, now: U32) -> RoutedResult():
+  match pair:
+    case (conn,Done{driver}):
+      Done{Routed{(conn,Some{bridge}),candidates,RelayNat{Seeking{candidates,now},driver}}}
+    case (conn,Fail{_}):
+      Done{Routed{(conn,Some{bridge}),candidates,Seeking{candidates,now}}}
+
+def setup_routed(result: ConnectResult(), candidates: List<&2,Endpoint.Address>, urls: List<&2,String>,
+    identity: Endpoint.Identity, timeouts: Endpoint.Timeouts, now: U32) -> IO(RoutedResult()):
+  match result:
+    case Done{(conn,Some{bridge})}:
+      do IO<RoutedResult()>:
+        driver : Quic.MultipathConnection & Nat.DialerResult() <- Nat.initialize_relay(conn,routed_nat_limit())
+        return relay_route_ready(driver,bridge,candidates,now)
+    case Done{owner}:
+      IO.pure(RoutedResult(),Done{route_state(owner,candidates,urls,identity,timeouts,now)})
+    case Fail{error}:
+      IO.pure(RoutedResult(),Fail{error})
+
 def connect_routed(+routes: Endpoint.Routes, +identity: Endpoint.Identity, +timeouts: Endpoint.Timeouts)
     -> IO(RoutedResult()):
   Endpoint.DialRoutes{candidates,urls} = routes
   do IO<RoutedResult()>:
-    result : ConnectResult() <- connect_routes(routes,identity,timeouts)
+    result : ConnectResult() <- Endpoint.dial_plan_with(~Quic.MultipathConnection,~dial,~dial_relay_offer,routes,identity,timeouts)
     now : U32 <- Quic.multipath_millis()
-    return Result.map(&1,&1,U32 & String,Connection(),RoutedConnection,
-      conn => route_state(conn,candidates,urls,identity,timeouts,now),result)
+    setup_routed(result,candidates,urls,identity,timeouts,now)
 
 def after_probe(outcome: Connection() & Result<&1,&1,U32 & String,Maybe<&1,U32>>, peer: Endpoint.Address,
     rest: List<&2,Endpoint.Address>, since: U32, now: U32, expired: Bool) -> Connection() & ProbeState:
@@ -501,9 +529,54 @@ def keep_rechecking(progress: Connection() & ProbeState, relay_path: U32) -> Con
   (conn,next) = progress
   (conn,Rechecking{relay_path,next})
 
+def keep_relay_nat(progress: Connection() & ProbeState, driver: Nat.Dialer) -> Connection() & ProbeState:
+  (conn,current) = progress
+  (conn,RelayNat{current,driver})
+
+def keep_published(conn: Connection(), candidates: List<&2,Endpoint.Address>, phase: ProbeState,
+    driver: Nat.Dialer, now: U32) -> IO(Connection() & ProbeState):
+  do IO<Connection() & ProbeState>:
+    progress : Connection() & ProbeState <- advance_direct(conn,candidates,phase,0,now)
+    return keep_relay_nat(progress,driver)
+
+def choose_punched(conn: Connection(), candidates: List<&2,Endpoint.Address>, phase: ProbeState,
+    driver: Nat.Dialer, now: U32, path: Maybe<&1,U32>) -> IO(Connection() & ProbeState):
+  match path:
+    case Some{+id}:
+      do IO<Connection() & ProbeState>:
+        preferred : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0,1)
+        return keep_relay_nat(promote(preferred,id,[],now),driver)
+    case None{}:
+      keep_published(conn,candidates,phase,driver,now)
+
+def punched(result: Quic.MultipathConnection & Nat.DialerResult(), bridge: Maybe<&1,Relay.Bridge>,
+    candidates: List<&2,Endpoint.Address>, phase: ProbeState, now: U32) -> IO(Connection() & ProbeState):
+  match result:
+    case (conn,Done{+driver}):
+      choose_punched((conn,bridge),candidates,phase,driver,now,Nat.direct_path(driver))
+    case (conn,Fail{_}):
+      advance_direct((conn,bridge),candidates,phase,0,now)
+
+def relayed_traversal(owner: Connection(), candidates: List<&2,Endpoint.Address>, phase: ProbeState,
+    driver: Nat.Dialer, now: U32) -> IO(Connection() & ProbeState):
+  (conn,bridge) = owner
+  do IO<Connection() & ProbeState>:
+    progress : Quic.MultipathConnection & Nat.DialerResult() <- Nat.drive_ready((conn,Done{2}),Nat.retry_path(driver))
+    punched(progress,bridge,candidates,phase,now)
+
+def advance_relay_nat(conn: Connection(), candidates: List<&2,Endpoint.Address>, phase: ProbeState,
+    driver: Nat.Dialer, now: U32) -> IO(Connection() & ProbeState):
+  match phase:
+    case Waiting{since}:
+      relayed_traversal(conn,candidates,Waiting{since},driver,now)
+    case current:
+      keep_published(conn,candidates,current,driver,now)
+
 def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState, +now: U32)
     -> IO(Connection() & ProbeState):
   match state:
+    case RelayNat{phase,driver}:
+      advance_relay_nat(conn,candidates,phase,driver,now)
     case Backup{+plan,phase}:
       do IO<Connection() & ProbeState>:
         progress : BackupProgress() <- advance_backup(conn,plan,phase,now)
@@ -517,6 +590,8 @@ def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: Pr
 
 def selected(state: ProbeState) -> SelectedPath:
   match state:
+    case RelayNat{current,_}:
+      selected(current)
     case DirectPath{id}:
       PromotedPath{id}
     case Rechecking{_,DirectPath{id}}:

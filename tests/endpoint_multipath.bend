@@ -156,7 +156,7 @@ def await_promotion(progress: Multipath.RoutedConnection & Multipath.PathResult(
 def wait_promotion(fuel: Nat, owner: Multipath.RoutedConnection) -> IO(Multipath.RoutedConnection):
   match fuel:
     case 0n:
-      routed_fail(Multipath.RoutedConnection,owner,1,"published direct path did not become preferred")
+      routed_fail(Multipath.RoutedConnection,owner,1,"direct path did not become preferred")
     case 1n+left:
       do IO<Multipath.RoutedConnection>:
         progress : Multipath.RoutedConnection & Multipath.PathResult() <- Multipath.step_routes(owner)
@@ -207,23 +207,35 @@ def exchange_routed(owner: Multipath.RoutedConnection) -> IO(Unit):
       Multipath.use_routed_connection(Unit,owner,datagrams_on_relay)
     send_first_routed(exchanged)
 
-def auto(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>, url: String) -> IO(Unit):
+def route_exchange(routes: Endpoint.Routes) -> IO(Unit):
+  do IO<Unit>:
+    owner : Multipath.RoutedConnection <- IO.try(Multipath.RoutedConnection,
+      Multipath.connect_routed(routes,
+        Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),fixture_alpn()},
+        Endpoint.HandshakeTimeouts{150,6000}))
+    exchange_routed(owner)
+
+def test_candidates(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>)
+    -> Maybe<&2,List<&2,Endpoint.Address>>:
   match blocked gated:
+    case Some{0} Some{0}:
+      Some{[]}
     case Some{blackhole} Some{reachable}:
-      do IO<Unit>:
-        owner : Multipath.RoutedConnection <- IO.try(Multipath.RoutedConnection,
-          Multipath.connect_routed(Endpoint.DialRoutes{
-            [Endpoint.IpAddress{host,blackhole},Endpoint.IpAddress{host,reachable}],[url]},
-            Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),fixture_alpn()},
-            Endpoint.HandshakeTimeouts{150,6000}))
-        exchange_routed(owner)
+      Some{[Endpoint.IpAddress{host,blackhole},Endpoint.IpAddress{host,reachable}]}
     case _ _:
+      None{}
+
+def auto(candidates: Maybe<&2,List<&2,Endpoint.Address>>, url: String) -> IO(Unit):
+  match candidates:
+    case Some{ips}:
+      route_exchange(Endpoint.DialRoutes{ips,[url]})
+    case None{}:
       IO.die(Unit,2,"expected both candidate ports")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,host,blackhole,gated,url,"auto"]:
-      auto(host,U32.read(blackhole),U32.read(gated),url)
+      auto(test_candidates(host,U32.read(blackhole),U32.read(gated)),url)
     case [_,host,port,"binary"]:
       direct(host,U32.read(port),Fixture.binary_alpn())
     case Con{_,Con{host,Con{port,Nil{}}}}:

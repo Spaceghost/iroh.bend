@@ -250,22 +250,26 @@ def direct_timeout(timeouts: Timeouts) -> U32:
   HandshakeTimeouts{ms,_} = timeouts
   ms
 
-def try_ips(~C: Type, ~attempt: Dialer(C), ips: List<&2,Address>, urls: List<&2,String>, +identity: Identity,
+def try_ips(~C: Type, ~attempt: Dialer(C), ~relay_attempt: Dialer(C), ips: List<&2,Address>, urls: List<&2,String>, +identity: Identity,
     +timeouts: Timeouts, last: U32 & String) -> IO(TransportResult(C)):
   match ips:
     case Nil{}:
       HandshakeTimeouts{_,relay_ms} = timeouts
-      try_relays(~C,~attempt,urls,identity,relay_ms,last)
+      try_relays(~C,~relay_attempt,urls,identity,relay_ms,last)
     case Con{ip,rest}:
       do IO<TransportResult(C)>:
         conn : Result<&1,&1,U32 & String,C> <- attempt(ip,identity,direct_timeout(timeouts))
         continue_dial(C,Result.map(&1,&1,U32 & String,C,Transport(C),c => (c,None{}),conn),
-          error => try_ips(~C,~attempt,rest,urls,identity,timeouts,error))
+          error => try_ips(~C,~attempt,~relay_attempt,rest,urls,identity,timeouts,error))
+
+def dial_plan_with(~C: Type, ~direct: Dialer(C), ~relay: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
+    -> IO(TransportResult(C)):
+  DialRoutes{ips,urls} = plan
+  try_ips(~C,~direct,~relay,ips,urls,identity,timeouts,(1,"endpoint has no usable direct address or relay"))
 
 def dial_plan(~C: Type, ~attempt: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
     -> IO(TransportResult(C)):
-  DialRoutes{ips,urls} = plan
-  try_ips(~C,~attempt,ips,urls,identity,timeouts,(1,"endpoint has no usable direct address or relay"))
+  dial_plan_with(~C,~attempt,~attempt,plan,identity,timeouts)
 
 def dial_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
   dial_plan(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)

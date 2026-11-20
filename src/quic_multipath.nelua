@@ -286,7 +286,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
@@ -346,6 +346,7 @@ local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_address: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_nat_source: uint32 <cimport,nodecl>
+local iroh_mp_route_multipath_nat_source: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_poll_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
@@ -2143,19 +2144,18 @@ local function probe_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],probe(e,find_connection(e,args[0]),args))
 end
 
-local function nat_address(e:Env, args:*[0]Term, conn:*Connection, output:*storage_t): boolean
+local function packed_nat_address(e:Env, args:*[0]Term, family:uint16, output:*storage_t): boolean
   local ip: [16]uint8
   local length = bytes_from_list(e,args[1],&ip[0],16)
-  local local_addr = nat_local_address(conn)
-  if local_addr == nilptr or args[2] == 0 or args[2] > 65535 then return false end
-  if local_addr.ss_family == AF_INET and length == 4 then
+  if args[2] == 0 or args[2] > 65535 then return false end
+  if (family == 0 or family == AF_INET) and length == 4 then
     local v4 = (@*addr_t)(output)
     v4.sin_family = (@uint16)(AF_INET)
     v4.sin_port = htons((@uint16)(args[2]))
     C.memcpy(&v4.sin_addr,&ip[0],4)
     return true
   end
-  if local_addr.ss_family ~= AF_INET6 then return false end
+  if family ~= 0 and family ~= AF_INET6 then return false end
   local v6 = (@*addr6_t)(output)
   v6.sin6_family = (@uint16)(AF_INET6)
   v6.sin6_port = htons((@uint16)(args[2]))
@@ -2170,6 +2170,11 @@ local function nat_address(e:Env, args:*[0]Term, conn:*Connection, output:*stora
     return false
   end
   return true
+end
+
+local function nat_address(e:Env, args:*[0]Term, conn:*Connection, output:*storage_t): boolean
+  local local_addr = nat_local_address(conn)
+  return local_addr ~= nilptr and packed_nat_address(e,args,local_addr.ss_family,output)
 end
 
 local function nat_probe(inbox:*NatInbox, peer:*storage_t, raw:*uint8, now:uint64): (*NatProbe, *NatProbe)
@@ -2330,6 +2335,14 @@ local function advertise_nat_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],advertise_nat(e,find_connection(e,args[0]),args[1]))
 end
 
+local function adopt_nat_source(conn:*Connection, path:*Path)
+  -- Responses tied to the old socket cannot authorize a path on this one.
+  for i = 0,<NAT_PROBE_CAPACITY do
+    conn.nat_inbox.probes[i].expires = 0
+  end
+  conn.nat_source = path
+end
+
 local function bind_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   if conn.listener ~= nilptr or not conn.ready then
@@ -2352,16 +2365,32 @@ local function bind_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
     return io_fail(e,error,'could not bind the direct NAT source')
   end
   path.unconnected = true
-  -- Responses tied to the old socket cannot authorize a path on this one.
-  for i = 0,<NAT_PROBE_CAPACITY do
-    conn.nat_inbox.probes[i].expires = 0
-  end
-  conn.nat_source = path
+  adopt_nat_source(conn,path)
   return io_done(e,term_pak(iroh_mp_Unit,0))
 end
 
 local function bind_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],bind_nat_source(e,find_connection(e,args[0]),args))
+end
+
+local function route_nat_source(e:Env, conn:*Connection, args:*[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if conn.listener ~= nilptr or not conn.ready or conn.nat_inbox == nilptr then
+    return io_fail(e,ENOTSUP,'NAT source selection requires an authenticated NAT dial')
+  end
+  if conn.nat_source ~= nilptr then return io_fail(e,EINVAL,'NAT source is already bound') end
+  local peer: storage_t
+  if not packed_nat_address(e,args,0,&peer) or unspecified_address(&peer) then
+    return io_fail(e,EINVAL,'invalid NAT route address')
+  end
+  local path,error = open_nat_path(&peer,address_size(&peer))
+  if path == nilptr then return io_fail(e,error,'could not select a direct NAT source') end
+  adopt_nat_source(conn,path)
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function route_nat_source_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  return io_tup(e,args[0],route_nat_source(e,find_connection(e,args[0]),args))
 end
 
 local function release_qad_server(server:*QadServer)
@@ -3107,6 +3136,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_close_qad_server ~= 0xffffffff then io_eff(iroh_mp_close_qad_server,close_qad_server_run) end
   if iroh_mp_start_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_start_multipath_qad,start_discovery_run) end
   if iroh_mp_poll_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_poll_multipath_qad,poll_discovery_run) end
+  if iroh_mp_route_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_route_multipath_nat_source,route_nat_source_run) end
   if iroh_mp_bind_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_source,bind_nat_source_run) end
   if iroh_mp_multipath_nat_local_candidate ~= 0xffffffff then io_eff(iroh_mp_multipath_nat_local_candidate,local_nat_candidate_run) end
   if iroh_mp_open_multipath_nat_path ~= 0xffffffff then io_eff(iroh_mp_open_multipath_nat_path,open_nat_path_run) end
