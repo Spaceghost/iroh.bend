@@ -217,6 +217,10 @@ def quic_stream_fin_acked(conn: DatagramConnection, stream: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"
 
+def quic_stream_reset_acked(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
 def drop_quic_stream(conn: DatagramConnection, stream: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_datagram.c"
