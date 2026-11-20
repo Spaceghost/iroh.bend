@@ -399,8 +399,10 @@ client requires a libcurl build with WebSocket support.
    `PASS Iroh reached the same Bend listener over the restored relay`.
    It holds the connections until it reads `FINISH`.
 5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
-   and run `make check-gpu` to decode 16,384 relay ping frames and check four
-   Punycode encoding and decoding vectors on the device.
+   and run `make check-gpu` for 16,384 relay ping decodes, four Punycode
+   vectors, four application-close frame vectors, and four public close-reason
+   vectors. One case checks that peer application code 110 stays distinct from
+   the Linux idle-timeout error with the same number.
 
 Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 
@@ -844,7 +846,8 @@ They also check expiry under one-way packet loss and verify that later datagram
 and stream operations report the timeout. With default settings, Iroh observes
 a 30-second negotiated idle timeout and a heartbeat after five seconds from each
 backend. Both connections exchange fresh data after the heartbeat. These checks
-cover the connection-wide timers.
+cover the connection-wide timers. Choosing the advertised idle timeout through
+Bend's endpoint configuration and matching Iroh's per-path timeouts remain open.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
