@@ -338,8 +338,8 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   [iroh-tickets 1.0.0 format](https://github.com/n0-computer/iroh-tickets/blob/v1.0.0/src/endpoint.rs)
   with Iroh 1.5.0 endpoint IDs, relay URLs, IPv4, IPv6, and custom transport
   addresses. `encode` produces the `endpoint`-prefixed string. `encode_bytes`
-  produces the Postcard payload. Supply canonical relay URL bytes when
-  constructing a ticket. The codec preserves them as UTF-8. Run
+  produces the Postcard payload. Supply UTF-8 relay URL bytes. Both constructors
+  and decoders normalize URLs before sorting and deduplicating addresses. Run
   `make check-endpoint-ticket` for the upstream snapshot and mixed-address
   round-trip checks.
 - `Endpoint.connect_ticket(text, seed, alpn, timeouts)` dials a ticket with the
@@ -347,9 +347,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   published IP addresses in order, then tries its relay URLs. Custom addresses
   can coexist with usable IP or relay addresses.
   `Endpoint.connect_ticket_with_lookup(text, seed, alpn, timeouts, sources)`
-  tries the ticket's routes first. If they are absent or all fail, it starts all
-  configured `DnsLookup{resolver}` and `PkarrLookup{relay, timeout_ms}` services
-  together and tries routes as results arrive. A successful handshake stops
+  starts every configured `DnsLookup{resolver}` and `PkarrLookup{relay, timeout_ms}`
+  service as it begins dialing the ticket. Resolver results are buffered while
+  supplied routes are tried. If the ticket has no usable route or every supplied
+  attempt fails, the dialer consumes the results in arrival order. A successful handshake stops
   outstanding lookups and closes their sockets. Every attempt pins the same endpoint ID. A Pkarr response must
   verify under that key. For a caller-supplied route list and identity, use
   `Endpoint.connect_with_lookup(plan, identity, timeouts, sources)`.
@@ -711,8 +712,9 @@ Full drop-in compatibility remains open. Known differences include the following
 
 - Ticket dialing starts DNS and Pkarr lookup while trying supplied candidates.
   A gated IPv4/IPv6 test holds the supplied handshake until the resolver starts
-  and finishes the exchange while the resolver reply is withheld. Discovered
-  addresses still wait behind outstanding supplied handshake attempts. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
+  and finishes the exchange while the resolver reply is withheld. An Iroh 1.5.0
+  dialer passed the same gate on IPv4 and IPv6. Discovered addresses still wait
+  behind outstanding supplied handshake attempts. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
 - A listener can advertise its initial observed UDP address. Refreshing that
   advertisement after a live listener's NAT mapping changes is parked. The
   outbound routed connection has a separate passing address-refresh test below.
