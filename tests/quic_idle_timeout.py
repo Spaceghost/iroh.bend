@@ -1,7 +1,10 @@
 """Compare idle expiry and default heartbeats on authenticated loopback Iroh connections."""
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
+from threading import Event
+
+from endpoint_lookup_race import dns_proxy
 
 from relay_quic_reconnect import child, expect
 
@@ -49,17 +52,17 @@ async def signal(process, command):
     await process.stdin.drain()
 
 
-async def check(bend, reference, case, host, bend_listens, control, routes):
+async def check(bend, reference, case, host, bend_listens, control):
     def args(listener, port):
         tested = listener == bend_listens
         if tested and not control:
-            return [bend, host, str(port), *(["route-idle"] if routes else []), case]
+            return [bend, host, str(port), case]
         address = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         mode = ["listen6" if host == "::1" else "listen"] if listener else ["dial", address]
-        return [reference, *mode, case, *(["control"] if tested else []), *(["route"] if routes else [])]
+        return [reference, *mode, case, *(["control"] if tested else [])]
 
     routed = case in ("one-way", "defaults")
-    marker = f"PASS {case} kept alive".encode() if routes or case in ("defaults", "wide", "no-limit") else f"PASS {case} timed out".encode()
+    marker = f"PASS {case} kept alive".encode() if case in ("defaults", "wide", "no-limit") else f"PASS {case} timed out".encode()
     context = f"{case} {host} {'listener' if bend_listens else 'dialer'}"
     async with asyncio.timeout(18 if case == "defaults" else 10):
         async with child(*args(True, 0)) as server:
@@ -110,30 +113,58 @@ async def listeners(bend, reference, host):
     print(f"PASS concurrent listener configurations {host}", flush=True)
 
 
-async def relay_route(bend, reference, case, url, origin):
+async def endpoint_route(bend, reference, case, *, host=None, relay=None, lookup=False):
     marker = f"PASS {case} kept alive".encode()
+    listener = (["listen-relay", relay[1]] if relay else
+                ["listen6" if host == "::1" else "listen"])
+    queried = Event()
+
+    def answer_query(*_):
+        queried.set()
+        return True
+
     async with asyncio.timeout(20):
-        async with child(reference, "listen-relay", origin, case, "route") as observer:
-            await expect(observer, b"READY relay")
-            async with child(bend, url, "relay-idle", case) as client:
-                for proc, (out, _) in zip((client, observer),
-                        await asyncio.gather(client.communicate(), observer.communicate())):
-                    if proc.returncode or marker not in out.splitlines():
-                        raise RuntimeError(f"{case} {url} exited {proc.returncode}: {out!r}")
-    print(f"PASS relay idle timeout {case} {url}", flush=True)
+        async with child(reference, *listener, case, "route") as observer:
+            if relay:
+                await expect(observer, b"READY relay")
+                target = relay[0]
+                command = [target, "relay-idle", case]
+            else:
+                target = (await observer.stdout.readline()).decode().strip()
+                port = int(target.rsplit(":", 1)[-1])
+                command = [host, str(port), "route-idle", case]
+            with ExitStack() as services:
+                if lookup:
+                    _, dns_port = dns_proxy(services, None, answer_query,
+                                            address=None if relay else target,
+                                            relay_url=relay[1] if relay else None)
+                    command = ["127.0.0.1", dns_port, "dns-idle", case]
+                async with child(bend, *command) as client:
+                    outputs = await asyncio.gather(client.communicate(), observer.communicate())
+                    for proc, (out, _) in zip((client, observer), outputs):
+                        if proc.returncode or marker not in out.splitlines():
+                            raise RuntimeError(f"{case} {target} exited {proc.returncode}: {out!r}")
+                if lookup and not queried.is_set():
+                    raise RuntimeError(f"the endpoint never queried DNS for {target}")
+    print(f"PASS endpoint idle timeout {case} {target} via {'DNS' if lookup else 'supplied route'}", flush=True)
 
 
 async def run(args):
-    if args.relay:
+    if args.relay or args.routes:
         for case in args.cases:
-            await relay_route(args.bend, args.reference, case, *args.relay)
+            for lookup in (False, True):
+                if args.relay:
+                    await endpoint_route(args.bend, args.reference, case, relay=args.relay, lookup=lookup)
+                else:
+                    await asyncio.gather(*(endpoint_route(args.bend, args.reference, case, host=host, lookup=lookup)
+                                           for host in ("127.0.0.1", "::1")))
         return
     if args.listeners:
         await asyncio.gather(*(listeners(args.bend, args.reference, host) for host in ("127.0.0.1", "::1")))
         return
     for case in args.cases:
-        await asyncio.gather(*(check(args.bend, args.reference, case, host, listens, args.control, args.routes)
-                               for host in ("127.0.0.1", "::1") for listens in ((False,) if args.routes else (True, False))))
+        await asyncio.gather(*(check(args.bend, args.reference, case, host, listens, args.control)
+                               for host in ("127.0.0.1", "::1") for listens in (True, False)))
 
 
 if __name__ == "__main__":

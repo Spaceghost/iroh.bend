@@ -138,6 +138,9 @@ client requires a libcurl build with WebSocket support.
    `UPSTREAM_IROH_RELAY_URL` as below. The observer accepts
    `listen-relay RELAY_BASE CASE route`, disables IP transports, prints
    `READY relay` after registration and checks the datagram arrived by relay.
+   Both route targets repeat each case with an empty initial address list. A
+   local DNS server returns the only direct address or relay URL. Iroh checks
+   the same timeout on the connection opened from that DNS response.
 
    For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
