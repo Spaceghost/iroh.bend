@@ -97,6 +97,7 @@ local Info <cimport,nodecl,codename 'bend_lws_info'> = @record{
 local LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION: cint <cimport,nodecl>
 local LWS_CALLBACK_ESTABLISHED: cint <cimport,nodecl>
 local LWS_CALLBACK_RECEIVE: cint <cimport,nodecl>
+local LWS_CALLBACK_RECEIVE_PONG: cint <cimport,nodecl>
 local LWS_CALLBACK_CLOSED: cint <cimport,nodecl>
 local LWS_CALLBACK_SERVER_WRITEABLE: cint <cimport,nodecl>
 local LWS_CALLBACK_HTTP: cint <cimport,nodecl>
@@ -261,6 +262,18 @@ local function remove_peer(server: *Server, peer: *Peer)
   post(server,iroh_srv_RelayLeft,peer.id)
 end
 
+local function charge_receive(server: *Server, peer: *Peer, size: csize): boolean
+  local read = post(server,iroh_srv_RelayRead,peer.id)
+  if read == nilptr then return false end
+  read.size = size
+  return true
+end
+
+local function hold_receive(peer: *Peer): cint
+  peer.rx_held = true
+  return lws_rx_flow_control(peer.ws,0)
+end
+
 local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize): cint
   if not peer.authorized and peer.length + len > 128 then return -1 end
   if lws_frame_is_binary(peer.ws) == 0 or len > MAX_FRAME - peer.length then return -1 end
@@ -284,9 +297,7 @@ local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize)
       -- RFC 6455 client frames carry a mask and may extend the payload length.
       charge = charge + (size < 126 and 6 or (size < 65536 and 8 or 14))
     end
-    local read = post(server,iroh_srv_RelayRead,peer.id)
-    if read == nilptr then return -1 end
-    read.size = charge
+    if not charge_receive(server,peer,charge) then return -1 end
   end
   peer.inside_frame = remaining ~= 0
   if lws_is_final_fragment(peer.ws) ~= 0 and remaining == 0 then
@@ -298,10 +309,7 @@ local function receive(server: *Server, peer: *Peer, bytes: pointer, len: csize)
     peer.length = 0
     peer.capacity = 0
   end
-  if peer.metered then
-    peer.rx_held = true
-    return lws_rx_flow_control(peer.ws,0)
-  end
+  if peer.metered then return hold_receive(peer) end
   return 0
 end
 local function send(peer: *Peer): cint
@@ -532,7 +540,8 @@ local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, l
     return 0
   end
   if reason ~= LWS_CALLBACK_ESTABLISHED and reason ~= LWS_CALLBACK_RECEIVE and
-      reason ~= LWS_CALLBACK_CLOSED and reason ~= LWS_CALLBACK_SERVER_WRITEABLE then return 0 end
+      reason ~= LWS_CALLBACK_RECEIVE_PONG and reason ~= LWS_CALLBACK_CLOSED and
+      reason ~= LWS_CALLBACK_SERVER_WRITEABLE then return 0 end
   if user == nilptr then return -1 end
   local peer = (@*Peer)(user)
   local server = (@*Server)(lws_context_user(lws_get_context(ws)))
@@ -557,6 +566,13 @@ local function callback(ws: *lws, reason: cint, user: pointer, bytes: pointer, l
   if reason == LWS_CALLBACK_RECEIVE then
     if peer.closing or server.event_count >= MAX_EVENTS - MAX_PEERS then return -1 end
     return receive(server,peer,bytes,len)
+  end
+  if reason == LWS_CALLBACK_RECEIVE_PONG then
+    if not peer.metered then return 0 end
+    if peer.closing or server.event_count >= MAX_EVENTS - MAX_PEERS then return -1 end
+    -- Control frames have at most 125 payload bytes and a six-byte masked header.
+    if not charge_receive(server,peer,len + 6) then return -1 end
+    return hold_receive(peer)
   end
   if reason == LWS_CALLBACK_SERVER_WRITEABLE then return send(peer) end
   remove_peer(server,peer)

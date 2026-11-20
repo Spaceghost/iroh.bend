@@ -272,6 +272,7 @@ stop
 
 start fragment-ws fragment-rate
 python3 -B tests/relay_server_fragments.py "$port" "$client"
+python3 -B tests/relay_server_fragments.py "$port" "$client" --pong
 stop
 
 start rate-wss rate "$scratch/cert.pem" "$scratch/key.pem"
@@ -281,6 +282,7 @@ stop
 
 start fragment-wss fragment-rate "$scratch/cert.pem" "$scratch/key.pem"
 python3 -B tests/relay_server_fragments.py "$port" "$client" "$scratch/ca.pem"
+python3 -B tests/relay_server_fragments.py "$port" "$client" "$scratch/ca.pem" --pong
 stop
 
 exercise_live_rate ws unlimited

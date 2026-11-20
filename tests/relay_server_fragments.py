@@ -1,8 +1,8 @@
-"""Test the relay's receive limit with a fragmented WebSocket message."""
+"""Test WebSocket fragment and control-frame accounting before message delivery."""
 
+import argparse
 import asyncio
 import ssl
-import sys
 from os import urandom
 
 
@@ -29,30 +29,41 @@ def fragment(opcode, payload):
 
 
 async def main():
-    port, client = int(sys.argv[1]), sys.argv[2]
-    tls = ssl.create_default_context(cafile=sys.argv[3]) if len(sys.argv) == 4 else None
-    fragmented = False
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("port", type=int)
+    parser.add_argument("client")
+    parser.add_argument("cafile", nargs="?")
+    parser.add_argument("--pong", action="store_true")
+    args = parser.parse_args()
+    tls = ssl.create_default_context(cafile=args.cafile) if args.cafile else None
+    injected = False
     observed = False
 
     async def bridge(reader, writer):
-        nonlocal fragmented, observed
-        upstream, upstream_writer = await asyncio.open_connection("127.0.0.1", port, ssl=tls)
+        nonlocal injected, observed
+        upstream, upstream_writer = await asyncio.open_connection(
+            "127.0.0.1", args.port, ssl=tls
+        )
         noticed = asyncio.Event()
 
         async def requests():
-            nonlocal fragmented, observed
+            nonlocal injected, observed
             while True:
                 opcode, payload, encoded = await frame(reader)
-                if not fragmented and opcode == 0x82 and len(payload) == 114:
-                    fragmented = True
+                if not injected and opcode == 0x82 and len(payload) == 114:
+                    injected = True
                     noticed.clear()
-                    # The masked proof spends 104 of the 124 tokens.
-                    # The masked 14-byte prefix spends the remaining 20.
-                    upstream_writer.write(fragment(0x02, payload[:14]))
+                    # The masked proof spends 104 of the 124 tokens, leaving 20.
+                    # The masked fragment spends those 20, and the pong exceeds them.
+                    prefix = (
+                        fragment(0x8A, b"\0" * 64) if args.pong else fragment(0x02, payload[:14])
+                    )
+                    upstream_writer.write(prefix)
                     await upstream_writer.drain()
                     await asyncio.wait_for(noticed.wait(), 2)
                     observed = True
-                    encoded = fragment(0x80, payload[14:])
+                    if not args.pong:
+                        encoded = fragment(0x80, payload[14:])
                 upstream_writer.write(encoded)
                 await upstream_writer.drain()
 
@@ -83,7 +94,7 @@ async def main():
     async with listener:
         proxy_port = listener.sockets[0].getsockname()[1]
         process = await asyncio.create_subprocess_exec(
-            client, f"ws://127.0.0.1:{proxy_port}/relay", "rate-paced",
+            args.client, f"ws://127.0.0.1:{proxy_port}/relay", "rate-paced",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
@@ -92,9 +103,10 @@ async def main():
             process.kill()
             await process.wait()
             raise
+        assert observed, "relay did not report the limit before the datagram was complete"
         assert process.returncode == 0, (out, err)
-        assert observed, "relay did not report the limit before the final fragment"
-    print("PASS relay charged masked framing before receiving the rest of the message")
+    frame_type = "pong" if args.pong else "first fragment"
+    print(f"PASS relay charged the masked {frame_type} before completing the datagram")
 
 
 if __name__ == "__main__":
