@@ -53,10 +53,12 @@ def check_affinity(listener, dialer, host, advertises_nat=False):
             raise SystemExit(f"bidirectional multipath failed on {host}")
 
 
-def check_off_path(listener, fixture, host, mode):
+def check_off_path(listener, fixture, host, mode, drop_first=False):
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with ExitStack() as stack:
-        bend = stack.enter_context(process(listener, host, "6"))
+        gate = bind(stack, host, family) if drop_first else None
+        gate_port = gate.getsockname()[1] if gate else None
+        bend = stack.enter_context(process(listener, host, str(gate_port) if gate else "6"))
         target = host, read_address(bend)
         iroh = stack.enter_context(process(fixture, mode))
         direct_port = read_address(iroh)
@@ -70,6 +72,9 @@ def check_off_path(listener, fixture, host, mode):
         ready.register(iroh.stdout, selectors.EVENT_READ)
         ready.register(bend.stdout, selectors.EVENT_READ)
         peers = {}
+        gate_sends = []
+        if gate:
+            ready.register(gate, selectors.EVENT_READ)
         response_prefix = b"PASS Iroh returned an authenticated PATH_RESPONSE from port "
         response_port = None
         open_outputs = 2
@@ -86,6 +91,14 @@ def check_off_path(listener, fixture, host, mode):
                         peers[peer] = bind(stack, host, family)
                         ready.register(peers[peer], selectors.EVENT_READ, peer)
                     peers[peer].sendto(packet, target)
+                elif source == gate:
+                    packet, peer = gate.recvfrom(65536)
+                    if peer[:2] == target:
+                        gate_sends.append(time.monotonic())
+                        if len(gate_sends) > 1:
+                            gate.sendto(packet, (host, direct_port))
+                    elif peer[:2] == (host, direct_port):
+                        gate.sendto(packet, target)
                 elif source in (bend.stdout, iroh.stdout):
                     line = source.readline()
                     if not line:
@@ -101,9 +114,15 @@ def check_off_path(listener, fixture, host, mode):
         if bend.wait(timeout=2) or iroh.wait(timeout=2):
             raise RuntimeError(f"off-path NAT probe fixture failed on {host}")
         upstream_ports = {peer.getsockname()[1] for peer in peers.values()}
-        if response_port != direct_port or not upstream_ports or direct_port in upstream_ports:
-            raise RuntimeError(f"expected an authenticated response on Iroh's direct port {direct_port}")
-        print(f"PASS Iroh validated the off-path UDP candidate on {host}", flush=True)
+        expected_port = gate_port if gate else direct_port
+        if response_port != expected_port or not upstream_ports or expected_port in upstream_ports:
+            raise RuntimeError(f"expected an authenticated response on candidate port {expected_port}")
+        if gate:
+            if len(gate_sends) < 2 or gate_sends[1] - gate_sends[0] < 0.02:
+                raise RuntimeError(f"expected a delayed NAT probe retry on {host}")
+            print(f"PASS Bend recovered after the first off-path probe was dropped on {host}", flush=True)
+        else:
+            print(f"PASS Iroh validated the off-path UDP candidate on {host}", flush=True)
 
 
 if __name__ == "__main__":
@@ -114,6 +133,7 @@ if __name__ == "__main__":
         check_affinity(listener, dialer, host, advertises_nat=True)
         check(listener, fixture, host, mode, "6")
         check_off_path(listener, fixture, host, mode)
+        check_off_path(listener, fixture, host, mode, drop_first=True)
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
             check(listener, fixture, host, mode, "2")
         if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":

@@ -2,6 +2,7 @@ import Base
 import ../src/quic_nat.bend as NatWire
 import ../src/quic_nat_state.bend as State
 import ../src/quic_nat_send.bend as Send
+import ../src/quic_nat_retry.bend as Retry
 
 def bytes_equal(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
   match a b:
@@ -364,6 +365,41 @@ def sequence_rollover() -> Bool:
   same_integer(NatWire.Var{1,0},Send.next(NatWire.Var{0,4294967295})) &&
   same_integer(NatWire.Var{1073741823,4294967295},Send.next(NatWire.Var{1073741823,4294967295}))
 
+def action_code(action: Retry.Action) -> U32:
+  match action:
+    case Retry.SendProbe{}:
+      1
+    case Retry.WaitForResponse{}:
+      2
+    case Retry.Expire{}:
+      3
+
+def action_is(schedule: Retry.Schedule, now: U32, expected: U32) -> Bool:
+  U32.is_eq(action_code(Retry.action(schedule,now,333000)),expected)
+
+def retry_delays() -> Bool:
+  U32.is_eq(Retry.delay(333000,1),33300) &&
+  U32.is_eq(Retry.delay(333000,2),33300) &&
+  U32.is_eq(Retry.delay(333000,3),66600) &&
+  U32.is_eq(Retry.delay(333000,4),133200) &&
+  U32.is_eq(Retry.delay(333000,5),266400) &&
+  U32.is_eq(Retry.delay(333000,6),532800) &&
+  U32.is_eq(Retry.delay(333000,7),1065600) &&
+  U32.is_eq(Retry.delay(333000,8),2000000) &&
+  U32.is_eq(Retry.delay(4294967295,9),2000000)
+
+def retry_schedule() -> Bool:
+  +initial = Retry.start(4294967200)
+  +attempt = Retry.confirmed_send(initial,4294967200)
+  action_is(initial,4294967200,1) &&
+  action_is(attempt,33203,2) &&
+  action_is(attempt,33204,1) &&
+  action_is(Retry.Retry{0,4000000,8},5999999,2) &&
+  action_is(Retry.Retry{0,4000000,8},6000000,1) &&
+  action_is(Retry.Retry{0,6000000,9},29999999,2) &&
+  action_is(Retry.Retry{0,6000000,9},30000000,3) &&
+  action_is(attempt,29999904,3)
+
 def require(message: String, ok: Bool) -> IO(Unit):
   match ok:
     case True{}:
@@ -384,4 +420,6 @@ def main() -> IO(Unit):
     require("QUIC NAT traversal server advertisements and withdrawals",server_send())
     require("QUIC NAT traversal client probe round generation",client_send())
     require("QUIC NAT traversal sequence rollover",sequence_rollover())
+    require("QUIC NAT traversal upstream retry intervals",retry_delays())
+    require("QUIC NAT traversal retry limit, expiration, and wrapping clock",retry_schedule())
     return Unit{}

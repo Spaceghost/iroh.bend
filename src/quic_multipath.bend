@@ -133,6 +133,9 @@ def retire_multipath_path(conn: MultipathConnection, path: U32)
 def multipath_millis() -> IO(U32):
   import "./quic_multipath.c"
 
+def multipath_micros() -> IO(U32):
+  import "./quic_multipath.c"
+
 # Find the next available path after the given ID, including paths opened by the peer.
 def next_multipath_path(conn: MultipathConnection, after: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):

@@ -267,7 +267,7 @@ local names = {
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
   'step_multipath', 'probe_multipath', 'multipath_status', 'multipath_path_timeouts', 'set_multipath_keepalive',
-  'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
+  'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'multipath_micros', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
@@ -304,6 +304,7 @@ local iroh_mp_set_multipath_keepalive: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_standby: uint32 <cimport,nodecl>
 local iroh_mp_retire_multipath_path: uint32 <cimport,nodecl>
 local iroh_mp_multipath_millis: uint32 <cimport,nodecl>
+local iroh_mp_multipath_micros: uint32 <cimport,nodecl>
 local iroh_mp_probe_multipath_alternate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_MultipathEarlyStream: uint32 <cimport,nodecl>
@@ -2141,6 +2142,10 @@ local function retire_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
 end
 
+local function micros_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return picoquic_current_time() & 0xffffffff
+end
+
 local function millis_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return (@uint32)(io_tick() // 1000000)
 end
@@ -2494,6 +2499,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_set_multipath_standby ~= 0xffffffff then io_eff(iroh_mp_set_multipath_standby,standby_run) end
   if iroh_mp_retire_multipath_path ~= 0xffffffff then io_eff(iroh_mp_retire_multipath_path,retire_run) end
   if iroh_mp_multipath_millis ~= 0xffffffff then io_eff(iroh_mp_multipath_millis,millis_run) end
+  if iroh_mp_multipath_micros ~= 0xffffffff then io_eff(iroh_mp_multipath_micros,micros_run) end
   if iroh_mp_probe_multipath_alternate ~= 0xffffffff then io_eff(iroh_mp_probe_multipath_alternate,alternate_run) end
   if iroh_mp_open_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_stream,open_stream_run) end
   if iroh_mp_open_multipath_early_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_early_stream,open_early_stream_run) end

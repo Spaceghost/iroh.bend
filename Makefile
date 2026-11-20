@@ -28,7 +28,7 @@ $(BUILD)/iroh-bend-rate: tests/relay_rate.bend src/relay_rate.bend src/relay_hea
 check-quic-nat: $(BUILD)/iroh-bend-quic-nat
 	$(BUILD)/iroh-bend-quic-nat
 
-$(BUILD)/iroh-bend-quic-nat: tests/quic_nat.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend
+$(BUILD)/iroh-bend-quic-nat: tests/quic_nat.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/quic_nat.bend -o $@
 
@@ -439,9 +439,9 @@ $(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.ben
 		"$(abspath $(BUILD)/quic-multipath-stage/src/quic_multipath.c)"
 	cd "$(BUILD)/quic-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_bend.bend -o "$(abspath $@)"
 
-$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-multipath-listener-stage/src" "$(BUILD)/quic-multipath-listener-stage/tests"
-	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend "$(BUILD)/quic-multipath-listener-stage/src/"
+	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(BUILD)/quic-multipath-listener-stage/src/"
 	cp tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend "$(BUILD)/quic-multipath-listener-stage/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(BUILD)/quic-multipath-listener-stage/src/quic_multipath.c)"
