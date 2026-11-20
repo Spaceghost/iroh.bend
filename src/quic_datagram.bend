@@ -126,3 +126,20 @@ def read_quic_stream(conn: DatagramConnection, stream: U32, limit: U32)
 def drop_quic_stream(conn: DatagramConnection, stream: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_datagram.c"
+
+type QuicDatagramListener is Type:
+  QuicDatagramListener{id: U32}
+
+# Bind a concrete IPv4 or IPv6 address. Port zero picks an available port.
+def bind_shared_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"
+
+# Process listener traffic and return a connection after key and ALPN verification.
+def try_accept_shared_quic(listener: QuicDatagramListener)
+    -> IO(QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,DatagramConnection>>):
+  import "./quic_datagram.c"
+
+# Stop accepting connections. Existing connections keep their UDP socket.
+def close_shared_quic(listener: QuicDatagramListener) -> IO(Unit):
+  import "./quic_datagram.c"

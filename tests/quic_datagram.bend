@@ -387,7 +387,7 @@ def dial(host: String, port: Maybe<&2,U32>, mode: Mode, wrong: Bool) -> IO(Unit)
       IO.die(Unit,2,"expected a UDP port")
 
 def usage() -> IO(Unit):
-  IO.die(Unit,2,"usage: quic-datagram HOST PORT valid|echo|shared|wrong-key")
+  IO.die(Unit,2,"usage: quic-datagram listen|listen6 | HOST PORT valid|echo|shared|wrong-key")
 
 def choose(host: String, port: Maybe<&2,U32>, valid: Bool, echo: Bool, shared: Bool, rejected: Bool) -> IO(Unit):
   match valid echo shared rejected:
@@ -402,8 +402,108 @@ def choose(host: String, port: Maybe<&2,U32>, valid: Bool, echo: Bool, shared: B
     case _ _ _ _:
       usage()
 
+def server_accept_result(
+    outcome: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>>,
+    next: Quic.QuicDatagramListener -> IO(Quic.QuicDatagramListener & Quic.DatagramConnection))
+    -> IO(Quic.QuicDatagramListener & Quic.DatagramConnection):
+  match outcome:
+    case (listener,Done{Some{conn}}):
+      IO.pure(Quic.QuicDatagramListener & Quic.DatagramConnection,(listener,conn))
+    case (listener,Done{None{}}):
+      do IO<Quic.QuicDatagramListener & Quic.DatagramConnection>:
+        IO.sleep(1)
+        next(listener)
+    case (listener,Fail{(code,message)}):
+      do IO<Quic.QuicDatagramListener & Quic.DatagramConnection>:
+        Quic.close_shared_quic(listener)
+        IO.die(Quic.QuicDatagramListener & Quic.DatagramConnection,code,message)
+
+def server_accept(fuel: Nat, listener: Quic.QuicDatagramListener)
+    -> IO(Quic.QuicDatagramListener & Quic.DatagramConnection):
+  match fuel:
+    case 0n:
+      do IO<Quic.QuicDatagramListener & Quic.DatagramConnection>:
+        Quic.close_shared_quic(listener)
+        IO.die(Quic.QuicDatagramListener & Quic.DatagramConnection,1,"Bend QUIC listener timed out")
+    case 1n+left:
+      do IO<Quic.QuicDatagramListener & Quic.DatagramConnection>:
+        accepted : Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>> <-
+          Quic.try_accept_shared_quic(listener)
+        server_accept_result(accepted,next => server_accept(left,next))
+
+def server_uni_request(incoming: Quic.DatagramConnection & U32, label: U32) -> IO(Quic.DatagramConnection):
+  (conn,+stream) = incoming
+  do IO<Quic.DatagramConnection>:
+    read : Quic.DatagramConnection <- receive_stream(2500n,conn,stream,[label,1,255])
+    release_stream(read,stream)
+
+def server_stream_reply(outgoing: Quic.DatagramConnection & U32, payload: List<&2,U32>) -> IO(Quic.DatagramConnection):
+  (conn,+stream) = outgoing
+  do IO<Quic.DatagramConnection>:
+    queued : Quic.DatagramConnection <- stream_submit(conn,QueueStream{stream,payload,1})
+    sent : Quic.DatagramConnection <- stream_submit(queued,FlushStream{stream})
+    release_stream(sent,stream)
+
+def server_bidi_exchange(incoming: Quic.DatagramConnection & U32, +label: U32) -> IO(Quic.DatagramConnection):
+  (conn,+stream) = incoming
+  do IO<Quic.DatagramConnection>:
+    read : Quic.DatagramConnection <- receive_stream(2500n,conn,stream,[label,2,255])
+    server_stream_reply((read,stream),[label,255,2])
+
+def server_exchange(conn: Quic.DatagramConnection, +label: U32) -> IO(Unit):
+  do IO<Unit>:
+    datagram : Quic.DatagramConnection <- receive_reply(5000n,conn,[label,0,255])
+    echoed : Quic.DatagramConnection <- send_datagram(1500n,datagram,[label,255,0])
+    uni : Quic.DatagramConnection & U32 <- poll_stream(2500n,echoed,AcceptStream{1})
+    read : Quic.DatagramConnection <- server_uni_request(uni,label)
+    outgoing : Quic.DatagramConnection & U32 <- poll_stream(2500n,read,OpenStream{1})
+    unis_done : Quic.DatagramConnection <- server_stream_reply(outgoing,[label,255,1])
+    bidi : Quic.DatagramConnection & U32 <- poll_stream(2500n,unis_done,AcceptStream{0})
+    replied : Quic.DatagramConnection <- server_bidi_exchange(bidi,label)
+    confirmed : Quic.DatagramConnection <- receive_reply(5000n,replied,[label,3])
+    Quic.drop_quic_datagram(confirmed)
+
+def serve_two(second: Quic.QuicDatagramListener & Quic.DatagramConnection, first: Quic.DatagramConnection) -> IO(Unit):
+  (listener,conn) = second
+  do IO<Unit>:
+    Quic.close_shared_quic(listener)
+    server_exchange(first,41)
+    server_exchange(conn,42)
+    IO.print("PASS Iroh clients exchanged datagrams and streams through one Bend listener")
+
+def accept_second(first: Quic.QuicDatagramListener & Quic.DatagramConnection) -> IO(Unit):
+  (listener,conn) = first
+  do IO<Unit>:
+    second : Quic.QuicDatagramListener & Quic.DatagramConnection <- server_accept(15000n,listener)
+    serve_two(second,conn)
+
+def serve(bound: Quic.QuicDatagramListener & U32, prefix: String) -> IO(Unit):
+  (listener,port) = bound
+  do IO<Unit>:
+    IO.print(String.append(prefix,U32.show(port)))
+    first : Quic.QuicDatagramListener & Quic.DatagramConnection <- server_accept(15000n,listener)
+    accept_second(first)
+
+def listen(host: String, prefix: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.QuicDatagramListener & U32 <- IO.try(Quic.QuicDatagramListener & U32,
+      Quic.bind_shared_quic(host,0,List.replicate(U32,32n,42),public_key(True{}),
+        [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]))
+    serve(bound,prefix)
+
+def choose_listener(v4: Bool, v6: Bool) -> IO(Unit):
+  match v4 v6:
+    case True{} _:
+      listen("127.0.0.1","127.0.0.1:")
+    case _ True{}:
+      listen("::1","[::1]:")
+    case _ _:
+      usage()
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case Con{_,Con{+mode,Nil{}}}:
+      choose_listener(String.eq(mode,"listen"),String.eq(mode,"listen6"))
     case Con{_,Con{host,Con{port,Con{+mode,Nil{}}}}}:
       choose(host,U32.read(port),String.eq(mode,"valid"),String.eq(mode,"echo"),String.eq(mode,"shared"),String.eq(mode,"wrong-key"))
     case _:

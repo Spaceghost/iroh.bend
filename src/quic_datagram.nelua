@@ -14,6 +14,12 @@ local function SSL_CTX_free(ctx: *SSL_CTX) <cimport,nodecl> end
 local function SSL_CTX_use_PrivateKey(ctx: *SSL_CTX, pkey: *EVP_PKEY): cint <cimport,nodecl> end
 local function SSL_CTX_set1_server_cert_type(ctx: *SSL_CTX, values: *cuchar, n: csize): cint <cimport,nodecl> end
 local function SSL_CTX_set1_client_cert_type(ctx: *SSL_CTX, values: *cuchar, n: csize): cint <cimport,nodecl> end
+local function SSL_CTX_set_num_tickets(ctx: *SSL_CTX, count: csize): cint <cimport,nodecl> end
+local function SSL_CTX_set_alpn_select_cb(ctx: *SSL_CTX, callback: pointer, data: pointer) <cimport,nodecl> end
+local function SSL_select_next_proto(out: **cuchar, outlen: *cuchar, supported: *cuchar,
+  allowed_size: cuint, offered: *cuchar, offered_size: cuint): cint <cimport,nodecl> end
+local function SSL_get_ex_data_X509_STORE_CTX_idx(): cint <cimport,nodecl> end
+local function SSL_get_app_data(ssl: *SSL): pointer <cimport,nodecl> end
 local function SSL_new(ctx: *SSL_CTX): *SSL <cimport,nodecl> end
 local function SSL_free(ssl: *SSL) <cimport,nodecl> end
 local function EVP_PKEY_new_raw_private_key_ex(ctx: pointer, name: cstring, properties: cstring,
@@ -24,6 +30,7 @@ local function EVP_PKEY_free(key: *EVP_PKEY) <cimport,nodecl> end
 local function ngtcp2_crypto_ossl_ctx_new(out: **ngtcp2_crypto_ossl_ctx, ssl: *SSL): cint <cimport,nodecl> end
 local function ngtcp2_crypto_ossl_ctx_del(ctx: *ngtcp2_crypto_ossl_ctx) <cimport,nodecl> end
 local function ngtcp2_crypto_ossl_configure_client_session(ssl: *SSL): cint <cimport,nodecl> end
+local function ngtcp2_crypto_ossl_configure_server_session(ssl: *SSL): cint <cimport,nodecl> end
 
 ## cinclude '<ngtcp2/ngtcp2.h>'
 ## cinclude '<ngtcp2/ngtcp2_crypto.h>'
@@ -32,13 +39,15 @@ local function ngtcp2_crypto_ossl_configure_client_session(ssl: *SSL): cint <cim
 ## cinclude '<errno.h>'
 ## cinclude '<openssl/rand.h>'
 ## cdefine 'iroh_datagram_ipv4 struct sockaddr_in'
+## cdefine 'iroh_datagram_in4 struct in_addr'
 ## cdefine 'iroh_datagram_ipv6 struct sockaddr_in6'
 ## cdefine 'iroh_datagram_address struct sockaddr_storage'
 require 'C.stdlib'
 require 'C.string'
 
+local iroh_datagram_in4 <cimport,nodecl> = @record{s_addr: uint32}
 local iroh_datagram_ipv4 <cimport,nodecl> = @record{
-  sin_family: cushort, sin_port: cushort, sin_addr: cuint, sin_zero: [8]cuchar
+  sin_family: cushort, sin_port: cushort, sin_addr: iroh_datagram_in4, sin_zero: [8]cuchar
 }
 local iroh_datagram_ipv6 <cimport,nodecl> = @record{sin6_family: cushort, sin6_port: cushort, sin6_flowinfo: uint32,
   sin6_addr: [16]cuchar, sin6_scope_id: uint32}
@@ -50,16 +59,19 @@ local ngtcp2_addr <cimport,nodecl> = @record{addr: pointer, addrlen: cuint}
 ## cdefine 'iroh_datagram_local_path local'
 local ngtcp2_path <cimport,nodecl> = @record{iroh_datagram_local_path: ngtcp2_addr, remote: ngtcp2_addr}
 local ngtcp2_settings <cimport,nodecl> = @record{initial_ts: uint64}
+local ngtcp2_pkt_hd <cimport,nodecl> = @record{dcid: ngtcp2_cid, scid: ngtcp2_cid, version: uint32}
+local ngtcp2_version_cid <cimport,nodecl> = @record{version: uint32, dcid: *cuchar, dcidlen: csize}
 local ngtcp2_transport_params <cimport,nodecl> = @record{
   max_datagram_frame_size: uint64, initial_max_data: uint64,
   initial_max_stream_data_bidi_local: uint64, initial_max_stream_data_bidi_remote: uint64,
-  initial_max_stream_data_uni: uint64, initial_max_streams_bidi: uint64, initial_max_streams_uni: uint64
+  initial_max_stream_data_uni: uint64, initial_max_streams_bidi: uint64, initial_max_streams_uni: uint64,
+  original_dcid: ngtcp2_cid, original_dcid_present: cuchar
 }
 local ngtcp2_pkt_info <cimport,nodecl> = @record{ecn: uint32}
 local ngtcp2_ccerr <cimport,nodecl> = @record{}
 local ngtcp2_vec <cimport,nodecl> = @record{base: *cuchar, len: csize}
 local ngtcp2_callbacks <cimport,nodecl> = @record{
-  client_initial: pointer, recv_crypto_data: pointer, encrypt: pointer, decrypt: pointer, hp_mask: pointer,
+  client_initial: pointer, recv_client_initial: pointer, recv_crypto_data: pointer, encrypt: pointer, decrypt: pointer, hp_mask: pointer,
   recv_retry: pointer, rand: pointer, update_key: pointer, delete_crypto_aead_ctx: pointer,
   delete_crypto_cipher_ctx: pointer, version_negotiation: pointer, get_new_connection_id2: pointer,
   get_path_challenge_data2: pointer, recv_datagram: pointer, ack_datagram: pointer,
@@ -75,30 +87,51 @@ local SOCK_NONBLOCK: cint <cimport,nodecl>
 local EAGAIN: cint <cimport,nodecl>
 local errno: cint <cimport,nodecl>
 local SSL_VERIFY_PEER: cint <cimport,nodecl>
+local SSL_VERIFY_FAIL_IF_NO_PEER_CERT: cint <cimport,nodecl>
+local SSL_TLSEXT_ERR_OK: cint <cimport,nodecl>
+local SSL_TLSEXT_ERR_ALERT_FATAL: cint <cimport,nodecl>
+local OPENSSL_NPN_NEGOTIATED: cint <cimport,nodecl>
 local X509_V_OK: cint <cimport,nodecl>
 local X509_V_ERR_APPLICATION_VERIFICATION: cint <cimport,nodecl>
 local NGTCP2_ERR_CALLBACK_FAILURE: cint <cimport,nodecl>
 local NGTCP2_PROTO_VER_V1: uint32 <cimport,nodecl>
 local function inet_pton(family: cint, text: cstring, ip: pointer): cint <cimport,nodecl> end
 local function htons(port: cushort): cushort <cimport,nodecl> end
+local function ntohs(port: cushort): cushort <cimport,nodecl> end
 local function socket(family: cint, kind: cint, proto: cint): cint <cimport,nodecl> end
+local function bind(fd: cint, address: pointer, n: cuint): cint <cimport,nodecl> end
 local function connect(fd: cint, address: pointer, n: cuint): cint <cimport,nodecl> end
 local function getsockname(fd: cint, address: pointer, n: *cuint): cint <cimport,nodecl> end
 local function close(fd: cint): cint <cimport,nodecl> end
 local function send(fd: cint, data: pointer, n: csize, flags: cint): isize <cimport,nodecl> end
 local function recv(fd: cint, data: pointer, n: csize, flags: cint): isize <cimport,nodecl> end
+local function recvfrom(fd: cint, data: pointer, n: csize, flags: cint,
+  address: pointer, len: *cuint): isize <cimport,nodecl> end
+local function sendto(fd: cint, data: pointer, n: csize, flags: cint,
+  address: pointer, len: cuint): isize <cimport,nodecl> end
 local function RAND_bytes(data: *cuchar, n: cint): cint <cimport,nodecl> end
+local function SSL_set_accept_state(ssl: *SSL) <cimport,nodecl> end
 local function SSL_set_connect_state(ssl: *SSL) <cimport,nodecl> end
 local function SSL_set_app_data(ssl: *SSL, data: pointer): cint <cimport,nodecl> end
 local function SSL_set_alpn_protos(ssl: *SSL, value: *cuchar, n: cuint): cint <cimport,nodecl> end
 local function SSL_CTX_set_verify(ctx: *SSL_CTX, flags: cint, callback: pointer) <cimport,nodecl> end
 local function SSL_CTX_set_cert_verify_callback(ctx: *SSL_CTX, callback: pointer, data: pointer) <cimport,nodecl> end
+local function X509_STORE_CTX_get_ex_data(store: *X509_STORE_CTX, index: cint): pointer <cimport,nodecl> end
 local function X509_STORE_CTX_get0_rpk(store: *X509_STORE_CTX): *EVP_PKEY <cimport,nodecl> end
 local function X509_STORE_CTX_set_error(store: *X509_STORE_CTX, err: cint) <cimport,nodecl> end
 local function EVP_PKEY_eq(left: *EVP_PKEY, right: *EVP_PKEY): cint <cimport,nodecl> end
 local function ngtcp2_conn_client_new(out: **ngtcp2_conn, dcid: *ngtcp2_cid, scid: *ngtcp2_cid,
   path: *ngtcp2_path, version: uint32, callbacks: *ngtcp2_callbacks, settings: *ngtcp2_settings,
   params: *ngtcp2_transport_params, allocator: pointer, user: pointer): cint <cimport,nodecl> end
+local function ngtcp2_conn_server_new(out: **ngtcp2_conn, dcid: *ngtcp2_cid, scid: *ngtcp2_cid,
+  path: *ngtcp2_path, version: uint32, callbacks: *ngtcp2_callbacks, settings: *ngtcp2_settings,
+  params: *ngtcp2_transport_params, allocator: pointer, user: pointer): cint <cimport,nodecl> end
+local function ngtcp2_accept(head: *ngtcp2_pkt_hd, data: *cuchar, size: csize): cint <cimport,nodecl> end
+local function ngtcp2_pkt_decode_version_cid(target: *ngtcp2_version_cid,
+  data: *cuchar, size: csize, short_id_size: csize): cint <cimport,nodecl> end
+local function ngtcp2_conn_get_scid2(conn: *ngtcp2_conn, out: *ngtcp2_cid): csize <cimport,nodecl> end
+local function ngtcp2_conn_is_local_stream2(conn: *ngtcp2_conn, id: int64): cint <cimport,nodecl> end
+local function ngtcp2_conn_get_tls_alert2(conn: *ngtcp2_conn): cuchar <cimport,nodecl> end
 local function ngtcp2_conn_del(conn: *ngtcp2_conn) <cimport,nodecl> end
 local function ngtcp2_conn_set_tls_native_handle(conn: *ngtcp2_conn, tls: pointer) <cimport,nodecl> end
 local function ngtcp2_settings_default(settings: *ngtcp2_settings) <cimport,nodecl> end
@@ -129,9 +162,14 @@ local function ngtcp2_conn_extend_max_streams_uni(conn: *ngtcp2_conn, count: csi
 local function ngtcp2_conn_shutdown_stream(conn: *ngtcp2_conn, flags: uint32,
   id: int64, code: uint64): cint <cimport,nodecl> end
 local function ngtcp2_ccerr_default(err: *ngtcp2_ccerr) <cimport,nodecl> end
+local function ngtcp2_ccerr_set_liberr(err: *ngtcp2_ccerr, code: cint, reason: pointer,
+  len: csize) <cimport,nodecl> end
+local function ngtcp2_ccerr_set_tls_alert(err: *ngtcp2_ccerr, alert: cuchar, reason: pointer,
+  len: csize) <cimport,nodecl> end
 local function ngtcp2_conn_write_connection_close(conn: *ngtcp2_conn, path: *ngtcp2_path, info: *ngtcp2_pkt_info,
   data: *cuchar, n: csize, err: *ngtcp2_ccerr, time: uint64): isize <cimport,nodecl> end
 local function ngtcp2_strerror(err: cint): cstring <cimport,nodecl> end
+local ngtcp2_crypto_recv_client_initial_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_client_initial_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_recv_crypto_data_cb: pointer <cimport,nodecl>
 local ngtcp2_crypto_encrypt_cb: pointer <cimport,nodecl>
@@ -148,12 +186,17 @@ local ngtcp2_crypto_get_path_challenge_data2_cb: pointer <cimport,nodecl>
 for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_datagram',
     'read_quic_datagram','quic_datagram_acks','drop_quic_datagram','DatagramConnection',
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
+    'bind_shared_quic','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
     'drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
 end
 ]]
+local iroh_dgram_bind_shared_quic: uint32 <cimport,nodecl>
+local iroh_dgram_try_accept_shared_quic: uint32 <cimport,nodecl>
+local iroh_dgram_close_shared_quic: uint32 <cimport,nodecl>
+local iroh_dgram_QuicDatagramListener: uint32 <cimport,nodecl>
 local iroh_dgram_start_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_step_quic_datagram: uint32 <cimport,nodecl>
 local iroh_dgram_write_quic_datagram: uint32 <cimport,nodecl>
@@ -208,6 +251,8 @@ local ENOTSUP: uint32 <cimport,nodecl>
 local ENOMEM: uint32 <cimport,nodecl>
 local EINTR: cint <cimport,nodecl>
 local SOCK_CLOEXEC: cint <cimport,nodecl>
+local NGTCP2_ERR_CRYPTO: cint <cimport,nodecl>
+local NGTCP2_ERR_DRAINING: cint <cimport,nodecl>
 local NGTCP2_ERR_DISCARD_PKT: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_ARGUMENT: cint <cimport,nodecl>
 
@@ -236,6 +281,15 @@ local Stream = @record{
   announced: boolean, had_open_callback: boolean, rx_fin: boolean, rx_reset: boolean,
   tx_fin: boolean, tx_fin_sent: boolean, closed: boolean, aborted: boolean, discarded: boolean
 }
+local CID_SIZE <comptime> = 8
+local MAX_PENDING <comptime> = 64
+local ACCEPT_TIMEOUT <comptime> = 10000000000
+local Listener = @record{
+  next: pointer, id: uint32, fd: cint,
+  local_addr: iroh_datagram_address, local_size: cuint,
+  ctx: *SSL_CTX, expected_key: *EVP_PKEY, alpn: [256]cuchar, alpn_size: cuint,
+  refs: uint32, pending: uint32, stopped: boolean
+}
 local Connection = @record{
   next: pointer,
   id: uint32,
@@ -258,9 +312,16 @@ local Connection = @record{
   datagram_id: uint64,
   streams: *Stream,
   pin_status: cint,
-  failed: boolean
+  failed: boolean,
+  listener: *Listener,
+  original_id: ngtcp2_cid,
+  accepted: boolean,
+  accept_deadline: uint64,
+  read_failure: cint
 }
 local connections: *Connection
+local listeners: *Listener
+local next_listener_id: uint32 = 1
 local next_id: uint32 = 1
 local next_stream_handle: uint32 = 1
 
@@ -269,9 +330,15 @@ local function quic_from_ref(ref: *ngtcp2_crypto_conn_ref): *ngtcp2_conn
 end
 
 local function verify_peer(store: *X509_STORE_CTX, data: pointer): cint
-  local conn = (@*Connection)(data)
+  local ssl = (@*SSL)(X509_STORE_CTX_get_ex_data(store,SSL_get_ex_data_X509_STORE_CTX_idx()))
+  if ssl == nilptr then return 0 end
+  local ref = (@*ngtcp2_crypto_conn_ref)(SSL_get_app_data(ssl))
+  if ref == nilptr then return 0 end
+  local conn = (@*Connection)(ref.user_data)
+  local expected = conn.expected_key
+  if conn.listener ~= nilptr then expected = conn.listener.expected_key end
   local key = X509_STORE_CTX_get0_rpk(store)
-  if key ~= nilptr and EVP_PKEY_eq(key,conn.expected_key) == 1 then
+  if key ~= nilptr and expected ~= nilptr and EVP_PKEY_eq(key,expected) == 1 then
     conn.pin_status = 1
     X509_STORE_CTX_set_error(store,X509_V_OK)
     return 1
@@ -376,7 +443,7 @@ end
 
 local function peer_stream(conn: *Connection, id: int64): *Stream
   local stream = stream_by_id(conn,id)
-  if stream == nilptr and id & 1 ~= 0 then stream = add_stream(conn,id) end
+  if stream == nilptr and ngtcp2_conn_is_local_stream2(conn.engine,id) == 0 then stream = add_stream(conn,id) end
   return stream
 end
 
@@ -467,57 +534,113 @@ local function connection_path(conn: *Connection): ngtcp2_path
   }
 end
 
-local function open_udp(conn: *Connection, host: cstring, port: cushort): boolean
-  local family = AF_INET
-  local ipv4 = (@*iroh_datagram_ipv4)(&conn.remote_addr)
+local function numeric_address(host: cstring, port: cushort, out: *iroh_datagram_address): cuint
+  local ipv4 = (@*iroh_datagram_ipv4)(out)
   if inet_pton(AF_INET,host,&ipv4.sin_addr) == 1 then
     ipv4.sin_family = (@cushort)(AF_INET)
     ipv4.sin_port = htons(port)
-    conn.remote_size = #iroh_datagram_ipv4
-  else
-    local ipv6 = (@*iroh_datagram_ipv6)(&conn.remote_addr)
-    if inet_pton(AF_INET6,host,&ipv6.sin6_addr) ~= 1 then
-      errno = (@cint)(EINVAL)
-      return false
-    end
-    family = AF_INET6
+    return #iroh_datagram_ipv4
+  end
+  local ipv6 = (@*iroh_datagram_ipv6)(out)
+  if inet_pton(AF_INET6,host,&ipv6.sin6_addr) == 1 then
     ipv6.sin6_family = (@cushort)(AF_INET6)
     ipv6.sin6_port = htons(port)
-    conn.remote_size = #iroh_datagram_ipv6
+    return #iroh_datagram_ipv6
   end
-  conn.fd = socket(family,SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  errno = (@cint)(EINVAL)
+  return 0
+end
+
+local function address_port(addr: *iroh_datagram_address): cushort
+  if addr.ss_family == AF_INET then return ntohs(((@*iroh_datagram_ipv4)(addr)).sin_port) end
+  return ntohs(((@*iroh_datagram_ipv6)(addr)).sin6_port)
+end
+
+local function concrete_address(addr: *iroh_datagram_address): boolean
+  if addr.ss_family == AF_INET then return ((@*iroh_datagram_ipv4)(addr)).sin_addr.s_addr ~= 0 end
+  local zero: [16]cuchar
+  return C.memcmp(&(((@*iroh_datagram_ipv6)(addr)).sin6_addr),&zero[0],16) ~= 0
+end
+
+local function same_address(left: *iroh_datagram_address, right: *iroh_datagram_address): boolean
+  if left.ss_family ~= right.ss_family then return false end
+  if left.ss_family == AF_INET then
+    local a = (@*iroh_datagram_ipv4)(left)
+    local b = (@*iroh_datagram_ipv4)(right)
+    return a.sin_port == b.sin_port and a.sin_addr.s_addr == b.sin_addr.s_addr
+  end
+  local a = (@*iroh_datagram_ipv6)(left)
+  local b = (@*iroh_datagram_ipv6)(right)
+  return a.sin6_port == b.sin6_port and a.sin6_scope_id == b.sin6_scope_id and
+    C.memcmp(&a.sin6_addr,&b.sin6_addr,16) == 0
+end
+
+local function udp_socket(addr: *iroh_datagram_address): cint
+  return socket((@cint)(addr.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+end
+
+local function open_udp(conn: *Connection, host: cstring, port: cushort): boolean
+  conn.remote_size = numeric_address(host,port,&conn.remote_addr)
+  if conn.remote_size == 0 then return false end
+  conn.fd = udp_socket(&conn.remote_addr)
   conn.local_size = #iroh_datagram_address
   return conn.fd >= 0 and connect(conn.fd,&conn.remote_addr,conn.remote_size) == 0 and
     getsockname(conn.fd,&conn.local_addr,&conn.local_size) == 0
 end
 
-local function open_tls(conn: *Connection, seed: *cuchar, peer: *cuchar, alpn: *cuchar, size: cuint): boolean
-  local ctx = SSL_CTX_new(TLS_method())
-  if ctx == nilptr then return false end
-  defer SSL_CTX_free(ctx) end
+local function create_tls_ctx(seed: *cuchar, mode: cint): *SSL_CTX
   local key = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,seed,32)
-  if key == nilptr then return false end
+  if key == nilptr then return nilptr end
   defer EVP_PKEY_free(key) end
-  conn.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+  local ctx = SSL_CTX_new(TLS_method())
+  if ctx == nilptr then return nilptr end
   local raw_key = TLSEXT_cert_type_rpk
-  if conn.expected_key == nilptr or SSL_CTX_use_PrivateKey(ctx,key) ~= 1 or
-      SSL_CTX_set1_server_cert_type(ctx,&raw_key,1) ~= 1 or SSL_CTX_set1_client_cert_type(ctx,&raw_key,1) ~= 1 then
-    return false
+  if SSL_CTX_use_PrivateKey(ctx,key) ~= 1 or SSL_CTX_set1_server_cert_type(ctx,&raw_key,1) ~= 1 or
+      SSL_CTX_set1_client_cert_type(ctx,&raw_key,1) ~= 1 then
+    SSL_CTX_free(ctx)
+    return nilptr
   end
-  SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nilptr)
-  SSL_CTX_set_cert_verify_callback(ctx,(@pointer)(verify_peer),conn)
+  SSL_CTX_set_verify(ctx,mode,nilptr)
+  SSL_CTX_set_cert_verify_callback(ctx,(@pointer)(verify_peer),nilptr)
+  return ctx
+end
+
+local function setup_ssl(conn: *Connection, ctx: *SSL_CTX, alpn: *cuchar, size: cuint): boolean
   conn.ssl = SSL_new(ctx)
   if conn.ssl == nilptr then return false end
   conn.ref = {get_conn = (@pointer)(quic_from_ref), user_data = conn}
+  if SSL_set_app_data(conn.ssl,&conn.ref) ~= 1 or ngtcp2_crypto_ossl_ctx_new(&conn.tls,conn.ssl) ~= 0 then
+    return false
+  end
+  if conn.listener ~= nilptr then
+    SSL_set_accept_state(conn.ssl)
+    return ngtcp2_crypto_ossl_configure_server_session(conn.ssl) == 0
+  end
   SSL_set_connect_state(conn.ssl)
-  return SSL_set_app_data(conn.ssl,&conn.ref) == 1 and SSL_set_alpn_protos(conn.ssl,alpn,size) == 0 and
-    ngtcp2_crypto_ossl_ctx_new(&conn.tls,conn.ssl) == 0 and
-    ngtcp2_crypto_ossl_configure_client_session(conn.ssl) == 0
+  return SSL_set_alpn_protos(conn.ssl,alpn,size) == 0 and ngtcp2_crypto_ossl_configure_client_session(conn.ssl) == 0
 end
 
-local function open_engine(conn: *Connection): cint
+local function open_tls(conn: *Connection, seed: *cuchar, peer: *cuchar, alpn: *cuchar, size: cuint): boolean
+  local ctx = create_tls_ctx(seed,SSL_VERIFY_PEER)
+  if ctx == nilptr then return false end
+  defer SSL_CTX_free(ctx) end
+  conn.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+  return conn.expected_key ~= nilptr and setup_ssl(conn,ctx,alpn,size)
+end
+
+local function select_alpn(ssl: *SSL, out: **cuchar, outlen: *cuchar, offered: *cuchar,
+    offered_size: cuint, arg: pointer): cint
+  local listener = (@*Listener)(arg)
+  if SSL_select_next_proto(out,outlen,&listener.alpn[0],listener.alpn_size,
+      offered,offered_size) ~= OPENSSL_NPN_NEGOTIATED then return SSL_TLSEXT_ERR_ALERT_FATAL end
+  return SSL_TLSEXT_ERR_OK
+end
+
+local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint64): cint
   local callbacks: ngtcp2_callbacks = {
-    client_initial = ngtcp2_crypto_client_initial_cb, recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb,
+    client_initial = initial == nilptr and ngtcp2_crypto_client_initial_cb or nilptr,
+    recv_client_initial = initial ~= nilptr and ngtcp2_crypto_recv_client_initial_cb or nilptr,
+    recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb,
     encrypt = ngtcp2_crypto_encrypt_cb, decrypt = ngtcp2_crypto_decrypt_cb, hp_mask = ngtcp2_crypto_hp_mask_cb,
     recv_retry = ngtcp2_crypto_recv_retry_cb, rand = (@pointer)(quic_random), update_key = ngtcp2_crypto_update_key_cb,
     delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
@@ -529,14 +652,11 @@ local function open_engine(conn: *Connection): cint
     acked_stream_data_offset = (@pointer)(stream_acknowledged), stream_reset = (@pointer)(stream_reset),
     stream_close = (@pointer)(stream_closed)
   }
-  local dcid: ngtcp2_cid = {datalen = 8}
-  local scid: ngtcp2_cid = {datalen = 8}
-  if RAND_bytes(&dcid.data[0],8) ~= 1 or RAND_bytes(&scid.data[0],8) ~= 1 then
-    return NGTCP2_ERR_CALLBACK_FAILURE
-  end
+  local scid: ngtcp2_cid = {datalen = CID_SIZE}
+  if RAND_bytes(&scid.data[0],CID_SIZE) ~= 1 then return NGTCP2_ERR_CALLBACK_FAILURE end
   local settings: ngtcp2_settings
   ngtcp2_settings_default(&settings)
-  settings.initial_ts = io_tick()
+  settings.initial_ts = now
   local params: ngtcp2_transport_params
   ngtcp2_transport_params_default(&params)
   params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
@@ -547,10 +667,31 @@ local function open_engine(conn: *Connection): cint
   params.initial_max_streams_bidi = STREAM_COUNT
   params.initial_max_streams_uni = STREAM_COUNT
   local path = connection_path(conn)
-  local status = ngtcp2_conn_client_new(&conn.engine,&dcid,&scid,&path,NGTCP2_PROTO_VER_V1,
-    &callbacks,&settings,&params,nilptr,conn)
+  local status: cint
+  if initial ~= nilptr then
+    params.original_dcid = initial.dcid
+    params.original_dcid_present = 1
+    conn.original_id = initial.dcid
+    status = ngtcp2_conn_server_new(&conn.engine,&initial.scid,&scid,&path,initial.version,
+      &callbacks,&settings,&params,nilptr,conn)
+  else
+    local dcid: ngtcp2_cid = {datalen = CID_SIZE}
+    if RAND_bytes(&dcid.data[0],CID_SIZE) ~= 1 then return NGTCP2_ERR_CALLBACK_FAILURE end
+    status = ngtcp2_conn_client_new(&conn.engine,&dcid,&scid,&path,NGTCP2_PROTO_VER_V1,
+      &callbacks,&settings,&params,nilptr,conn)
+  end
   if status == 0 then ngtcp2_conn_set_tls_native_handle(conn.engine,conn.tls) end
   return status
+end
+
+local function release_listener(listener: *Listener)
+  listener.refs = listener.refs - 1
+  if listener.refs == 0 then
+    SSL_CTX_free(listener.ctx)
+    EVP_PKEY_free(listener.expected_key)
+    if listener.fd >= 0 then close(listener.fd) end
+    C.free(listener)
+  end
 end
 
 local function destroy(conn: *Connection)
@@ -559,25 +700,54 @@ local function destroy(conn: *Connection)
   if conn.tls ~= nilptr then ngtcp2_crypto_ossl_ctx_del(conn.tls) end
   SSL_free(conn.ssl)
   EVP_PKEY_free(conn.expected_key)
-  if conn.fd >= 0 then close(conn.fd) end
+  if conn.listener ~= nilptr then
+    if not conn.accepted then conn.listener.pending = conn.listener.pending - 1 end
+    release_listener(conn.listener)
+  elseif conn.fd >= 0 then
+    close(conn.fd)
+  end
   while conn.inbox_first ~= nilptr do pop_datagram(conn) end
   while conn.streams ~= nilptr do remove_stream(conn,conn.streams) end
   C.free(conn)
 end
 
+local function handle_id(e: Env, handle: Term, tag: uint32): uint64
+  if term_aux(handle) ~= tag then return 0 end
+  if term_tag(handle) == TAG_PAK then return term_loc(handle) end
+  if term_tag(handle) == TAG_CTR then return e.mem[term_peek(e.mem,handle)] end
+  return 0
+end
+
 local function find(e: Env, handle: Term): *Connection
-  local id: uint64
-  if term_aux(handle) ~= iroh_dgram_DatagramConnection then return nilptr end
-  if term_tag(handle) == TAG_PAK then
-    id = term_loc(handle)
-  elseif term_tag(handle) == TAG_CTR then
-    id = e.mem[term_peek(e.mem,handle)]
-  else
-    return nilptr
-  end
+  local id = handle_id(e,handle,iroh_dgram_DatagramConnection)
   local conn = connections
   while conn ~= nilptr and conn.id ~= id do conn = (@*Connection)(conn.next) end
   return conn
+end
+
+local function find_listener(e: Env, handle: Term): *Listener
+  local id = handle_id(e,handle,iroh_dgram_QuicDatagramListener)
+  local listener = listeners
+  while listener ~= nilptr and listener.id ~= id do listener = (@*Listener)(listener.next) end
+  return listener
+end
+
+local function register_connection(conn: *Connection)
+  conn.next = connections
+  conn.id = next_id
+  next_id = next_id + 1
+  connections = conn
+end
+
+local function remove_connection(conn: *Connection)
+  if connections == conn then
+    connections = (@*Connection)(conn.next)
+  else
+    local prior = connections
+    while prior.next ~= conn do prior = (@*Connection)(prior.next) end
+    prior.next = conn.next
+  end
+  destroy(conn)
 end
 
 local function unpack(e: Env, item: Term, out: *cuchar, limit: csize): isize
@@ -604,22 +774,27 @@ local function unpack(e: Env, item: Term, out: *cuchar, limit: csize): isize
   return (@isize)(size)
 end
 
+local QuicConfig = @record{seed: [32]cuchar, peer: [32]cuchar, alpn: [256]cuchar, size: cuint}
+
+local function unpack_config(e: Env, args: *[0]Term, config: *QuicConfig): boolean
+  local seed_size = unpack(e,args[2],&config.seed[0],32)
+  local peer_size = unpack(e,args[3],&config.peer[0],32)
+  local alpn_size = unpack(e,args[4],&config.alpn[1],255)
+  if seed_size ~= 32 or peer_size ~= 32 or alpn_size <= 0 then return false end
+  config.alpn[0] = (@cuchar)(alpn_size)
+  config.size = (@cuint)(alpn_size + 1)
+  return true
+end
+
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
-  local seed: [32]cuchar
-  local peer: [32]cuchar
-  local alpn: [256]cuchar
-  local seed_size = unpack(e,args[2],&seed[0],32)
-  local peer_size = unpack(e,args[3],&peer[0],32)
-  local alpn_size = unpack(e,args[4],&alpn[1],255)
-  if args[1] == 0 or args[1] > 65535 or io_nul(host,host_size) or
-      seed_size ~= 32 or peer_size ~= 32 or alpn_size <= 0 then
+  local config: QuicConfig
+  if not unpack_config(e,args,&config) or args[1] == 0 or args[1] > 65535 or io_nul(host,host_size) then
     return io_fail(e,EINVAL,'invalid QUIC address, Ed25519 key, or ALPN')
   end
   if next_id == 0 then return io_fail(e,ENOMEM,'QUIC connection handles exhausted') end
-  alpn[0] = (@cuchar)(alpn_size)
   local conn = (@*Connection)(C.calloc(1,#Connection))
   if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
   conn.fd = -1
@@ -628,25 +803,129 @@ local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
     destroy(conn)
     return io_fail(e,code,nilptr)
   end
-  if not open_tls(conn,&seed[0],&peer[0],&alpn[0],(@cuint)(alpn_size + 1)) then
+  if not open_tls(conn,&config.seed[0],&config.peer[0],&config.alpn[0],config.size) then
     destroy(conn)
     return io_fail(e,EIO,'could not configure QUIC raw public key TLS')
   end
-  local status = open_engine(conn)
+  local status = open_engine(conn,nilptr,io_tick())
   if status ~= 0 then
     destroy(conn)
     return io_fail(e,EIO,ngtcp2_strerror(status))
   end
-  conn.next = connections
-  conn.id = next_id
-  next_id = next_id + 1
-  connections = conn
+  register_connection(conn)
   return io_done(e,term_pak(iroh_dgram_DatagramConnection,conn.id))
+end
+
+local function authenticated(conn: *Connection): boolean
+  return conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0
+end
+
+local function send_packet(conn: *Connection, size: csize): isize
+  if conn.listener == nilptr then return send(conn.fd,&conn.output[0],size,0) end
+  return sendto(conn.fd,&conn.output[0],size,0,&conn.remote_addr,conn.remote_size)
+end
+
+local function close_transport(conn: *Connection, error: cint)
+  if error == NGTCP2_ERR_DRAINING then return end
+  local err: ngtcp2_ccerr
+  ngtcp2_ccerr_default(&err)
+  if error == NGTCP2_ERR_CRYPTO then
+    ngtcp2_ccerr_set_tls_alert(&err,ngtcp2_conn_get_tls_alert2(conn.engine),nilptr,0)
+  elseif error < 0 then
+    ngtcp2_ccerr_set_liberr(&err,error,nilptr,0)
+  end
+  local size = ngtcp2_conn_write_connection_close(conn.engine,nilptr,nilptr,&conn.output[0],
+    PACKET_CAPACITY,&err,io_tick())
+  if size > 0 then send_packet(conn,(@csize)(size)) end
+end
+
+local function ingest(conn: *Connection, packet: *cuchar, size: csize, now: uint64)
+  local path = connection_path(conn)
+  local info: ngtcp2_pkt_info = {}
+  local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,packet,size,now)
+  if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then
+    close_transport(conn,status)
+    conn.read_failure = status
+    conn.failed = true
+  end
+end
+
+local function server_connection(listener: *Listener, address: *iroh_datagram_address,
+    address_size: cuint, bytes: *cuchar, size: csize, now: uint64): *Connection
+  if listener.stopped or listener.pending >= MAX_PENDING or next_id == 0 then return nilptr end
+  local initial: ngtcp2_pkt_hd
+  if ngtcp2_accept(&initial,bytes,size) ~= 0 or initial.version ~= NGTCP2_PROTO_VER_V1 then return nilptr end
+  local conn = (@*Connection)(C.calloc(1,#Connection))
+  if conn == nilptr then return nilptr end
+  listener.refs = listener.refs + 1
+  listener.pending = listener.pending + 1
+  conn.listener = listener
+  conn.fd = listener.fd
+  conn.local_addr = listener.local_addr
+  conn.local_size = listener.local_size
+  C.memcpy(&conn.remote_addr,address,#iroh_datagram_address)
+  conn.remote_size = address_size
+  conn.accept_deadline = now + ACCEPT_TIMEOUT
+  if not setup_ssl(conn,listener.ctx,nilptr,0) or open_engine(conn,&initial,now) ~= 0 then
+    destroy(conn)
+    return nilptr
+  end
+  register_connection(conn)
+  return conn
+end
+
+local function matches_cid(id: *ngtcp2_cid, packet: *ngtcp2_version_cid): boolean
+  return id.datalen == packet.dcidlen and C.memcmp(&id.data[0],packet.dcid,packet.dcidlen) == 0
+end
+
+local function owns_cid(conn: *Connection, packet: *ngtcp2_version_cid): boolean
+  -- The original destination ID routes retransmitted Initial packets.
+  if packet.version ~= 0 and matches_cid(&conn.original_id,packet) then return true end
+  local count = ngtcp2_conn_get_scid2(conn.engine,nilptr)
+  if count == 0 then return false end
+  local part: [16]ngtcp2_cid
+  local ids = (@*[0]ngtcp2_cid)(&part[0])
+  if count > 16 then
+    ids = (@*[0]ngtcp2_cid)(C.malloc(count * #ngtcp2_cid))
+    if ids == nilptr then return false end
+  end
+  defer if count > 16 then C.free(ids) end end
+  ngtcp2_conn_get_scid2(conn.engine,&ids[0])
+  for i = 0, < count do
+    if matches_cid(&ids[i],packet) then return true end
+  end
+  return false
+end
+
+local function dispatch(listener: *Listener, now: uint64): cint
+  local bytes: [65536]cuchar
+  local address: iroh_datagram_address
+  local address_size: cuint = #iroh_datagram_address
+  local received = recvfrom(listener.fd,&bytes[0],#bytes,0,&address,&address_size)
+  if received < 0 then
+    if errno == EAGAIN or errno == EINTR then return 0 end
+    return errno
+  end
+  if received == 0 then return 0 end
+  local size = (@csize)(received)
+  local packet: ngtcp2_version_cid
+  if ngtcp2_pkt_decode_version_cid(&packet,&bytes[0],size,CID_SIZE) ~= 0 or packet.dcidlen == 0 then return 0 end
+  local conn = connections
+  while conn ~= nilptr do
+    if conn.listener == listener and same_address(&conn.remote_addr,&address) and owns_cid(conn,&packet) then
+      if not conn.failed then ingest(conn,&bytes[0],size,now) end
+      return 0
+    end
+    conn = (@*Connection)(conn.next)
+  end
+  conn = server_connection(listener,&address,address_size,&bytes[0],size,now)
+  if conn ~= nilptr then ingest(conn,&bytes[0],size,now) end
+  return 0
 end
 
 local function send_pending(conn: *Connection, now: uint64): cint
   if conn.output_size == 0 then return 0 end
-  local size = send(conn.fd,&conn.output[0],conn.output_size,0)
+  local size = send_packet(conn,conn.output_size)
   if size == (@isize)(conn.output_size) then
     conn.output_size = 0
     ngtcp2_conn_update_pkt_tx_time(conn.engine,now)
@@ -672,34 +951,39 @@ local function closed(e: Env): Term
   return io_fail(e,EBADF,'QUIC connection closed')
 end
 
+local function advance(conn: *Connection, now: uint64): cint
+  local error = send_pending(conn,now)
+  if error ~= 0 or conn.output_size ~= 0 then return error end
+  if ngtcp2_conn_get_expiry2(conn.engine) <= now then
+    local status = ngtcp2_conn_handle_expiry(conn.engine,now)
+    if status < 0 then return status end
+  end
+  local size = ngtcp2_conn_write_pkt(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,now)
+  if size < 0 then return (@cint)(size) end
+  conn.output_size = (@csize)(size)
+  return send_pending(conn,now)
+end
+
 local function step(e: Env, conn: *Connection): Term
   if conn == nilptr or conn.failed then return closed(e) end
-  local incoming: [65536]cuchar
-  local size = recv(conn.fd,&incoming[0],#incoming,0)
   local now = io_tick()
-  if size > 0 then
-    local path = connection_path(conn)
-    local info: ngtcp2_pkt_info = {}
-    local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,&incoming[0],(@csize)(size),now)
-    if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then return engine_error(e,conn,status) end
-  elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
-    return socket_error(e,conn,errno)
-  end
-  local error = send_pending(conn,now)
-  if error ~= 0 then return socket_error(e,conn,error) end
-  if conn.output_size == 0 then
-    if ngtcp2_conn_get_expiry2(conn.engine) <= now then
-      local status = ngtcp2_conn_handle_expiry(conn.engine,now)
-      if status < 0 then return engine_error(e,conn,status) end
+  if conn.listener ~= nilptr then
+    local code = dispatch(conn.listener,now)
+    if code ~= 0 then return socket_error(e,conn,code) end
+  else
+    local incoming: [65536]cuchar
+    local size = recv(conn.fd,&incoming[0],#incoming,0)
+    if size > 0 then
+      ingest(conn,&incoming[0],(@csize)(size),now)
+    elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
+      return socket_error(e,conn,errno)
     end
-    local size = ngtcp2_conn_write_pkt(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,now)
-    if size < 0 then return engine_error(e,conn,(@cint)(size)) end
-    conn.output_size = (@csize)(size)
-    error = send_pending(conn,now)
-    if error ~= 0 then return socket_error(e,conn,error) end
   end
-  local ready = conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0
-  return io_done(e,ready and 1 or 0)
+  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  local status = advance(conn,now)
+  if status < 0 then return engine_error(e,conn,status) end
+  if status > 0 then return socket_error(e,conn,status) end
+  return io_done(e,authenticated(conn) and 1 or 0)
 end
 
 local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -713,7 +997,7 @@ local function write(e: Env, conn: *Connection, payload: Term): Term
   if size < 0 then return io_fail(e,EINVAL,'invalid QUIC datagram bytes') end
   if conn == nilptr or conn.failed then return closed(e) end
   local transport = ngtcp2_conn_get_remote_transport_params2(conn.engine)
-  if transport == nilptr or conn.pin_status ~= 1 or ngtcp2_conn_get_handshake_completed2(conn.engine) == 0 then
+  if transport == nilptr or not authenticated(conn) then
     return io_done(e,0)
   end
   if transport.max_datagram_frame_size == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC datagrams') end
@@ -748,7 +1032,7 @@ local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
   local value = term_pak(iroh_dgram_None,0)
-  if conn.inbox_first ~= nilptr and conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 then
+  if conn.inbox_first ~= nilptr and authenticated(conn) then
     local item = conn.inbox_first
     value = io_box(e,iroh_dgram_Some,io_list(e,(@cstring)(datagram_data(item)),item.size))
     pop_datagram(conn)
@@ -760,10 +1044,6 @@ local function acks_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   local result = conn ~= nilptr and io_done(e,conn.acknowledgments) or closed(e)
   return io_tup(e,args[0],result)
-end
-
-local function authenticated(conn: *Connection): boolean
-  return conn.pin_status == 1 and ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0
 end
 
 local function open_stream(e: Env, conn: *Connection, direction: Term): Term
@@ -821,7 +1101,7 @@ local function queue_stream(e: Env, conn: *Connection, handle: Term, data: Term,
   if conn == nilptr or conn.failed then return closed(e) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
-  if (stream.id & 3) == 3 or stream.tx_fin or stream.closed then
+  if (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) == 0 or stream.tx_fin or stream.closed then
     return io_fail(e,EPIPE,'QUIC stream does not have an open send half')
   end
   if stream.tx ~= nilptr then return io_done(e,0) end
@@ -882,7 +1162,7 @@ local function read_stream(e: Env, conn: *Connection, handle: Term, limit: Term)
   if limit == 0 then return io_fail(e,EINVAL,'QUIC stream read limit must be positive') end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
-  if (stream.id & 3) == 2 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
+  if (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
   local size = stream.rx_end - stream.rx_head
   if size > 0 then
     if size > limit then size = (@csize)(limit) end
@@ -923,8 +1203,8 @@ local function release_stream(e: Env, conn: *Connection, handle: Term): Term
     stream.discarded = true
     C.free(stream.rx)
     stream.rx = nilptr
-    local received_fin = stream.rx_fin or stream.rx_reset or (stream.id & 3) == 2
-    local sent_fin = stream.tx_fin_sent or (stream.id & 3) == 3
+    local received_fin = stream.rx_fin or stream.rx_reset or (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) ~= 0
+    local sent_fin = stream.tx_fin_sent or (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) == 0
     if not received_fin or not sent_fin then
       local status = ngtcp2_conn_shutdown_stream(conn.engine,0,stream.id,0)
       if status ~= 0 then return engine_error(e,conn,status) end
@@ -937,29 +1217,113 @@ local function drop_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],release_stream(e,find(e,args[0]),args[1]))
 end
 
+local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local host_size: uint64
+  local host = io_cstr(e,args[0],&host_size)
+  defer C.free(host) end
+  local config: QuicConfig
+  if not unpack_config(e,args,&config) or args[1] > 65535 or io_nul(host,host_size) then
+    return io_fail(e,EINVAL,'invalid QUIC listen address, Ed25519 key, or ALPN')
+  end
+  if next_listener_id == 0 then return io_fail(e,ENOMEM,'QUIC listener handles exhausted') end
+  local listener = (@*Listener)(C.calloc(1,#Listener))
+  if listener == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  listener.refs = 1
+  listener.fd = -1
+  local bound_size = numeric_address(host,(@cushort)(args[1]),&listener.local_addr)
+  if bound_size == 0 or not concrete_address(&listener.local_addr) then
+    release_listener(listener)
+    return io_fail(e,EINVAL,'QUIC listener requires a concrete numeric IP address')
+  end
+  listener.fd = udp_socket(&listener.local_addr)
+  listener.local_size = #iroh_datagram_address
+  if listener.fd < 0 or bind(listener.fd,&listener.local_addr,bound_size) ~= 0 or
+      getsockname(listener.fd,&listener.local_addr,&listener.local_size) ~= 0 then
+    local code = (@uint32)(errno)
+    release_listener(listener)
+    return io_fail(e,code,nilptr)
+  end
+  listener.ctx = create_tls_ctx(&config.seed[0],SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
+  listener.expected_key = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,&config.peer[0],32)
+  if listener.ctx == nilptr or listener.expected_key == nilptr or SSL_CTX_set_num_tickets(listener.ctx,0) ~= 1 then
+    release_listener(listener)
+    return io_fail(e,EIO,'could not configure QUIC listener TLS')
+  end
+  listener.alpn_size = config.size
+  C.memcpy(&listener.alpn[0],&config.alpn[0],config.size)
+  SSL_CTX_set_alpn_select_cb(listener.ctx,(@pointer)(select_alpn),listener)
+  listener.id = next_listener_id
+  next_listener_id = next_listener_id + 1
+  listener.next = listeners
+  listeners = listener
+  local handle = term_pak(iroh_dgram_QuicDatagramListener,listener.id)
+  return io_done(e,io_tup(e,handle,address_port(&listener.local_addr)))
+end
+
+local function try_accept(e: Env, listener: *Listener): Term
+  if listener == nilptr then return io_fail(e,EBADF,'QUIC listener closed') end
+  local now = io_tick()
+  local code = dispatch(listener,now)
+  if code ~= 0 then return io_fail(e,(@uint32)(code),nilptr) end
+  local ready: *Connection
+  local conn = connections
+  while conn ~= nilptr do
+    local next = (@*Connection)(conn.next)
+    if conn.listener == listener and not conn.accepted then
+      if conn.failed or now >= conn.accept_deadline or advance(conn,now) ~= 0 then
+        remove_connection(conn)
+      elseif authenticated(conn) and (ready == nilptr or conn.id < ready.id) then
+        ready = conn
+      end
+    end
+    conn = next
+  end
+  if ready == nilptr then return io_done(e,term_pak(iroh_dgram_None,0)) end
+  ready.accepted = true
+  listener.pending = listener.pending - 1
+  local accepted = term_pak(iroh_dgram_DatagramConnection,ready.id)
+  return io_done(e,io_box(e,iroh_dgram_Some,accepted))
+end
+
+local function accept_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],try_accept(e,find_listener(e,args[0])))
+end
+
+local function close_listener_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local listener = find_listener(e,args[0])
+  if listener ~= nilptr then
+    if listeners == listener then
+      listeners = (@*Listener)(listener.next)
+    else
+      local prior = listeners
+      while prior.next ~= listener do prior = (@*Listener)(prior.next) end
+      prior.next = listener.next
+    end
+    listener.stopped = true
+    local conn = connections
+    while conn ~= nilptr do
+      local next = (@*Connection)(conn.next)
+      if conn.listener == listener and not conn.accepted then remove_connection(conn) end
+      conn = next
+    end
+    release_listener(listener)
+  end
+  return term_pak(iroh_dgram_Unit,0)
+end
+
 local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn ~= nilptr then
-    if connections == conn then
-      connections = (@*Connection)(conn.next)
-    else
-      local prior = connections
-      while prior.next ~= conn do prior = (@*Connection)(prior.next) end
-      prior.next = conn.next
-    end
-    if not conn.failed then
-      local err: ngtcp2_ccerr
-      ngtcp2_ccerr_default(&err)
-      local size = ngtcp2_conn_write_connection_close(conn.engine,nilptr,nilptr,&conn.output[0],
-        PACKET_CAPACITY,&err,io_tick())
-      if size > 0 then send(conn.fd,&conn.output[0],(@csize)(size),0) end
-    end
-    destroy(conn)
+    if not conn.failed then close_transport(conn,0) end
+    remove_connection(conn)
   end
   return term_pak(iroh_dgram_Unit,0)
 end
 
 local function register_quic_datagram() <cexport,codename 'iroh_register_quic_datagram',cattribute 'constructor'>
+  if iroh_dgram_bind_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_bind_shared_quic,bind_run) end
+  if iroh_dgram_try_accept_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_try_accept_shared_quic,accept_run) end
+  if iroh_dgram_close_shared_quic ~= 0xffffffff then io_eff(iroh_dgram_close_shared_quic,close_listener_run) end
   if iroh_dgram_start_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_start_quic_datagram,start_run) end
   if iroh_dgram_step_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_step_quic_datagram,step_run) end
   if iroh_dgram_write_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_write_quic_datagram,write_run) end

@@ -6,6 +6,7 @@ ipv4=$2
 ipv6=$3
 echo_peer=${4:-}
 shared_peer=${5:-}
+dial_peer=${6:-}
 if [ ! -x "$ipv4" ] || [ ! -x "$ipv6" ]; then
     printf '%s\n' 'Set UPSTREAM_DATAGRAM_V4 and UPSTREAM_DATAGRAM_V6 to the Iroh 1.5.0 listen fixtures.' >&2
     exit 2
@@ -16,6 +17,10 @@ if [ -n "$echo_peer" ] && [ ! -x "$echo_peer" ]; then
 fi
 if [ -n "$shared_peer" ] && [ ! -x "$shared_peer" ]; then
     printf '%s\n' 'UPSTREAM_QUIC_SHARED must name an executable Iroh fixture.' >&2
+    exit 2
+fi
+if [ -n "$dial_peer" ] && [ ! -x "$dial_peer" ]; then
+    printf '%s\n' 'UPSTREAM_QUIC_SHARED_DIAL must name an executable Iroh fixture.' >&2
     exit 2
 fi
 work=$(mktemp -d)
@@ -35,37 +40,55 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-check_peer() {
-    peer=$1
-    host=$2
-    mode=$3
-    command=$4
+start_listener() {
     : >"$work/address"
-    timeout 30s "$peer" "$command" >"$work/address" 2>"$work/error" &
+    timeout 30s "$1" "$2" >"$work/address" 2>"$work/error" &
     pid=$!
     tries=0
     while ! IFS= read -r address <"$work/address"; do
         if ! kill -0 "$pid" 2>/dev/null || [ "$tries" -ge 300 ]; then
-            printf '%s\n' "Iroh fixture did not print an address for $host ($mode)." >&2
+            printf '%s\n' "$1 did not print an address for $2." >&2
             cat "$work/error" >&2
             exit 1
         fi
         tries=$((tries + 1))
         sleep .05
     done
+}
+
+finish_listener() {
+    if wait "$pid"; then
+        pid=
+    else
+        pid=
+        cat "$work/error" >&2
+        exit 1
+    fi
+}
+
+check_peer() {
+    host=$2
+    mode=$3
+    start_listener "$1" "$4"
     if ! "$client" "$host" "${address##*:}" "$mode"; then
         cat "$work/error" >&2
         exit 1
     fi
     if [ "$mode" = echo ] || [ "$mode" = shared ]; then
-        if ! wait "$pid"; then
-            cat "$work/error" >&2
-            exit 1
-        fi
-        pid=
+        finish_listener
     else
         stop_peer
     fi
+}
+
+check_listener() {
+    start_listener "$client" "$1"
+    if ! timeout 25s "$dial_peer" dial "$address"; then
+        cat "$work/error" >&2
+        exit 1
+    fi
+    finish_listener
+    tail -n +2 "$work/address"
 }
 
 for mode in valid wrong-key; do
@@ -79,4 +102,8 @@ fi
 if [ -n "$shared_peer" ]; then
     check_peer "$shared_peer" 127.0.0.1 shared listen
     check_peer "$shared_peer" ::1 shared listen6
+fi
+if [ -n "$dial_peer" ]; then
+    check_listener listen
+    check_listener listen6
 fi
