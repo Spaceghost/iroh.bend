@@ -1,4 +1,6 @@
 import Base
+import ./quic_stream.bend as Stream
+import ./quic_nat.bend as NatWire
 
 type DatagramConnection is Type:
   DatagramConnection{id: U32}
@@ -178,6 +180,38 @@ def read_quic_stream(conn: DatagramConnection, stream: U32, limit: U32)
   import "./quic_datagram.c"
 
 # Release a completed stream. Dropping a live stream aborts its open halves.
+# End one stream half and keep the opposite half available.
+def cancel_quic_stream_half(conn: DatagramConnection, stream: U32, half: U32, high: U32, low: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_datagram.c"
+
+def reset_quic_stream(conn: DatagramConnection, stream: U32, code: NatWire.VarInt)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  NatWire.Var{high,low} = code
+  cancel_quic_stream_half(conn,stream,0,high,low)
+
+def stop_quic_stream(conn: DatagramConnection, stream: U32, code: NatWire.VarInt)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
+  NatWire.Var{high,low} = code
+  cancel_quic_stream_half(conn,stream,1,high,low)
+
+def peer_quic_stream_code(conn: DatagramConnection, stream: U32, half: U32) -> IO(Stream.CodeWords(DatagramConnection)):
+  import "./quic_datagram.c"
+
+# None until the peer sends RESET_STREAM on the receive half or
+# STOP_SENDING on the send half. A peer code of zero returns Some.
+def quic_stream_reset_code(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Maybe<&2,NatWire.VarInt>>):
+  do IO<Stream.CodeResult(DatagramConnection)>:
+    raw : Stream.CodeWords(DatagramConnection) <- peer_quic_stream_code(conn,stream,1)
+    Stream.peer_code(DatagramConnection,raw)
+
+def quic_stream_stop_code(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Maybe<&2,NatWire.VarInt>>):
+  do IO<Stream.CodeResult(DatagramConnection)>:
+    raw : Stream.CodeWords(DatagramConnection) <- peer_quic_stream_code(conn,stream,0)
+    Stream.peer_code(DatagramConnection,raw)
+
 def drop_quic_stream(conn: DatagramConnection, stream: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_datagram.c"
