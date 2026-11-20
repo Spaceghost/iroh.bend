@@ -277,6 +277,8 @@ local EHOSTUNREACH: cint <cimport,nodecl>
 local EBADF: uint32 <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
 local ENOMEM: uint32 <cimport,nodecl>
+local ETIMEDOUT: uint32 <cimport,nodecl>
+local PICOQUIC_ERROR_IDLE_TIMEOUT: uint64 <cimport,nodecl>
 local EIO: uint32 <cimport,nodecl>
 local EACCES: uint32 <cimport,nodecl>
 local ENOTSUP: uint32 <cimport,nodecl>
@@ -600,7 +602,7 @@ local Connection = @record{
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, output_source:storage_t, output_iface:cint, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
-  close_bytes: *uint8, close_size: csize, close_code: uint64, locally_closed: boolean, peer_closed: boolean, close_error: uint32,
+  close_bytes: *uint8, close_size: csize, close_code: uint64, locally_closed: boolean, peer_closed: boolean, timed_out: boolean, close_error: uint32,
   decoding: *uint8, decoding_size: csize,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, detached: boolean, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
@@ -1831,7 +1833,13 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
     end
   elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
       kind == picoquic_callback_stateless_reset then
-    if kind == picoquic_callback_application_close and not conn.closed then receive_application_close(conn,cnx) end
+    if not conn.closed then
+      if kind == picoquic_callback_application_close then
+        receive_application_close(conn,cnx)
+      elseif kind == picoquic_callback_close and conn.ready then
+        conn.timed_out = picoquic_get_local_error(cnx) == PICOQUIC_ERROR_IDLE_TIMEOUT
+      end
+    end
     conn.closed = true
   end
   return 0
@@ -2085,6 +2093,7 @@ end
 
 local function closed_error(e: Env, conn: *Connection): Term
   if conn == nilptr then return io_fail(e,EBADF,'multipath connection closed') end
+  if conn.timed_out and not conn.locally_closed then return io_fail(e,ETIMEDOUT,'QUIC idle timeout') end
   if conn.buffer_error then return io_fail(e,ENOBUFS,'multipath stream receive buffer exhausted') end
   if picoquic_get_local_error(conn.cnx) == IROH_MP_PIN_MISMATCH then
     return io_fail(e,EACCES,'QUIC peer endpoint key mismatch')

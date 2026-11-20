@@ -722,6 +722,12 @@ check-quic-close-control:
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
 UPSTREAM_QUIC_IDLE ?=
+.PHONY: check-quic-idle check-quic-datagram-idle check-quic-multipath-idle
+check-quic-idle: check-quic-datagram-idle check-quic-multipath-idle
+check-quic-datagram-idle check-quic-multipath-idle: check-%-idle: $(BUILD)/iroh-bend-%-cancel
+	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
+	python3 -B tests/quic_idle_timeout.py "$<" "$(UPSTREAM_QUIC_IDLE)"
+
 .PHONY: check-quic-idle-control
 check-quic-idle-control:
 	@test -x "$(UPSTREAM_QUIC_IDLE)" || { echo 'Set UPSTREAM_QUIC_IDLE to the Iroh idle timeout peer.' >&2; exit 2; }
@@ -749,7 +755,7 @@ check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
 $(BUILD)/quic-datagram-relay-close.c: tests/quic_datagram_relay_close.bend tests/quic_datagram_cancel.bend tests/quic_datagram.bend
 $(BUILD)/quic-multipath-relay-close.c: tests/quic_multipath_relay_close.bend tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
-$(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-multipath-relay-close.c: tests/quic_relay_close.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))
+$(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-multipath-relay-close.c: tests/quic_relay_close.bend tests/quic_idle_timeout.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))
 $(BUILD)/relay-quic-drain.c $(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-multipath-relay-close.c: $(BUILD)/%.c: tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
@@ -762,7 +768,7 @@ $(BUILD)/relay-quic-drain.c $(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-m
 
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_connection_close.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
 $(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_connection_close.bend src/endpoint_multipath.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
-$(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) tools/nelua-effect.sh
+$(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_idle_timeout.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
 	cp $(filter tests/%.bend,$^) "$(@:.c=-stage)/tests/"

@@ -93,8 +93,10 @@ client requires a libcurl build with WebSocket support.
    The optional `control` argument exchanges the fixture's local and expected peer
    identities for `make check-quic-close-control`.
    See the [Iroh graceful-close test](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L3161-L3198).
-   Run `make check-quic-idle-control UPSTREAM_QUIC_IDLE=/path/to/peer` to compare
-   two Iroh 1.5.0 endpoints after an 800 ms negotiated idle timeout. The peer accepts
+   Run `make check-quic-idle UPSTREAM_QUIC_IDLE=/path/to/peer` to check both native
+   transports against Iroh 1.5.0 after an 800 ms negotiated idle timeout.
+   Run `make check-quic-idle-control` with the same variable for Iroh on both ends.
+   The peer accepts
    `listen|listen6 idle|activity [control]` or `dial ADDRESS idle|activity [control]`,
    using the same identity and ALPN as the close fixture. The dialer sends datagram
    byte 10 and receives 20. In the activity case it repeats four times at 300 ms
@@ -453,7 +455,8 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   receiving application, use an application-level reply.
 - Call `Endpoint.close_with(connection, code, reason)` to send an application close. Poll
   `Endpoint.close_reason` while driving the connection. It returns `None` while open,
-  `LocallyClosed` after a local close, or `ApplicationClosed{code,reason}` after a peer close.
+  `TimedOut` after QUIC idle expiry, `LocallyClosed` after a local close, or
+  `ApplicationClosed{code,reason}` after a peer application close.
   Release the connection with `disconnect` after inspecting the result.
   The multipath endpoint exposes the same two operations. Set `UPSTREAM_QUIC_CLOSE` to the Iroh
   fixture and run `make check-quic-close` for both transports. Run `make check-quic-close-control`
@@ -819,6 +822,10 @@ NAT mapping changes is parked. The outbound routed connection has a separate
 passing address-refresh test below.
 Both backends report when the peer acknowledges a graceful FIN or a locally issued
 RESET_STREAM while the opposite stream half is still open.
+Both also report `TimedOut` after an established connection expires. IPv4
+and IPv6 tests exercise both listener and dialer roles against Iroh 1.5.0,
+including traffic that keeps the connection open past its original deadline.
+The tests verify that later datagram and stream operations report the timeout.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
