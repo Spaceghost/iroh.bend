@@ -39,10 +39,11 @@ def check(listener, fixture, host, mode, listener_mode="0"):
                 print(f"PASS Bend selected its preferred ALPN and the text fallback on {host}", flush=True)
 
 
-def check_affinity(listener, dialer, host):
-    with process(listener, host, "1") as bend:
+def check_affinity(listener, dialer, host, advertises_nat=False):
+    mode, args = ("5", ("bend-nat-offer",)) if advertises_nat else ("1", ())
+    with process(listener, host, mode) as bend:
         port = read_address(bend)
-        subprocess.run((dialer, host, str(port)), timeout=16, check=True)
+        subprocess.run((dialer, host, str(port), *args), timeout=16, check=True)
         output, _ = bend.communicate(timeout=6)
         print(output.decode(), end="", flush=True)
         if bend.returncode:
@@ -54,6 +55,7 @@ if __name__ == "__main__":
     for host, mode in (("127.0.0.1", "dial"), ("::1", "dial6")):
         check(listener, fixture, host, mode)
         check_affinity(listener, dialer, host)
+        check_affinity(listener, dialer, host, advertises_nat=True)
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
             check(listener, fixture, host, mode, "2")
         if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":

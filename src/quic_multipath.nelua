@@ -245,7 +245,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'bind_multipath', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -290,6 +290,7 @@ local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_set_multipath_alpns: uint32 <cimport,nodecl>
@@ -346,9 +347,11 @@ local LISTENER_LIMIT: uint32 <comptime> = 64
 local SESSION_LIMIT: uint32 <comptime> = 256
 local HANDSHAKE_LIMIT: uint64 <comptime> = 10000000
 local DATAGRAM_QUEUE_LIMIT: uint32 <comptime> = 64
+local NAT_PARAMETER_SIZE: csize <comptime> = 10
 local Listener = @record{
   next: pointer, id: uint32, fd: cint, quic: *quic_t, local_addr: storage_t,
-  refs: uint32, stopped: boolean
+  refs: uint32, stopped: boolean,
+  nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer: boolean
 }
 local Path = @record{
   next: pointer, fd: cint, local_addr: storage_t, peer: storage_t,
@@ -361,7 +364,7 @@ local Stream = @record{
 local Datagram = @record{next:pointer,size:csize}
 local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean, retained:boolean}
 local PeerParameters = @record{bytes:*uint8, size:csize}
-local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters}
+local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters, extensions:*uint8}
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
   local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32,
@@ -504,6 +507,7 @@ local function discard_handshake(cnx: *cnx_t, listener: pointer)
   if pending == nilptr then return end
   picoquic_set_callback(cnx,(@pointer)(picoquic_get_callback_function(cnx)),listener)
   C.free(pending.parameters.bytes)
+  C.free(pending.extensions)
   C.free(pending)
 end
 
@@ -662,8 +666,20 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
   local data = ptls_get_data_ptr(tls)
   local cnx = (@*cnx_t)($data)
   if cnx == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
-  local pending = pending_handshake(cnx,picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
+  local listener = (@*Listener)(picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
+  local pending = pending_handshake(cnx,listener)
   if pending == nilptr then return PTLS_ALERT_NO_APPLICATION_PROTOCOL end
+  if listener.sends_nat_offer then
+    local base = pin.response[0].data
+    if base.len > 65535 - NAT_PARAMETER_SIZE then return PTLS_ALERT_INTERNAL_ERROR end
+    local merged = (@*uint8)(C.malloc(base.len + NAT_PARAMETER_SIZE))
+    if merged == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
+    C.memcpy(merged,base.base,base.len)
+    C.memcpy(&((@*[0]uint8)(merged))[base.len],&listener.nat_offer[0],NAT_PARAMETER_SIZE)
+    C.free(pending.extensions)
+    pending.extensions = merged
+    pin.response[0].data = {base=merged,len=base.len + NAT_PARAMETER_SIZE}
+  end
   if iroh_mp_peer_multipath_parameters ~= 0xffffffff then
     local status = save_parameters(&pending.parameters,transport.data)
     if status ~= 0 then return status end
@@ -1127,6 +1143,7 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   register_connection(conn)
   conn.peer_parameters = pending.parameters
   picoquic_set_callback(cnx,(@pointer)(on_event),conn)
+  C.free(pending.extensions)
   C.free(pending)
   return on_event(cnx,id,bytes,size,kind,conn,stream_user)
 end
@@ -1518,7 +1535,7 @@ local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t)
   return address(host,(@uint16)(port),out)
 end
 
-local function bind_listener(e: Env, args: *[0]Term, mode: uint32): Term
+local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
   local alpns = read_alpns(e,args[4],mode)
@@ -1549,6 +1566,13 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32): Term
     local code = (@uint32)(errno)
     release_listener(listener)
     return io_fail(e,code,nilptr)
+  end
+  if advertise_nat then
+    if bytes_from_list(e,args[5],&listener.nat_offer[0],NAT_PARAMETER_SIZE) ~= NAT_PARAMETER_SIZE then
+      release_listener(listener)
+      return io_fail(e,EINVAL,'invalid encoded NAT traversal parameter')
+    end
+    listener.sends_nat_offer = true
   end
   local now = picoquic_current_time()
   listener.quic = picoquic_create(LISTENER_LIMIT,nilptr,nilptr,nilptr,nilptr,(@pointer)(server_event),listener,
@@ -1593,15 +1617,19 @@ local function accept_connection(e: Env, listener: *Listener): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0)
+  return bind_listener(e,args,0,false)
+end
+
+local function bind_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return bind_listener(e,args,0,true)
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,1)
+  return bind_listener(e,args,1,false)
 end
 
 local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2)
+  return bind_listener(e,args,2,false)
 end
 
 local function used_alpns(listener: *Listener)
@@ -2188,6 +2216,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
+  if iroh_mp_bind_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer,bind_nat_offer_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end

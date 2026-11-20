@@ -451,9 +451,9 @@ $(BUILD)/iroh-bend-quic-multipath: $(BUILD)/quic-multipath.c
 $(BUILD)/iroh-bend-quic-multipath-listener: $(BUILD)/quic-multipath-listener.c
 $(BUILD)/iroh-bend-quic-multipath-session: $(BUILD)/quic-multipath-session.c
 
-$(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_multipath.bend src/quic_multipath.nelua tools/nelua-effect.sh
+$(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_multipath.bend src/quic_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp src/quic_multipath.bend "$(@:.c=-stage)/src/"
+	cp src/quic_multipath.bend src/quic_nat.bend "$(@:.c=-stage)/src/"
 	cp tests/quic_multipath_session.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"

@@ -363,11 +363,35 @@ def require_nat_limit(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnec
     pair : Quic.MultipathConnection & List<&2,U32> <- read_peer_parameters(conn)
     validate_peer_parameters(pair)
 
+def validate_offered_limit(conn: Quic.MultipathConnection, parsed: NatWire.ParameterResult)
+    -> IO(Quic.MultipathConnection):
+  match parsed:
+    case NatWire.ParameterLimit{64}:
+      IO.pure(Quic.MultipathConnection,conn)
+    case _:
+      reject(Quic.MultipathConnection,conn,1,"expected Bend listener's NAT traversal limit of 64")
+
+def verify_offered_parameters(pair: Quic.MultipathConnection & List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  (conn,parameters) = pair
+  validate_offered_limit(conn,NatWire.read_parameters(parameters))
+
+def require_bend_nat_offer(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    pair : Quic.MultipathConnection & List<&2,U32> <- read_peer_parameters(conn)
+    next : Quic.MultipathConnection <- verify_offered_parameters(pair)
+    IO.print("PASS Bend read the listener's authenticated NAT traversal limit of 64")
+    return next
+
 def dial_result(result: Quic.ConnectResult(), mode: U32, host: String, port: U32) -> IO(Unit):
   match result mode:
     case Done{conn} 2:
       do IO<Unit>:
         ready : Quic.MultipathConnection <- require_nat_limit(conn)
+        run_probe(ready,host,port)
+    case Done{conn} 3:
+      do IO<Unit>:
+        ready : Quic.MultipathConnection <- require_bend_nat_offer(conn)
         run_probe(ready,host,port)
     case Done{conn} 0:
       run_probe(conn,host,port)
@@ -397,6 +421,8 @@ def run(args: List<String>) -> IO(Unit):
       parse_multiple(host,U32.read(port))
     case [_,host,port,"iroh-parameters"]:
       parse(host,U32.read(port),2)
+    case [_,host,port,"bend-nat-offer"]:
+      parse(host,U32.read(port),3)
     case Con{_,Con{host,Con{port,Nil{}}}}:
       parse(host,U32.read(port),0)
     case Con{_,Con{host,Con{port,Con{_,Nil{}}}}}:

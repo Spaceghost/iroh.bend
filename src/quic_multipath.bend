@@ -1,4 +1,5 @@
 import Base
+import ./quic_nat.bend as NatWire
 
 type MultipathConnection is Type:
   MultipathConnection{id: U32}
@@ -218,6 +219,23 @@ def close_multipath(conn: MultipathConnection) -> IO(Unit):
 def bind_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
+
+# Low-level transport fixture. The normal listener waits for QNT frame handling.
+def bind_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
+def bind_nat_parameter(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: Maybe<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  match parameter:
+    case Some{encoded}:
+      bind_multipath_nat_offer(host,port,seed,peer,alpn,encoded)
+    case None{}:
+      IO.pure(Result<&1,&1,U32 & String,MultipathListener & U32>,Fail{(22,"invalid NAT traversal limit")})
+
+def bind_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  bind_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
 
 def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):

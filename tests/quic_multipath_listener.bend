@@ -257,6 +257,12 @@ def listen_text(host: String, mode: U32) -> IO(Unit):
       Quic.bind_multipath(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1"))
     announce(bound,mode)
 
+def listen_nat_offer(host: String, mode: U32) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_multipath_with_nat_limit(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1",64))
+    announce(bound,mode)
+
 def listen_binary(host: String) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
@@ -290,6 +296,8 @@ def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
       listen_multiple(host)
     case Some{4}:
       listen_live(host)
+    case Some{5}:
+      listen_nat_offer(host,5)
     case Some{number}:
       listen_text(host,number)
     case None{}:
