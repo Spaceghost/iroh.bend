@@ -1,6 +1,7 @@
 import Base
 import ../src/quic_nat.bend as Wire
 import ../src/quic_close_wire.bend as CloseWire
+import ../src/quic_close.bend as Close
 
 def empty(result: Maybe<&2,CloseWire.Application>) -> Bool:
   match result:
@@ -19,6 +20,31 @@ def binary(result: Maybe<&2,CloseWire.Application>) -> Bool:
 def closing() -> List<&2,U32>:
   Con{29,Wire.integer_bytes(1073741823,4294967295,[3,0,255,29,0])}
 
+def native_snapshot(id: U32) -> Close.NativeResult():
+  match id:
+    case 4:
+      Fail{(110,"idle timeout")}
+    case 5:
+      Fail{(9,"closed handle")}
+    case 6:
+      Done{Some{None{}}}
+    case _:
+      # A peer can independently use 110 as an application close code.
+      Done{Some{Some{((0,110),[0,255])}}}
+
+def matches_close(id: U32, result: Close.ReadResult()) -> Bool:
+  match id result:
+    case 4 Done{Some{Close.TimedOut{}}}:
+      True{}
+    case 5 Fail{(9,"closed handle")}:
+      True{}
+    case 6 Done{Some{Close.LocallyClosed{}}}:
+      True{}
+    case 7 Done{Some{Close.ApplicationClosed{Wire.Var{0,110},[0,255]}}}:
+      True{}
+    case _ _:
+      False{}
+
 def vector(id: U32) -> Bool:
   match id:
     case 0:
@@ -30,8 +56,10 @@ def vector(id: U32) -> Bool:
       binary(CloseWire.application(List.append(&2,U32,prefix,closing())))
     case 2:
       empty(CloseWire.application(Con{48,closing()}))
-    case _:
+    case 3:
       binary(CloseWire.application(List.append(&2,U32,[29,0,0,0,1,28,0,0,2,42,0],closing())))
+    case +n:
+      matches_close(n,Close.decode(native_snapshot(n)))
 
 def count(+depth: Nat, +index: U32) -> U32:
   match depth:
@@ -45,9 +73,9 @@ def count(+depth: Nat, +index: U32) -> U32:
 def check(passed: Bool) -> IO(Unit):
   match passed:
     case True{}:
-      IO.print("PASS application close frame boundaries and binary reasons")
+      IO.print("PASS application close frame boundaries and public connection close reasons")
     case False{}:
-      IO.die(Unit,1,"application close frame boundary mismatch")
+      IO.die(Unit,1,"connection close vector mismatch")
 
 def main() -> IO(Unit):
-  check(U32.is_eq(count(2n,0),4))
+  check(U32.is_eq(count(3n,0),8))
