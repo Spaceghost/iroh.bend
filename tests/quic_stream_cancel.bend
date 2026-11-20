@@ -225,48 +225,54 @@ def expected(check: Check) -> State:
   Check{_,expect} = check
   expect
 
-def report(status: State) -> IO(Unit):
+def report(-C: Type, status: State) -> IO(C):
   match status:
     case Error{number,message}:
-      IO.die(Unit,number,message)
+      IO.die(C,number,message)
     case _:
-      IO.die(Unit,1,"unexpected stream state or payload")
+      IO.die(C,1,"unexpected stream state or payload")
 
-def failure(-C: Type, engine: Driver<C>, conn: C, index: U32, status: State) -> IO(Unit):
+def failure(-C: Type, engine: Driver<C>, conn: C, index: U32, status: State) -> IO(C):
   Driver{_,_,close} = engine
-  do IO<Unit>:
+  do IO<C>:
     close(conn)
     IO.print(String.append("stream check ",U32.show(index)))
-    report(status)
+    report(C,status)
 
 def verdict(-C: Type, conn: C, id: U32, actual: State, equal: Bool, pending: Bool,
-    good: C -> U32 -> IO(Unit), retry: C -> IO(Unit), bad: C -> State -> IO(Unit)) -> IO(Unit):
+    good: C -> U32 -> IO(C), retry: C -> IO(C), bad: C -> State -> IO(C)) -> IO(C):
   match equal pending:
     case True{} _:
       good(conn,stream_id(actual,id))
     case False{} True{}:
-      do IO<Unit>:
+      do IO<C>:
         IO.sleep(1)
         retry(conn)
     case False{} False{}:
       bad(conn,actual)
 
-def result(-C: Type, reply: C & State, id: U32, +expect: State, good: C -> U32 -> IO(Unit),
-    retry: C -> IO(Unit), bad: C -> State -> IO(Unit)) -> IO(Unit):
+def result(-C: Type, reply: C & State, id: U32, +expect: State, good: C -> U32 -> IO(C),
+    retry: C -> IO(C), bad: C -> State -> IO(C)) -> IO(C):
   (conn,+actual) = reply
   verdict(C,conn,id,actual,matches(expect,actual),waiting(actual,expect),good,retry,bad)
 
-@unsafe def advance(~C: Type, ~engine: Driver<C>, conn: C, +id: U32, +index: U32, checks: List<&2,Check>, fuel: Nat)
-    -> IO(Unit):
+@unsafe def run_checks(~C: Type, ~engine: Driver<C>, conn: C, +id: U32, +index: U32, checks: List<&2,Check>, fuel: Nat)
+    -> IO(C):
   match checks fuel:
     case Nil{} _:
-      finish(C,engine,conn)
+      IO.pure(C,conn)
     case Con{_,_} 0n:
       failure(C,engine,conn,index,Pending{})
     case Con{+check,+rest} 1n+left:
-      do IO<Unit>:
+      do IO<C>:
         raw : C & State <- apply_check(C,engine,conn,id,check)
         result(C,raw,id,expected(check),
-          next => handle => advance(~C,~engine,next,handle,U32.add(index,1),rest,4000n),
-          next => advance(~C,~engine,next,id,index,Con{check,rest},left),
+          next => handle => run_checks(~C,~engine,next,handle,U32.add(index,1),rest,4000n),
+          next => run_checks(~C,~engine,next,id,index,Con{check,rest},left),
           next => status => failure(C,engine,next,index,status))
+
+@unsafe def advance(~C: Type, ~engine: Driver<C>, conn: C, id: U32, index: U32, checks: List<&2,Check>, fuel: Nat)
+    -> IO(Unit):
+  do IO<Unit>:
+    done : C <- run_checks(~C,~engine,conn,id,index,checks,fuel)
+    finish(C,engine,done)

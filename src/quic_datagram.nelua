@@ -109,7 +109,14 @@ local ngtcp2_transport_params <cimport,nodecl> = @record{
 }
 local ngtcp2_pkt_info <cimport,nodecl> = @record{ecn: uint32}
 local ngtcp2_conn_info <cimport,nodecl> = @record{pkt_recv: uint64}
-local ngtcp2_ccerr <cimport,nodecl> = @record{}
+## cdefine 'iroh_datagram_ccerr_type type'
+local ngtcp2_ccerr <cimport,nodecl> = @record{
+  iroh_datagram_ccerr_type: cint, error_code: uint64, reason: *cuchar, reasonlen: csize
+}
+local NGTCP2_CCERR_TYPE_APPLICATION: cint <cimport,nodecl>
+local function ngtcp2_ccerr_set_application_error(err: *ngtcp2_ccerr, code: uint64, reason: *cuchar,
+    size: csize) <cimport,nodecl> end
+local function ngtcp2_conn_get_ccerr2(conn: *ngtcp2_conn): *ngtcp2_ccerr <cimport,nodecl> end
 local ngtcp2_vec <cimport,nodecl> = @record{base: *cuchar, len: csize}
 local ngtcp2_callbacks <cimport,nodecl> = @record{
   client_initial: pointer, recv_client_initial: pointer, recv_crypto_data: pointer, encrypt: pointer, decrypt: pointer, hp_mask: pointer,
@@ -270,7 +277,7 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
     'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
-    'cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
+    'send_quic_application_close','read_quic_application_close','cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','quic_stream_reset_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -317,6 +324,8 @@ local iroh_dgram_cancel_quic_stream_half: uint32 <cimport,nodecl>
 local iroh_dgram_quic_stream_fin_acked: uint32 <cimport,nodecl>
 local iroh_dgram_quic_stream_reset_acked: uint32 <cimport,nodecl>
 local iroh_dgram_peer_quic_stream_code: uint32 <cimport,nodecl>
+local iroh_dgram_send_quic_application_close: uint32 <cimport,nodecl>
+local iroh_dgram_read_quic_application_close: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_QuicStreamPending: uint32 <cimport,nodecl>
 local iroh_dgram_QuicStreamFin: uint32 <cimport,nodecl>
@@ -456,7 +465,7 @@ local Connection = @record{
   datagram_id: uint64,
   streams: *Stream, tracked_resets: csize, reset_ack_seen: boolean,
   pin_status: cint,
-  failed: boolean,
+  failed: boolean, locally_closed: boolean,
   listener: *Listener,
   original_id: ngtcp2_cid,
   accepted: boolean,
@@ -2432,12 +2441,78 @@ local function close_listener_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return term_pak(iroh_dgram_Unit,0)
 end
 
+local function send_application_close(e: Env, conn: *Connection, high: Term, low: Term, reason: Term): Term
+  local bytes: [PACKET_CAPACITY]cuchar
+  local length = unpack(e,reason,&bytes[0],#bytes)
+  if high > 0x3fffffff or length < 0 then return io_fail(e,EINVAL,'invalid QUIC application close') end
+  if conn == nilptr then return closed(e) end
+  if conn.failed then
+    if not conn.locally_closed then conn.output_size = 0 end
+    conn.locally_closed = true
+    if conn.output_size ~= 0 then
+      local status = send_pending(conn,io_tick())
+      if status ~= 0 then return io_fail(e,(@uint32)(status),nilptr) end
+    end
+    return io_done(e,term_pak(iroh_dgram_Unit,0))
+  end
+  if not authenticated(conn) then return io_fail(e,EAGAIN,'QUIC handshake is incomplete') end
+  local limit = ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn.engine)
+  if limit > #bytes then limit = #bytes end
+  -- One short header, a four-byte packet number, AEAD tag, frame type,
+  -- at most eight bytes of application code and two bytes of reason length.
+  local overhead = ngtcp2_conn_get_dcid2(conn.engine).datalen + 32
+  if limit < overhead then return io_fail(e,EMSGSIZE,'QUIC path cannot carry application close') end
+  local count = (@csize)(length)
+  if count > limit - overhead then count = limit - overhead end
+  local err: ngtcp2_ccerr
+  ngtcp2_ccerr_set_application_error(&err,(high << 32) | low,&bytes[0],count)
+  local now = io_tick()
+  local written = ngtcp2_conn_write_connection_close(conn.engine,packet_path(conn),nilptr,&conn.output[0],
+      PACKET_CAPACITY,&err,now)
+  if written <= 0 then return io_fail(e,EIO,ngtcp2_strerror((@cint)(written))) end
+  conn.output_size = (@csize)(written)
+  conn.locally_closed = true
+  conn.failed = true
+  local status = send_pending(conn,now)
+  if status ~= 0 then return io_fail(e,(@uint32)(status),nilptr) end
+  return io_done(e,term_pak(iroh_dgram_Unit,0))
+end
+
+local function application_close_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],send_application_close(e,find(e,args[0]),args[1],args[2],args[3]))
+end
+
+local function application_close_reason(e: Env, conn: *Connection): Term
+  if conn == nilptr then return closed(e) end
+  local none = term_pak(iroh_dgram_None,0)
+  if not conn.failed then return io_done(e,none) end
+  if conn.locally_closed then return io_done(e,io_box(e,iroh_dgram_Some,none)) end
+  if conn.read_failure == NGTCP2_ERR_DRAINING then
+    local err = ngtcp2_conn_get_ccerr2(conn.engine)
+    if err.iroh_datagram_ccerr_type == NGTCP2_CCERR_TYPE_APPLICATION then
+      local code = io_tup(e,err.error_code >> 32,(@uint32)(err.error_code))
+      local bytes = io_list(e,(@cstring)(err.reason),err.reasonlen)
+      local received = io_box(e,iroh_dgram_Some,io_tup(e,code,bytes))
+      return io_done(e,io_box(e,iroh_dgram_Some,received))
+    end
+  end
+  return closed(e)
+end
+
+local function application_close_reason_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],application_close_reason(e,find(e,args[0])))
+end
+
 local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn ~= nilptr then
-    if not conn.failed then close_transport(conn,0,-1) end
+    if conn.locally_closed then
+      send_pending(conn,io_tick())
+    elseif not conn.failed then
+      close_transport(conn,0,-1)
+    end
     if conn.listener ~= nilptr and conn.listener.resumable and authenticated(conn) and
-        (not conn.failed or conn.read_failure == NGTCP2_ERR_DRAINING) then
+        (not conn.failed or conn.locally_closed or conn.read_failure == NGTCP2_ERR_DRAINING) then
       -- QUIC closes at the transport layer and does not send a TLS close_notify.
       SSL_set_shutdown(conn.ssl,SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN)
     end
@@ -2488,5 +2563,7 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_quic_stream_reset_acked ~= 0xffffffff then io_eff(iroh_dgram_quic_stream_reset_acked,reset_acked_run) end
   if iroh_dgram_peer_quic_stream_code ~= 0xffffffff then io_eff(iroh_dgram_peer_quic_stream_code,peer_code_run) end
   if iroh_dgram_drop_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_stream,drop_stream_run) end
+  if iroh_dgram_send_quic_application_close ~= 0xffffffff then io_eff(iroh_dgram_send_quic_application_close,application_close_run) end
+  if iroh_dgram_read_quic_application_close ~= 0xffffffff then io_eff(iroh_dgram_read_quic_application_close,application_close_reason_run) end
   if iroh_dgram_drop_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_datagram,drop_run) end
 end

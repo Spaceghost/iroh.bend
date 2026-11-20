@@ -1,5 +1,6 @@
 import Base
 import ./quic_stream_cancel.bend as Test
+import ./quic_connection_close.bend as CloseTest
 import ../src/quic_nat.bend as Wire
 import ../src/quic_datagram.bend as Q
 import ./quic_datagram.bend as Fixture
@@ -89,47 +90,67 @@ def perform(conn: Q.DatagramConnection, id: U32, action: Test.Action) -> Test.Re
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,Unit> <- Q.drop_quic_stream(conn,id)
         Test.answer(Q.DatagramConnection,Unit,raw,Test.complete)
 
-def exchange(conn: Q.DatagramConnection, checks: List<&2,Test.Check>) -> IO(Unit):
-  Test.advance(~Q.DatagramConnection,~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,0,1,checks,4000n)
+type Suite is Data:
+  StreamCases{checks: List<&2,Test.Check>}
+  CloseCase{send: Bool, id: U32}
 
-def accepted(pair: Q.QuicDatagramListener & Q.DatagramConnection, checks: List<&2,Test.Check>) -> IO(Unit):
+def exchange(conn: Q.DatagramConnection, suite: Suite) -> IO(Unit):
+  match suite:
+    case StreamCases{checks}:
+      Test.advance(~Q.DatagramConnection,~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,0,1,checks,4000n)
+    case CloseCase{send,id}:
+      CloseTest.exchange(~Q.DatagramConnection,~CloseTest.Operations{Q.close_quic_connection,Q.quic_close_reason,Q.step_quic_datagram},
+        ~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,send,id)
+
+def accepted(pair: Q.QuicDatagramListener & Q.DatagramConnection, suite: Suite) -> IO(Unit):
   (listener,conn) = pair
   do IO<Unit>:
-    exchange(conn,checks)
+    exchange(conn,suite)
     Q.close_shared_quic(listener)
 
-def serve(bound: Q.QuicDatagramListener & U32, checks: List<&2,Test.Check>) -> IO(Unit):
+def serve(bound: Q.QuicDatagramListener & U32, suite: Suite) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(U32.show(port))
     pair : Q.QuicDatagramListener & Q.DatagramConnection <- Fixture.server_accept(9000n,listener)
-    accepted(pair,checks)
+    accepted(pair,suite)
 
-def command(host: String, port: Maybe<&2,U32>, checks: List<&2,Test.Check>) -> IO(Unit):
+def command(host: String, port: Maybe<&2,U32>, suite: Suite) -> IO(Unit):
   match port:
     case Some{0}:
       do IO<Unit>:
         bound : Q.QuicDatagramListener & U32 <- IO.try(Q.QuicDatagramListener & U32,
           Q.bind_shared_quic(host,0,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn()))
-        serve(bound,checks)
+        serve(bound,suite)
     case Some{port}:
       do IO<Unit>:
         conn : Q.DatagramConnection <- IO.try(Q.DatagramConnection,
           Q.connect(host,port,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn(),5000n))
-        exchange(conn,checks)
+        exchange(conn,suite)
     case None{}:
       IO.die(Unit,1,"expected a UDP port")
+
+def close_case(host: String, port: String, send: Bool, id: Maybe<&2,U32>) -> IO(Unit):
+  match id:
+    case Some{value}:
+      command(host,U32.read(port),CloseCase{send,value})
+    case None{}:
+      IO.die(Unit,1,"expected a close example number")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{host,Con{port,Nil{}}}}:
-      command(host,U32.read(port),Test.scenarios())
+      command(host,U32.read(port),StreamCases{Test.scenarios()})
     case Con{_,Con{host,Con{port,Con{"finish",Nil{}}}}}:
-      command(host,U32.read(port),Test.finish_checks())
+      command(host,U32.read(port),StreamCases{Test.finish_checks()})
     case Con{_,Con{host,Con{port,Con{"reset-ack",Nil{}}}}}:
-      command(host,U32.read(port),Test.reset_ack_checks(False{}))
+      command(host,U32.read(port),StreamCases{Test.reset_ack_checks(False{})})
     case Con{_,Con{host,Con{port,Con{"reset-ack-return",Nil{}}}}}:
-      command(host,U32.read(port),Test.reset_ack_checks(True{}))
+      command(host,U32.read(port),StreamCases{Test.reset_ack_checks(True{})})
+    case Con{_,Con{host,Con{port,Con{"send",Con{id,Nil{}}}}}}:
+      close_case(host,port,True{},U32.read(id))
+    case Con{_,Con{host,Con{port,Con{"receive",Con{id,Nil{}}}}}}:
+      close_case(host,port,False{},U32.read(id))
     case _:
       IO.die(Unit,1,"expected an IP address and UDP port")
 

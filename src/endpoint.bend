@@ -11,6 +11,8 @@ import ./pkarr_http.bend as PkarrHttp
 import ./relay_quic.bend as Path
 import ./relay_quic_inbound.bend as Inbound
 import ./quic_datagram.bend as Quic
+import ./quic_close.bend as Close
+import ./quic_nat.bend as NatWire
 import ./quic_handshake_routes.bend as Race
 import ./endpoint_dial.bend as Dial
 
@@ -871,6 +873,13 @@ def start_path_migration(connected: Connection(), local: Address, remote: Addres
   IpAddress{peer,peer_port} = remote
   use_connection(Result<&1,&1,U32 & String,U32>,connected,
     conn => Quic.start_quic_path_migration(conn,host,port,peer,peer_port))
+
+def close_with(connection: Connection(), code: NatWire.VarInt, reason: List<&2,U32>)
+    -> IO(Connection() & Close.WriteResult()):
+  use_connection(Close.WriteResult(),connection,c => Quic.close_quic_connection(c,code,reason))
+
+def close_reason(connection: Connection()) -> IO(Connection() & Close.ReadResult()):
+  use_connection(Close.ReadResult(),connection,Quic.quic_close_reason)
 
 def disconnect(connected: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
   match connected:

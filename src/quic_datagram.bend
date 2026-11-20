@@ -1,5 +1,6 @@
 import Base
 import ./quic_stream.bend as Stream
+import ./quic_close.bend as Close
 import ./quic_nat.bend as NatWire
 
 type DatagramConnection is Type:
@@ -296,3 +297,18 @@ def quic_remote_id(conn: DatagramConnection)
 def bind_resumable_quic(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
   import "./quic_datagram.c"
+
+def send_quic_application_close(conn: DatagramConnection, high: U32, low: U32, reason: List<&2,U32>)
+    -> IO(DatagramConnection & Close.WriteResult()):
+  import "./quic_datagram.c"
+
+def read_quic_application_close(conn: DatagramConnection) -> IO(DatagramConnection & Close.NativeResult()):
+  import "./quic_datagram.c"
+
+# Close immediately with a 62-bit application code and uninterpreted reason bytes.
+def close_quic_connection(conn: DatagramConnection, code: NatWire.VarInt, reason: List<&2,U32>)
+    -> IO(DatagramConnection & Close.WriteResult()):
+  Close.close(DatagramConnection,conn,code,reason,send_quic_application_close)
+
+def quic_close_reason(conn: DatagramConnection) -> IO(DatagramConnection & Close.ReadResult()):
+  Close.observe(DatagramConnection,conn,read_quic_application_close)
