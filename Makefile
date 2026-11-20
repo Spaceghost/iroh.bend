@@ -717,6 +717,13 @@ check-quic-close-control:
 	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
+.PHONY: check-quic-relay-close-control
+UPSTREAM_QUIC_RELAY_CLOSE ?=
+
+check-quic-relay-close-control:
+	@test -x "$(UPSTREAM_QUIC_RELAY_CLOSE)" || { echo 'Set UPSTREAM_QUIC_RELAY_CLOSE to the Iroh relay-only close fixture.' >&2; exit 2; }
+	python3 -B tests/quic_relay_close.py "$(UPSTREAM_QUIC_RELAY_CLOSE)" "$(UPSTREAM_QUIC_RELAY_CLOSE)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --control
+
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_connection_close.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
 $(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_connection_close.bend src/endpoint_multipath.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) tools/nelua-effect.sh

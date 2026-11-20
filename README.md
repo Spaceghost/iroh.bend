@@ -93,6 +93,12 @@ client requires a libcurl build with WebSocket support.
    The optional `control` argument exchanges the fixture's local and expected peer
    identities for `make check-quic-close-control`.
    See the [Iroh graceful-close test](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L3161-L3198).
+   For the relay-only control, set `UPSTREAM_QUIC_RELAY_CLOSE` to a peer that accepts
+   `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
+   registers with the supplied Iroh relay, and prints `READY relay` when ready to accept.
+   It checks that the stream used a relay path and that no direct path exists. Run
+   `make check-quic-relay-close-control` with `RELAY_URL` and `UPSTREAM_IROH_RELAY_URL`
+   pointing to the WebSocket route and HTTP base of the same relay.
    Run `make check-quic-stream-finish UPSTREAM_QUIC_STREAM_FINISH=/path/to/peer`
    to check FIN acknowledgements on both backends. The Iroh 1.5.0 fixture uses
    the same identities, ALPN, and command-line roles as the cancellation fixture.
