@@ -130,6 +130,7 @@ if __name__ == "__main__":
     listener, fixture, dialer = sys.argv[1:]
     for host, mode in (("127.0.0.1", "dial"), ("::1", "dial6")):
         check(listener, fixture, host, mode)
+        check(listener, fixture, host, mode, "9")
         check_affinity(listener, dialer, host)
         check_affinity(listener, dialer, host, "5", "bend-nat-offer")
         check_affinity(listener, dialer, host, "7", "bend-nat-dial")

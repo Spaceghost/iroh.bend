@@ -576,6 +576,12 @@ def listen_live(+host: String) -> IO(Unit):
       Quic.bind_multipath_alpns(host,0,List.replicate(U32,32n,42),fixture_peer(),[]))
     enable_live(bound,host)
 
+def listen_resumable(+host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_resumable_multipath(host,0,List.replicate(U32,32n,42),fixture_peer(),Fixture.text_alpn()))
+    announce(bound,0,host)
+
 def listen_mode(host: String, number: U32, retry_fixture: Bool) -> IO(Unit):
   match retry_fixture:
     case True{}:
@@ -599,6 +605,8 @@ def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
       listen_nat_offer(host,7)
     case Some{8}:
       listen_automatic(host)
+    case Some{9}:
+      listen_resumable(host)
     case Some{+number}:
       listen_mode(host,number,U32.is_ge(number,1024))
     case None{}:

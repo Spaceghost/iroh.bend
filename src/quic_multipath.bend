@@ -325,6 +325,11 @@ def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+# Accept tickets and 0-RTT from this peer. Application I/O starts after authentication.
+def bind_resumable_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 # List protocols in server preference order.
 def bind_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):

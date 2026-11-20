@@ -371,7 +371,9 @@ QAD_TEST_PORT ?=
 QAD_TEST_TLS_NAME ?=
 QAD_TEST_CA_BUNDLE ?=
 PICOQUIC_FLAGS = -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include"
-PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--wrap=picoquic_decode_frames -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
+PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--wrap=ptls_get_cipher -Wl,--wrap=ptls_get_read_epoch \
+	-Wl,--wrap=ptls_handshake_is_complete -Wl,--wrap=ptls_is_psk_handshake -Wl,--wrap=ptls_free \
+	-Wl,--wrap=picoquic_decode_frames -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
 	"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
 	"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group
 MULTIPATH_CURL_CFLAGS ?= $$($(PKG_CONFIG) --cflags libcurl)
@@ -474,6 +476,21 @@ $(BUILD)/quic-multipath-listener.c: tests/quic_multipath_listener.bend tests/qui
 		"$(abspath $(BUILD)/quic-multipath-listener-stage/src/quic_multipath.c)"
 	cd "$(BUILD)/quic-multipath-listener-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_listener.bend -o "$(abspath $@)"
 
+.PHONY: check-quic-multipath-early-listener
+check-quic-multipath-early-listener: $(BUILD)/iroh-bend-quic-multipath-early-listener
+	@test -x "$(UPSTREAM_QUIC_EARLY_DIAL)" || { echo 'Set UPSTREAM_QUIC_EARLY_DIAL to the Iroh early-data dialer.' >&2; exit 2; }
+	python3 -B tests/quic_multipath_early_listener.py "$<" "$(UPSTREAM_QUIC_EARLY_DIAL)"
+
+$(BUILD)/quic-multipath-early-listener.c: tests/quic_multipath_early_listener.bend tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend src/quic_multipath.nelua tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp src/quic_multipath.bend src/quic_nat.bend src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend "$(@:.c=-stage)/src/"
+	cp tests/quic_multipath_early_listener.bend tests/quic_multipath_listener.bend tests/quic_multipath_bend.bend "$(@:.c=-stage)/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
+		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_early_listener.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-quic-multipath-early-listener: $(BUILD)/quic-multipath-early-listener.c
+
 .PHONY: check-relay-qad
 UPSTREAM_QAD_CLIENT ?=
 QAD_SERVER_CERT ?=
@@ -506,7 +523,7 @@ $(BUILD)/quic-multipath-session.c: tests/quic_multipath_session.bend src/quic_mu
 		"$(abspath $(@:.c=-stage))/src/quic_multipath.c"
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_session.bend -o "$(abspath $@)"
 
-$(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-relay-qad:
+$(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener $(BUILD)/iroh-bend-quic-multipath-session $(BUILD)/iroh-bend-quic-multipath-early-listener $(BUILD)/iroh-bend-relay-qad:
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }
