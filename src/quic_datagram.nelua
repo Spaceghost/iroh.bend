@@ -366,6 +366,7 @@ local function cls_fit(size: uint32): uint32 <cimport,nodecl> end
 local function spare_free(e: Env, class: uint32, loc: uint64) <cimport,nodecl> end
 local TAG_PAK: uint64 <cimport,nodecl>
 local TAG_CTR: uint64 <cimport,nodecl>
+local ETIMEDOUT: uint32 <cimport,nodecl>
 local EIO: uint32 <cimport,nodecl>
 local EBADF: uint32 <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
@@ -379,6 +380,7 @@ local EHOSTUNREACH: cint <cimport,nodecl>
 local ENETUNREACH: cint <cimport,nodecl>
 local SOCK_CLOEXEC: cint <cimport,nodecl>
 local NGTCP2_ERR_CRYPTO: cint <cimport,nodecl>
+local NGTCP2_ERR_IDLE_CLOSE: cint <cimport,nodecl>
 local NGTCP2_ERR_DRAINING: cint <cimport,nodecl>
 local NGTCP2_ERR_DISCARD_PKT: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_ARGUMENT: cint <cimport,nodecl>
@@ -475,7 +477,7 @@ local Connection = @record{
   original_id: ngtcp2_cid,
   accepted: boolean,
   accept_deadline: uint64,
-  read_failure: cint,
+  engine_failure: cint,
   saved_session: *Session,
   resume_attempted: boolean,
   early_attempted: boolean,
@@ -1368,9 +1370,16 @@ local function migration_address(text: cstring, port: Term, addr: *iroh_datagram
   return size
 end
 
+local function closed(e: Env, conn: *Connection): Term
+  if conn ~= nilptr and not conn.locally_closed and conn.engine_failure == NGTCP2_ERR_IDLE_CLOSE then
+    return io_fail(e,ETIMEDOUT,'QUIC idle timeout')
+  end
+  return io_fail(e,EBADF,'QUIC connection closed')
+end
+
 local function start_migration(e: Env, conn: *Connection, host: Term, port: Term,
     peer_host: Term, peer_port: Term, change_peer: boolean): Term
-  if conn == nilptr or conn.failed then return io_fail(e,EBADF,'QUIC connection closed') end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if conn.listener ~= nilptr then return io_fail(e,ENOTSUP,'only a QUIC dialer can initiate migration') end
   if conn.candidate_fd >= 0 then return io_fail(e,EALREADY,'QUIC migration already in progress') end
   if not conn.confirmed or not authenticated(conn) or conn.output_size ~= 0 then return io_done(e,0) end
@@ -1439,7 +1448,7 @@ end
 
 local function migration_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],io_fail(e,EBADF,'QUIC connection closed')) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   local state = conn.candidate_fd >= 0 and 1 or conn.migration_state
   return io_tup(e,args[0],io_done(e,state))
 end
@@ -1513,7 +1522,7 @@ local function migration_can_lose(conn: *Connection, candidate: boolean): boolea
 end
 
 local function close_transport(conn: *Connection, error: cint, handshake_fd: cint)
-  if error == NGTCP2_ERR_DRAINING or (handshake_fd < 0 and conn.fd < 0 and conn.listener == nilptr) then return end
+  if error == NGTCP2_ERR_DRAINING or error == NGTCP2_ERR_IDLE_CLOSE or (handshake_fd < 0 and conn.fd < 0 and conn.listener == nilptr) then return end
   local err: ngtcp2_ccerr
   ngtcp2_ccerr_default(&err)
   if error == NGTCP2_ERR_CRYPTO then
@@ -1537,7 +1546,7 @@ local function ingest(conn: *Connection, path: *ngtcp2_path, packet: *cuchar, si
   local status = read_packet(conn,path,&info,packet,size,now)
   if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then
     close_transport(conn,status,-1)
-    conn.read_failure = status
+    conn.engine_failure = status
     conn.failed = true
   end
 end
@@ -1707,6 +1716,8 @@ end
 
 local function engine_error(e: Env, conn: *Connection, status: cint): Term
   conn.failed = true
+  conn.engine_failure = status
+  if status == NGTCP2_ERR_IDLE_CLOSE then return closed(e,conn) end
   if conn.pin_status < 0 then return io_fail(e,EACCES,'QUIC peer endpoint key mismatch') end
   return io_fail(e,EIO,ngtcp2_strerror(status))
 end
@@ -1714,10 +1725,6 @@ end
 local function socket_error(e: Env, conn: *Connection, status: cint): Term
   conn.failed = true
   return io_fail(e,(@uint32)(status),nilptr)
-end
-
-local function closed(e: Env): Term
-  return io_fail(e,EBADF,'QUIC connection closed')
 end
 
 local function advance(conn: *Connection, now: uint64): cint
@@ -1747,7 +1754,7 @@ local function read_client_packet(conn: *Connection, fd: cint, path: *ngtcp2_pat
 end
 
 local function step(e: Env, conn: *Connection): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   local now = io_tick()
   if conn.listener ~= nilptr then
     local code = dispatch(conn.listener,now)
@@ -1763,7 +1770,7 @@ local function step(e: Env, conn: *Connection): Term
       if code ~= 0 then return socket_error(e,conn,code) end
     end
   end
-  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  if conn.failed then return engine_error(e,conn,conn.engine_failure) end
   local status = advance(conn,now)
   if status < 0 then return engine_error(e,conn,status) end
   if status > 0 then return socket_error(e,conn,status) end
@@ -1791,8 +1798,8 @@ local function open_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork):
 end
 
 local function handshake_input(e: Env, conn: *Connection, fd: cint): Term
-  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e) end
-  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e,conn) end
+  if conn.failed then return engine_error(e,conn,conn.engine_failure) end
   local packet: [65536]cuchar
   local n = recv(fd,&packet[0],#packet,0)
   if n < 0 and errno ~= EAGAIN and errno ~= EINTR then return io_fail(e,(@uint32)(errno),nilptr) end
@@ -1803,7 +1810,7 @@ local function handshake_input(e: Env, conn: *Connection, fd: cint): Term
   if status == NGTCP2_ERR_DISCARD_PKT then return io_done(e,0) end
   if status < 0 then
     close_transport(conn,status,fd)
-    conn.read_failure = status
+    conn.engine_failure = status
     return engine_error(e,conn,status)
   end
   return io_done(e,authenticated(conn) and 1 or 0)
@@ -1815,8 +1822,8 @@ local function read_handshake_socket_run(e: Env, args: *[0]Term, work: *IoWork):
 end
 
 local function handshake_output(e: Env, conn: *Connection): Term
-  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e) end
-  if conn.failed then return engine_error(e,conn,conn.read_failure) end
+  if conn == nilptr or conn.listener ~= nilptr or conn.fd >= 0 then return closed(e,conn) end
+  if conn.failed then return engine_error(e,conn,conn.engine_failure) end
   local now = io_tick()
   if ngtcp2_conn_get_expiry2(conn.engine) <= now then
     local code = ngtcp2_conn_handle_expiry(conn.engine,now)
@@ -1881,7 +1888,7 @@ end
 
 local function monitor_path_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   if conn.listener ~= nilptr or not authenticated(conn) then
     return io_tup(e,args[0],io_fail(e,ENOTSUP,'QUIC path monitoring requires an authenticated dialer'))
   end
@@ -1900,7 +1907,7 @@ end
 
 local function path_timing_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   if not conn.path_monitor then
     return io_tup(e,args[0],io_fail(e,ENOTSUP,'QUIC path monitoring is disabled'))
   end
@@ -1933,7 +1940,7 @@ local function write(e: Env, conn: *Connection, payload: Term, early: boolean): 
   local size = unpack(e,payload,&bytes[0],PACKET_CAPACITY)
   if size == -2 then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds packet capacity') end
   if size < 0 then return io_fail(e,EINVAL,'invalid QUIC datagram bytes') end
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if early then
     local code = early_status(conn)
     if code ~= 0 then return io_fail(e,code,'QUIC early data is unavailable') end
@@ -1977,7 +1984,7 @@ end
 
 local function remote_id_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   if not authenticated(conn) then
     return io_tup(e,args[0],io_fail(e,EAGAIN,'QUIC handshake is incomplete'))
   end
@@ -1995,7 +2002,7 @@ end
 
 local function take_session_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   if conn.saved_session == nilptr or not authenticated(conn) then
     return io_tup(e,args[0],io_done(e,term_pak(iroh_dgram_None,0)))
   end
@@ -2013,7 +2020,7 @@ end
 
 local function resumption_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   if not authenticated(conn) then return io_tup(e,args[0],io_done(e,term_pak(iroh_dgram_None,0))) end
   local early: Term = 0
   if conn.listener ~= nilptr and conn.listener.resumable then
@@ -2029,7 +2036,7 @@ end
 
 local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e)) end
+  if conn == nilptr or conn.failed then return io_tup(e,args[0],closed(e,conn)) end
   local value = term_pak(iroh_dgram_None,0)
   if conn.inbox_first ~= nilptr and authenticated(conn) then
     local item = conn.inbox_first
@@ -2041,12 +2048,12 @@ end
 
 local function acks_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
-  local result = conn ~= nilptr and io_done(e,conn.acknowledgments) or closed(e)
+  local result = conn ~= nilptr and io_done(e,conn.acknowledgments) or closed(e,conn)
   return io_tup(e,args[0],result)
 end
 
 local function open_stream(e: Env, conn: *Connection, direction: Term, early: boolean): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
   if early then
     local code = early_status(conn)
@@ -2081,7 +2088,7 @@ local function open_early_stream_run(e: Env, args: *[0]Term, work: *IoWork): Ter
 end
 
 local function accept_stream(e: Env, conn: *Connection, direction: Term): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
   if not authenticated(conn) then return io_done(e,0) end
   local next: *Stream
@@ -2107,7 +2114,7 @@ local function queue_stream(e: Env, conn: *Connection, handle: Term, data: Term,
   local size = unpack(e,data,&bytes[0],STREAM_WINDOW)
   if size == -2 then return io_fail(e,EMSGSIZE,'QUIC stream write exceeds 64 KiB') end
   if size < 0 or fin > 1 then return io_fail(e,EINVAL,'invalid QUIC stream write') end
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
   if (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) == 0 or
@@ -2134,7 +2141,7 @@ local function stream_flushed(stream: *Stream): boolean
 end
 
 local function flush_stream(e: Env, conn: *Connection, handle: Term): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
   if stream.tx_reset or stream.tx_stopped or stream.early_rejected then return io_fail(e,EPIPE,'QUIC stream send half is closed') end
@@ -2169,7 +2176,7 @@ local function flush_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function read_stream(e: Env, conn: *Connection, handle: Term, limit: Term): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if limit == 0 then return io_fail(e,EINVAL,'QUIC stream read limit must be positive') end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
@@ -2212,25 +2219,25 @@ local function has_stream_half(conn: *Connection, stream: *Stream, half: Term): 
 end
 
 local function fin_acked(e: Env, conn: *Connection, handle: Term): Term
-  if conn == nilptr then return closed(e) end
+  if conn == nilptr then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr or not stream.announced then return io_fail(e,EBADF,'unknown QUIC stream') end
   if not has_stream_half(conn,stream,0) then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
   if stream.early_rejected or stream.tx_stopped or stream.tx_reset then return io_fail(e,EPIPE,'QUIC stream send half was cancelled') end
   if stream.tx_fin_acked then return io_done(e,1) end
-  if conn.failed then return closed(e) end
+  if conn.failed then return closed(e,conn) end
   return io_done(e,0)
 end
 
 local function reset_acked(e: Env, conn: *Connection, handle: Term): Term
-  if conn == nilptr then return closed(e) end
+  if conn == nilptr then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr or not stream.announced then return io_fail(e,EBADF,'unknown QUIC stream') end
   if stream.early_rejected then return io_fail(e,ECONNRESET,'QUIC early stream was rejected') end
   if not has_stream_half(conn,stream,0) then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
   if stream.tx_reset_acked then return io_done(e,1) end
   if stream.reset_tracking_failed then return io_fail(e,ENOMEM,'could not track QUIC stream reset') end
-  if conn.failed then return closed(e) end
+  if conn.failed then return closed(e,conn) end
   return io_done(e,0)
 end
 
@@ -2243,7 +2250,7 @@ local function fin_acked_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function cancel_half(e: Env, conn: *Connection, handle: Term, half: Term, high: Term, low: Term): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   if half > 1 or high > 0x3fffffff then return io_fail(e,EINVAL,'invalid QUIC stream cancellation') end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr or not stream.announced then return io_fail(e,EBADF,'unknown QUIC stream') end
@@ -2280,7 +2287,7 @@ local function cancel_half_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function peer_code(e: Env, conn: *Connection, handle: Term, half: Term): Term
-  if conn == nilptr then return closed(e) end
+  if conn == nilptr then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr or not stream.announced then return io_fail(e,EBADF,'unknown QUIC stream') end
   if half > 1 or not has_stream_half(conn,stream,half) then return io_fail(e,EPIPE,'QUIC stream has no such half') end
@@ -2289,7 +2296,7 @@ local function peer_code(e: Env, conn: *Connection, handle: Term, half: Term): T
     local value = io_tup(e,code >> 32,(@uint32)(code))
     return io_done(e,io_box(e,iroh_dgram_Some,value))
   end
-  if conn.failed then return closed(e) end
+  if conn.failed then return closed(e,conn) end
   return io_done(e,term_pak(iroh_dgram_None,0))
 end
 
@@ -2298,7 +2305,7 @@ local function peer_code_run(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function release_stream(e: Env, conn: *Connection, handle: Term): Term
-  if conn == nilptr or conn.failed then return closed(e) end
+  if conn == nilptr or conn.failed then return closed(e,conn) end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
   forget_reset_packets(conn,stream)
@@ -2488,7 +2495,7 @@ local function send_application_close(e: Env, conn: *Connection, high: Term, low
   local bytes: [PACKET_CAPACITY]cuchar
   local length = unpack(e,reason,&bytes[0],#bytes)
   if high > 0x3fffffff or length < 0 then return io_fail(e,EINVAL,'invalid QUIC application close') end
-  if conn == nilptr then return closed(e) end
+  if conn == nilptr then return closed(e,conn) end
   if conn.failed then
     if not conn.locally_closed then conn.output_size = 0 end
     conn.locally_closed = true
@@ -2526,11 +2533,11 @@ local function application_close_run(e: Env, args: *[0]Term, work: *IoWork): Ter
 end
 
 local function application_close_reason(e: Env, conn: *Connection): Term
-  if conn == nilptr then return closed(e) end
+  if conn == nilptr then return closed(e,conn) end
   local none = term_pak(iroh_dgram_None,0)
   if not conn.failed then return io_done(e,none) end
   if conn.locally_closed then return io_done(e,io_box(e,iroh_dgram_Some,none)) end
-  if conn.read_failure == NGTCP2_ERR_DRAINING then
+  if conn.engine_failure == NGTCP2_ERR_DRAINING then
     local err = ngtcp2_conn_get_ccerr2(conn.engine)
     if err.iroh_datagram_ccerr_type == NGTCP2_CCERR_TYPE_APPLICATION then
       local code = io_tup(e,err.error_code >> 32,(@uint32)(err.error_code))
@@ -2539,14 +2546,14 @@ local function application_close_reason(e: Env, conn: *Connection): Term
       return io_done(e,io_box(e,iroh_dgram_Some,received))
     end
   end
-  return closed(e)
+  return closed(e,conn)
 end
 
 local function close_packet_run(e:Env, args:*[0]Term, work:*IoWork):Term
   local conn = find(e,args[0])
   local result: Term
-  if conn == nilptr or conn.locally_closed or conn.read_failure ~= NGTCP2_ERR_DRAINING then
-    result = closed(e)
+  if conn == nilptr or conn.locally_closed or conn.engine_failure ~= NGTCP2_ERR_DRAINING then
+    result = closed(e,conn)
   elseif conn.close_packet == nilptr then
     result = io_fail(e,conn.close_packet_size > 0 and ENOMEM or EIO,'QUIC close packet unavailable')
   else
@@ -2568,7 +2575,7 @@ local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
       close_transport(conn,0,-1)
     end
     if conn.listener ~= nilptr and conn.listener.resumable and authenticated(conn) and
-        (not conn.failed or conn.locally_closed or conn.read_failure == NGTCP2_ERR_DRAINING) then
+        (not conn.failed or conn.locally_closed or conn.engine_failure == NGTCP2_ERR_DRAINING) then
       -- QUIC closes at the transport layer and does not send a TLS close_notify.
       SSL_set_shutdown(conn.ssl,SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN)
     end

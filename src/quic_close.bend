@@ -3,6 +3,7 @@ import ./quic_nat.bend as Wire
 
 type Reason is Data:
   LocallyClosed{}
+  TimedOut{}
   ApplicationClosed{code: Wire.VarInt, reason: List<&2,U32>}
 
 def WriteResult() -> Type:
@@ -23,6 +24,9 @@ def decode(raw: NativeResult()) -> ReadResult():
       Done{Some{LocallyClosed{}}}
     case Done{Some{Some{((high,low),reason)}}}:
       Done{Some{ApplicationClosed{Wire.Var{high,low},reason}}}
+    # Both Linux bindings return ETIMEDOUT here only after the engine expires.
+    case Fail{(110,_)}:
+      Done{Some{TimedOut{}}}
     case Fail{error}:
       Fail{error}
 
