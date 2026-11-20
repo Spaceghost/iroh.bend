@@ -1108,12 +1108,8 @@ local function authenticated(conn: *Connection): boolean
   return ngtcp2_conn_get_handshake_completed2(conn.engine) ~= 0 and authenticated_pin(conn)
 end
 
-local function migration_address(e: Env, host: Term, port: Term, addr: *iroh_datagram_address): cuint
+local function migration_address(text: cstring, port: Term, addr: *iroh_datagram_address): cuint
   if port > 65535 then return 0 end
-  local host_size: uint64
-  local text = io_cstr(e,host,&host_size)
-  defer C.free(text) end
-  if io_nul(text,host_size) then return 0 end
   local size = numeric_address(text,(@cushort)(port),addr)
   if size == 0 or not concrete_address(addr) then return 0 end
   return size
@@ -1129,19 +1125,29 @@ local function start_migration(e: Env, conn: *Connection, host: Term, port: Term
   local peer: iroh_datagram_address
   local peer_size: cuint
   if change_peer then
-    peer_size = migration_address(e,peer_host,peer_port,&peer)
+    local peer_length: uint64
+    local peer_text = io_cstr(e,peer_host,&peer_length)
+    defer C.free(peer_text) end
+    if not io_nul(peer_text,peer_length) then peer_size = migration_address(peer_text,peer_port,&peer) end
     if peer_size == 0 or peer_port == 0 then return io_fail(e,EINVAL,'invalid QUIC destination address') end
   else
     peer = conn.remote_addr
     peer_size = conn.remote_size
   end
-  local size = migration_address(e,host,port,&local_addr)
-  if size == 0 or local_addr.ss_family ~= peer.ss_family then
+  local host_length: uint64
+  local local_text = io_cstr(e,host,&host_length)
+  defer C.free(local_text) end
+  local automatic = host_length == 0 and port == 0
+  local size: cuint
+  if not io_nul(local_text,host_length) then size = migration_address(local_text,port,&local_addr) end
+  if not automatic and (size == 0 or local_addr.ss_family ~= peer.ss_family) then
     return io_fail(e,EINVAL,'QUIC migration requires a concrete numeric IP matching the peer address family')
   end
-  local fd = udp_socket(&local_addr)
+  local fd = udp_socket(&peer)
   if fd < 0 then return io_fail(e,(@uint32)(errno),nilptr) end
-  if bind(fd,&local_addr,size) ~= 0 or connect(fd,&peer,peer_size) ~= 0 or
+  local bind_size = size
+  size = #iroh_datagram_address
+  if (not automatic and bind(fd,&local_addr,bind_size) ~= 0) or connect(fd,&peer,peer_size) ~= 0 or
       getsockname(fd,&local_addr,&size) ~= 0 then
     local code = (@uint32)(errno)
     close(fd)
@@ -1181,7 +1187,8 @@ end
 local function migration_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn == nilptr or conn.failed then return io_tup(e,args[0],io_fail(e,EBADF,'QUIC connection closed')) end
-  return io_tup(e,args[0],io_done(e,conn.migration_state))
+  local state = conn.candidate_fd >= 0 and 1 or conn.migration_state
+  return io_tup(e,args[0],io_done(e,state))
 end
 
 local function output_on_candidate(conn: *Connection): boolean

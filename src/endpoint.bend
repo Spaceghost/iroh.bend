@@ -378,7 +378,7 @@ def disconnect(connected: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
         Path.stop(path)
 
 type RecoveryPlan is Data:
-  RelayFallback{identity: Identity, urls: List<&2,String>, probe_ms: U32}
+  RelayFallback{identity: Identity, urls: List<&2,String>, direct: List<&2,Address>, probe_ms: U32}
 
 type RecoveryState is Data:
   DirectOnly{}
@@ -387,6 +387,8 @@ type RecoveryState is Data:
   ProbingRelay{plan: RecoveryPlan, remaining: List<&2,String>, port: U32, since: U32}
   ValidatingRelay{plan: RecoveryPlan, remaining: List<&2,String>}
   OnRelay{}
+  SeekingDirect{plan: RecoveryPlan, remaining: List<&2,Address>, since: U32}
+  ValidatingDirect{plan: RecoveryPlan, remaining: List<&2,Address>}
 
 type RoutedConnection is Type:
   Routed{transport: Connection(), recovery: RecoveryState}
@@ -420,27 +422,43 @@ def start_watching(monitored: Connection() & Result<&1,&1,U32 & String,Unit>, pl
         _ : Result<&1,&1,U32 & String,Unit> <- disconnect(conn)
         return Fail{error}
 
-def routed_dial(result: ConnectResult(), urls: List<&2,String>, identity: Identity, timeouts: Timeouts)
-    -> IO(RoutedResult()):
+def relay_search(plan: RecoveryPlan, now: U32, direct: List<&2,Address>) -> RecoveryState:
+  match direct:
+    case Nil{}:
+      OnRelay{}
+    case Con{_,_}:
+      SeekingDirect{plan,[],now}
+
+def on_relay(+plan: RecoveryPlan) -> IO(RecoveryState):
+  RelayFallback{_,_,direct,_} = plan
+  do IO<RecoveryState>:
+    now : U32 <- Quic.quic_millis()
+    return relay_search(plan,now,direct)
+
+def routed_dial(result: ConnectResult(), urls: List<&2,String>, +direct: List<&2,Address>,
+    identity: Identity, timeouts: Timeouts) -> IO(RoutedResult()):
   match result urls:
     case Fail{error} _:
       IO.pure(RoutedResult(),Fail{error})
-    case Done{(conn,Some{bridge})} _:
-      IO.pure(RoutedResult(),Done{Routed{(conn,Some{bridge}),OnRelay{}}})
+    case Done{(conn,Some{bridge})} relays:
+      HandshakeTimeouts{_,probe_ms} = timeouts
+      do IO<RoutedResult()>:
+        next : RecoveryState <- on_relay(RelayFallback{identity,relays,direct,probe_ms})
+        return Done{Routed{(conn,Some{bridge}),next}}
     case Done{(conn,None{})} Nil{}:
       IO.pure(RoutedResult(),Done{Routed{(conn,None{}),DirectOnly{}}})
     case Done{(conn,None{})} Con{url,rest}:
       HandshakeTimeouts{_,probe_ms} = timeouts
       do IO<RoutedResult()>:
         monitored : Connection() & Result<&1,&1,U32 & String,Unit> <- arm_recovery((conn,None{}))
-        start_watching(monitored,RelayFallback{identity,Con{url,rest},probe_ms})
+        start_watching(monitored,RelayFallback{identity,Con{url,rest},direct,probe_ms})
 
 # Dial using the normal route order and retain relays for later recovery.
 def connect_routed(+routes: Routes, +identity: Identity, +timeouts: Timeouts) -> IO(RoutedResult()):
-  DialRoutes{_,urls} = routes
+  DialRoutes{direct,urls} = routes
   do IO<RoutedResult()>:
     connected : ConnectResult() <- connect_routes(routes,identity,timeouts)
-    routed_dial(connected,urls,identity,timeouts)
+    routed_dial(connected,urls,direct,identity,timeouts)
 
 def restarted_monitor(monitored: Connection() & Result<&1,&1,U32 & String,Unit>, plan: RecoveryPlan) -> IO(RouteStep()):
   match monitored:
@@ -471,7 +489,7 @@ def opened_relay(conn: Quic.DatagramConnection, attachment: Result<&1,&1,U32 & S
 
 def start_standby(conn: Connection(), +plan: RecoveryPlan, url: String, rest: List<&2,String>) -> IO(RouteStep()):
   (quic,_) = conn
-  RelayFallback{PeerKeys{seed,peer,_},_,_} = plan
+  RelayFallback{PeerKeys{seed,peer,_},_,_,_} = plan
   do IO<RouteStep()>:
     bridge : Result<&1,&1,U32 & String,Path.Bridge & U32> <- Path.start(url,seed,peer,0)
     opened_relay(quic,bridge,plan,rest)
@@ -486,7 +504,7 @@ def dial_standby(conn: Connection(), plan: RecoveryPlan, remaining: List<&2,Stri
         restarted_monitor(monitored,plan)
 
 def watch_path(conn: Connection(), +plan: RecoveryPlan, stalled: Bool) -> IO(RouteStep()):
-  RelayFallback{_,urls,_} = plan
+  RelayFallback{_,urls,_,_} = plan
   match stalled:
     case True{}:
       dial_standby(conn,plan,urls)
@@ -512,10 +530,12 @@ def after_relay_probe(result: Connection() & Result<&1,&1,U32 & String,U32>, pla
     case (conn,Fail{_}) _:
       skip_relay(conn,plan,remaining)
 
-def completed_relay(result: Connection() & Result<&1,&1,U32 & String,Unit>) -> IO(RouteStep()):
+def completed_relay(result: Connection() & Result<&1,&1,U32 & String,Unit>, plan: RecoveryPlan) -> IO(RouteStep()):
   match result:
     case (conn,Done{_}):
-      route_step(conn,OnRelay{},RelayRoute{})
+      do IO<RouteStep()>:
+        next : RecoveryState <- on_relay(plan)
+        route_step(conn,next,RelayRoute{})
     case (conn,Fail{error}):
       route_error(conn,OnRelay{},error)
 
@@ -526,13 +546,76 @@ def observe_relay(result: Connection() & Result<&1,&1,U32 & String,U32>, plan: R
       do IO<RouteStep()>:
         unmonitored : Connection() & Result<&1,&1,U32 & String,Unit> <-
           use_connection(Result<&1,&1,U32 & String,Unit>,conn,c => Quic.monitor_quic_path(c,0))
-        completed_relay(unmonitored)
+        completed_relay(unmonitored,plan)
     case (conn,Done{1}):
       route_step(conn,ValidatingRelay{plan,remaining},DirectRoute{})
     case (conn,Done{_}):
       skip_relay(conn,plan,remaining)
     case (conn,Fail{error}):
       route_error(conn,ValidatingRelay{plan,remaining},error)
+
+def next_direct(conn: Connection(), plan: RecoveryPlan, remaining: List<&2,Address>) -> IO(RouteStep()):
+  do IO<RouteStep()>:
+    now : U32 <- Quic.quic_millis()
+    route_step(conn,SeekingDirect{plan,remaining,now},RelayRoute{})
+
+def after_direct_probe(result: Connection() & Result<&1,&1,U32 & String,U32>, plan: RecoveryPlan,
+    peer: Address, rest: List<&2,Address>, since: U32, expired: Bool) -> IO(RouteStep()):
+  match result expired:
+    case (conn,Done{0}) False{}:
+      route_step(conn,SeekingDirect{plan,Con{peer,rest},since},RelayRoute{})
+    case (conn,Done{0}) True{}:
+      next_direct(conn,plan,rest)
+    case (conn,Done{_}) _:
+      route_step(conn,ValidatingDirect{plan,rest},RelayRoute{})
+    case (conn,Fail{_}) _:
+      next_direct(conn,plan,rest)
+
+def retry_direct(conn: Connection(), +plan: RecoveryPlan, since: U32, now: U32, due: Bool) -> IO(RouteStep()):
+  RelayFallback{_,_,direct,_} = plan
+  match due:
+    case True{}:
+      route_step(conn,SeekingDirect{plan,direct,now},RelayRoute{})
+    case False{}:
+      route_step(conn,SeekingDirect{plan,[],since},RelayRoute{})
+
+def seek_direct(conn: Connection(), +plan: RecoveryPlan, remaining: List<&2,Address>, +since: U32) -> IO(RouteStep()):
+  RelayFallback{_,_,_,timeout} = plan
+  match remaining:
+    case Nil{}:
+      do IO<RouteStep()>:
+        +now : U32 <- Quic.quic_millis()
+        retry_direct(conn,plan,since,now,U32.is_ge(U32.sub(now,since),1000))
+    case Con{+peer,rest}:
+      do IO<RouteStep()>:
+        now : U32 <- Quic.quic_millis()
+        result : Connection() & Result<&1,&1,U32 & String,U32> <- start_path_migration(conn,IpAddress{"",0},peer)
+        after_direct_probe(result,plan,peer,rest,since,U32.is_ge(U32.sub(now,since),timeout))
+
+def release_old_relay(conn: Connection()) -> IO(Connection()):
+  (quic,bridge) = conn
+  match bridge:
+    case None{}:
+      IO.pure(Connection(),(quic,None{}))
+    case Some{path}:
+      do IO<Connection()>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Path.stop(path)
+        return (quic,None{})
+
+def observe_direct(result: Connection() & Result<&1,&1,U32 & String,U32>, plan: RecoveryPlan,
+    rest: List<&2,Address>) -> IO(RouteStep()):
+  match result:
+    case (conn,Done{2}):
+      do IO<RouteStep()>:
+        direct : Connection() <- release_old_relay(conn)
+        monitored : Connection() & Result<&1,&1,U32 & String,Unit> <- arm_recovery(direct)
+        restarted_monitor(monitored,plan)
+    case (conn,Done{1}):
+      route_step(conn,ValidatingDirect{plan,rest},RelayRoute{})
+    case (conn,Done{_}):
+      next_direct(conn,plan,rest)
+    case (conn,Fail{error}):
+      route_error(conn,ValidatingDirect{plan,rest},error)
 
 def advance_recovery(conn: Connection(), state: RecoveryState) -> IO(RouteStep()):
   match state:
@@ -548,7 +631,7 @@ def advance_recovery(conn: Connection(), state: RecoveryState) -> IO(RouteStep()
     case DialingRelay{plan,rest}:
       dial_standby(conn,plan,rest)
     case ProbingRelay{+plan,rest,+port,+since}:
-      RelayFallback{_,_,timeout} = plan
+      RelayFallback{_,_,_,timeout} = plan
       do IO<RouteStep()>:
         now : U32 <- Quic.quic_millis()
         candidate : Connection() & Result<&1,&1,U32 & String,U32> <-
@@ -559,6 +642,13 @@ def advance_recovery(conn: Connection(), state: RecoveryState) -> IO(RouteStep()
         validation : Connection() & Result<&1,&1,U32 & String,U32> <-
           use_connection(Result<&1,&1,U32 & String,U32>,conn,Quic.quic_migration_status)
         observe_relay(validation,plan,rest)
+    case SeekingDirect{plan,rest,since}:
+      seek_direct(conn,plan,rest,since)
+    case ValidatingDirect{plan,rest}:
+      do IO<RouteStep()>:
+        validation : Connection() & Result<&1,&1,U32 & String,U32> <-
+          use_connection(Result<&1,&1,U32 & String,U32>,conn,Quic.quic_migration_status)
+        observe_direct(validation,plan,rest)
 
 def recovery_progress(result: Connection() & Result<&1,&1,U32 & String,U32>, state: RecoveryState) -> IO(RouteStep()):
   match result:
@@ -567,7 +657,7 @@ def recovery_progress(result: Connection() & Result<&1,&1,U32 & String,U32>, sta
     case (conn,Fail{error}):
       route_error(conn,state,error)
 
-# Drive QUIC and migrate the same connection to a relay after a direct outage.
+# Drive QUIC and migrate the same connection between direct and relay routes.
 def step_routes(owner: RoutedConnection) -> IO(RouteStep()):
   Routed{conn,state} = owner
   do IO<RouteStep()>:

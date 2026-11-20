@@ -153,28 +153,153 @@ def observe_healthy(fuel: Nat, owner: Endpoint.RoutedConnection, +since: U32) ->
         now : U32 <- Quic.quic_millis()
         still_direct(progress,U32.is_ge(U32.sub(now,since),4250),next => observe_healthy(left,next,since))
 
-def cut_direct(primed: Endpoint.RoutedConnection & U32) -> IO(Unit):
+def send_byte(conn: Quic.DatagramConnection, +stream: U32, byte: U32, fin: U32)
+    -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    queued : Quic.DatagramConnection <- Fixture.stream_submit(conn,Fixture.QueueStream{stream,[byte],fin})
+    Fixture.stream_submit(queued,Fixture.FlushStream{stream})
+
+def send_and_ack(conn: Quic.DatagramConnection, stream: U32, byte: U32, ack: U32)
+    -> IO(Quic.DatagramConnection & Unit):
+  do IO<Quic.DatagramConnection & Unit>:
+    sent : Quic.DatagramConnection <- send_byte(conn,stream,byte,0)
+    ready : Quic.DatagramConnection <- Fixture.receive_reply(4000n,sent,[ack,0,255])
+    return (ready,Unit{})
+
+def wait_more(owner: Endpoint.RoutedConnection, attempted: Bool,
+    next: Endpoint.RoutedConnection -> Bool -> IO(Endpoint.RoutedConnection)) -> IO(Endpoint.RoutedConnection):
+  do IO<Endpoint.RoutedConnection>:
+    IO.sleep(1)
+    next(owner,attempted)
+
+def saw_failed_probe(progress: Endpoint.RouteStep(), attempted: Bool,
+    next: Endpoint.RoutedConnection -> Bool -> IO(Endpoint.RoutedConnection)) -> IO(Endpoint.RoutedConnection):
+  match progress attempted:
+    case (Endpoint.Routed{conn,Endpoint.SeekingDirect{plan,Nil{},since}},Done{Endpoint.RelayRoute{}}) True{}:
+      IO.pure(Endpoint.RoutedConnection,Endpoint.Routed{conn,Endpoint.SeekingDirect{plan,[],since}})
+    case (Endpoint.Routed{conn,Endpoint.ValidatingDirect{plan,rest}},Done{Endpoint.RelayRoute{}}) _:
+      wait_more(Endpoint.Routed{conn,Endpoint.ValidatingDirect{plan,rest}},True{},next)
+    case (owner,Done{Endpoint.RelayRoute{}}) _:
+      wait_more(owner,attempted,next)
+    case (owner,Done{Endpoint.DirectRoute{}}) _:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"the blocked direct route unexpectedly validated")
+    case (owner,Fail{(code,message)}) _:
+      fail_routed(Endpoint.RoutedConnection,owner,code,message)
+
+def wait_for_failed_probe(fuel: Nat, owner: Endpoint.RoutedConnection, attempted: Bool) -> IO(Endpoint.RoutedConnection):
+  match fuel:
+    case 0n:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"the direct route was not probed while relayed")
+    case 1n+left:
+      do IO<Endpoint.RoutedConnection>:
+        progress : Endpoint.RouteStep() <- Endpoint.step_routes(owner)
+        saw_failed_probe(progress,attempted,next => seen => wait_for_failed_probe(left,next,seen))
+
+def await_direct(progress: Endpoint.RouteStep(),
+    next: Endpoint.RoutedConnection -> IO(Endpoint.RoutedConnection)) -> IO(Endpoint.RoutedConnection):
+  match progress:
+    case (Endpoint.Routed{(conn,None{}),state},Done{Endpoint.DirectRoute{}}):
+      IO.pure(Endpoint.RoutedConnection,Endpoint.Routed{(conn,None{}),state})
+    case (owner,Done{Endpoint.DirectRoute{}}):
+      fail_routed(Endpoint.RoutedConnection,owner,1,"the restored route did not release the relay bridge")
+    case (owner,Done{Endpoint.RelayRoute{}}):
+      do IO<Endpoint.RoutedConnection>:
+        IO.sleep(1)
+        next(owner)
+    case (owner,Fail{(code,message)}):
+      fail_routed(Endpoint.RoutedConnection,owner,code,message)
+
+def wait_for_direct(fuel: Nat, owner: Endpoint.RoutedConnection) -> IO(Endpoint.RoutedConnection):
+  match fuel:
+    case 0n:
+      fail_routed(Endpoint.RoutedConnection,owner,1,"the restored direct route did not validate")
+    case 1n+left:
+      do IO<Endpoint.RoutedConnection>:
+        progress : Endpoint.RouteStep() <- Endpoint.step_routes(owner)
+        await_direct(progress,next => wait_for_direct(left,next))
+
+def close_cycle_relay(bridge: Maybe<&1,Relay.Bridge>) -> IO(Unit):
+  match bridge:
+    case None{}:
+      IO.pure(Unit,Unit{})
+    case Some{path}:
+      IO.try(Unit,Relay.stop(path))
+
+def finish_cycle(recovered: Endpoint.RoutedConnection, +stream: U32) -> IO(Unit):
+  Endpoint.Routed{(conn,bridge),_} = recovered
+  do IO<Unit>:
+    IO.print("PASS relay path validated")
+    finished : Quic.DatagramConnection <- send_byte(conn,stream,255,1)
+    Migration.finish_stream_reply(finished,stream)
+    close_cycle_relay(bridge)
+
+def second_cut(confirmed: Endpoint.RoutedConnection & Unit, stream: U32) -> IO(Unit):
+  (owner,_) = confirmed
+  do IO<Unit>:
+    IO.print("CUT_DIRECT")
+    relayed : Endpoint.RoutedConnection <- wait_for_relay(12500n,owner)
+    finish_cycle(relayed,stream)
+
+def restore_direct(confirmed: Endpoint.RoutedConnection & Unit, +stream: U32) -> IO(Unit):
+  (owner,_) = confirmed
+  do IO<Unit>:
+    blocked : Endpoint.RoutedConnection <- wait_for_failed_probe(11000n,owner,False{})
+    IO.print("RESTORE_DIRECT")
+    direct : Endpoint.RoutedConnection <- wait_for_direct(9000n,blocked)
+    proven : Endpoint.RoutedConnection & Unit <-
+      Endpoint.use_routed_connection(Unit,direct,c => send_and_ack(c,stream,0,16))
+    second_cut(proven,stream)
+
+def after_first_cut(owner: Endpoint.RoutedConnection, +stream: U32, restore: Bool) -> IO(Unit):
+  match restore:
+    case True{}:
+      do IO<Unit>:
+        confirmed : Endpoint.RoutedConnection & Unit <-
+          Endpoint.use_routed_connection(Unit,owner,c => send_and_ack(c,stream,22,12))
+        restore_direct(confirmed,stream)
+    case False{}:
+      finish_routed(owner,stream)
+
+def cut_direct(primed: Endpoint.RoutedConnection & U32, restore: Bool) -> IO(Unit):
   (owner,stream) = primed
   do IO<Unit>:
     now : U32 <- Quic.quic_millis()
     healthy : Endpoint.RoutedConnection <- observe_healthy(7000n,owner,now)
     IO.print("CUT_DIRECT")
     recovered : Endpoint.RoutedConnection <- wait_for_relay(12500n,healthy)
-    finish_routed(recovered,stream)
+    after_first_cut(recovered,stream,restore)
 
 def prime_routed(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection & U32):
   do IO<Quic.DatagramConnection & U32>:
     opened : Quic.DatagramConnection & U32 <- Fixture.poll_stream(2500n,conn,Fixture.OpenStream{0})
     Migration.prime_stream(opened)
 
-def recover_via_relay(url: String, host: String, port: U32) -> IO(Unit):
+def already_relayed(primed: Endpoint.RoutedConnection & U32) -> IO(Unit):
+  (owner,stream) = primed
+  after_first_cut(owner,stream,True{})
+
+def first_dial_timeout(relay_first: Bool) -> U32:
+  match relay_first:
+    case True{}:
+      200
+    case False{}:
+      3500
+
+def start_cycle(primed: Endpoint.RoutedConnection & U32, restore: Bool, relay_first: Bool) -> IO(Unit):
+  match relay_first:
+    case False{}:
+      cut_direct(primed,restore)
+    case True{}:
+      already_relayed(primed)
+
+def recover_via_relay(url: String, host: String, port: U32, restore: Bool, +relay_first: Bool) -> IO(Unit):
   do IO<Unit>:
     owner : Endpoint.RoutedConnection <- IO.try(Endpoint.RoutedConnection,
       Endpoint.connect_routed(Endpoint.DialRoutes{[Endpoint.IpAddress{host,port}],["invalid-relay",url]},
         Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn()},
-        Endpoint.HandshakeTimeouts{3500,6000}))
+        Endpoint.HandshakeTimeouts{first_dial_timeout(relay_first),6000}))
     primed : Endpoint.RoutedConnection & U32 <- Endpoint.use_routed_connection(U32,owner,prime_routed)
-    cut_direct(primed)
+    start_cycle(primed,restore,relay_first)
 
 def route(url: String, host: String, port: Maybe<&2,U32>, mode: Maybe<&2,U32>) -> IO(Unit):
   match port mode:
@@ -188,7 +313,11 @@ def route(url: String, host: String, port: Maybe<&2,U32>, mode: Maybe<&2,U32>) -
     case Some{direct_port} Some{1}:
       dial_direct_then_relay(url,host,direct_port)
     case Some{direct_port} Some{2}:
-      recover_via_relay(url,host,direct_port)
+      recover_via_relay(url,host,direct_port,False{},False{})
+    case Some{direct_port} Some{3}:
+      recover_via_relay(url,host,direct_port,True{},False{})
+    case Some{direct_port} Some{4}:
+      recover_via_relay(url,host,direct_port,True{},True{})
     case _ _:
       IO.die(Unit,2,"expected a direct peer port and a migration direction")
 

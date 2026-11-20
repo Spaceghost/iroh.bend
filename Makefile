@@ -130,7 +130,7 @@ $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
-.PHONY: check-relay-quic check-quic-route-migration
+.PHONY: check-relay-quic check-quic-route-migration check-quic-restore-direct
 UPSTREAM_RELAY_QUIC ?=
 UPSTREAM_QUIC_ROUTE_MIGRATION ?=
 UPSTREAM_IROH_RELAY_URL ?=
@@ -160,6 +160,10 @@ check-quic-route-migration: $(BUILD)/iroh-bend-quic-route-migration
 	@test -x "$(UPSTREAM_QUIC_ROUTE_MIGRATION)" || { echo 'Set UPSTREAM_QUIC_ROUTE_MIGRATION to the Iroh route migration fixture.' >&2; exit 2; }
 	python3 -B tests/quic_route_migration.py "$(BUILD)/iroh-bend-quic-route-migration" \
 		"$(UPSTREAM_QUIC_ROUTE_MIGRATION)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
+
+check-quic-restore-direct: $(BUILD)/iroh-bend-quic-route-migration
+	@test -x "$(UPSTREAM_QUIC_ROUTE_MIGRATION)" || { echo 'Set UPSTREAM_QUIC_ROUTE_MIGRATION to the Iroh direct restoration fixture.' >&2; exit 2; }
+	python3 -B tests/quic_route_migration.py "$<" "$(UPSTREAM_QUIC_ROUTE_MIGRATION)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --restore-direct
 
 $(BUILD)/quic-route-migration.c: tests/quic_route_migration.bend tests/quic_migration.bend tests/quic_datagram.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-route-migration-stage/src" "$(BUILD)/quic-route-migration-stage/tests"

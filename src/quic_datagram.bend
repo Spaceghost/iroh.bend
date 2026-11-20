@@ -20,6 +20,7 @@ def start_quic_migration(conn: DatagramConnection, host: String, port: U32)
   import "./quic_datagram.c"
 
 # Validate a new local and remote address for the existing pinned peer.
+# An empty local host with port zero lets the OS select a source address.
 def start_quic_path_migration(conn: DatagramConnection, host: String, port: U32, peer: String, peer_port: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_datagram.c"

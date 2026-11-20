@@ -52,16 +52,20 @@ def check_move(outcome: Quic.DatagramConnection & U32, expected: U32) -> IO(Quic
   (conn,+code) = outcome
   check_move_status(conn,code,U32.is_eq(code,expected))
 
+def finish_stream_reply(conn: Quic.DatagramConnection, stream: U32) -> IO(Unit):
+  do IO<Unit>:
+    reply : Quic.DatagramConnection <- Fixture.receive_reply(2000n,conn,[13,0,255])
+    read : Quic.DatagramConnection <- Fixture.receive_stream(2000n,reply,stream,[21,0,255,23,0,255])
+    complete : Quic.DatagramConnection <- Fixture.send_datagram(2000n,read,[14,0,255])
+    Quic.drop_quic_datagram(complete)
+    IO.print("PASS Bend kept the original QUIC connection and stream")
+
 def finish_stream(conn: Quic.DatagramConnection, +stream: U32) -> IO(Unit):
   do IO<Unit>:
     sent : Quic.DatagramConnection <- Fixture.send_datagram(2000n,conn,[12,0,255])
     queued : Quic.DatagramConnection <- Fixture.stream_submit(sent,Fixture.QueueStream{stream,[22,0,255],1})
     flushed : Quic.DatagramConnection <- Fixture.stream_submit(queued,Fixture.FlushStream{stream})
-    reply : Quic.DatagramConnection <- Fixture.receive_reply(2000n,flushed,[13,0,255])
-    read : Quic.DatagramConnection <- Fixture.receive_stream(2000n,reply,stream,[21,0,255,23,0,255])
-    complete : Quic.DatagramConnection <- Fixture.send_datagram(2000n,read,[14,0,255])
-    Quic.drop_quic_datagram(complete)
-    IO.print("PASS Bend kept the original QUIC connection and stream")
+    finish_stream_reply(flushed,stream)
 
 def migrate(bound: Quic.DatagramConnection & U32, stream: U32, +expected: U32) -> IO(Unit):
   (conn,port) = bound
