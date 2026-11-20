@@ -4,7 +4,7 @@ import ./relay_client.bend as Client
 import ./direct.bend as Direct
 
 type Bridge is Data:
-  RelayPath{shutdown: Chan(Unit), finished: Chan(Result<&1,&1,U32 & String,Unit>)}
+  RelayPath{shutdown: Chan(Unit), finished: Chan(Result<&1,&1,U32 & String,Unit>), url: String}
 
 type Flow is Type:
   Forwarding{udp: Socket, relay: Client.Connection, port: U32}
@@ -231,7 +231,7 @@ def after_stop(udp: Socket, relay: Client.Connection, port: U32, peer: List<&2,U
         after_stop(udp,relay,port,peer,requested,next => run(next,peer,shutdown))
 
 def bound_port(handle: Socket & Result<&1,&1,U32 & String,U32>, relay: Client.Connection,
-    peer: List<&2,U32>, destination: U32) -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
+    peer: List<&2,U32>, destination: U32, url: String) -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
   match handle:
     case (udp,Fail{error}):
       do IO<Result<&1,&1,U32 & String,Bridge & U32>>:
@@ -243,10 +243,10 @@ def bound_port(handle: Socket & Result<&1,&1,U32 & String,U32>, relay: Client.Co
         +shutdown : Chan(Unit) <- Chan.new(Unit,0)
         finished : Chan(Result<&1,&1,U32 & String,Unit>) <- IO.fork(Result<&1,&1,U32 & String,Unit>,
           run(Forwarding{udp,relay,destination},peer,shutdown))
-        return Done{(RelayPath{shutdown,finished},port)}
+        return Done{(RelayPath{shutdown,finished,url},port)}
 
 def attached(relay: Result<&1,&1,U32 & String,Client.Connection>, udp: Socket,
-    peer: List<&2,U32>, port: U32) -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
+    peer: List<&2,U32>, port: U32, url: String) -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
   match relay:
     case Fail{error}:
       do IO<Result<&1,&1,U32 & String,Bridge & U32>>:
@@ -255,9 +255,9 @@ def attached(relay: Result<&1,&1,U32 & String,Client.Connection>, udp: Socket,
     case Done{connected}:
       do IO<Result<&1,&1,U32 & String,Bridge & U32>>:
         info : Socket & Result<&1,&1,U32 & String,U32> <- relay_loopback_port(udp)
-        bound_port(info,connected,peer,port)
+        bound_port(info,connected,peer,port,url)
 
-def connect(bound: Result<&1,&1,U32 & String,Socket>, url: String, seed: List<&2,U32>,
+def connect(bound: Result<&1,&1,U32 & String,Socket>, +url: String, seed: List<&2,U32>,
     peer: List<&2,U32>, port: U32) -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
   match bound:
     case Fail{error}:
@@ -265,7 +265,7 @@ def connect(bound: Result<&1,&1,U32 & String,Socket>, url: String, seed: List<&2
     case Done{udp}:
       do IO<Result<&1,&1,U32 & String,Bridge & U32>>:
         relay : Result<&1,&1,U32 & String,Client.Connection> <- Client.connect(url,seed)
-        attached(relay,udp,peer,port)
+        attached(relay,udp,peer,port,url)
 
 def start_checked(size: Wire.Size, valid_port: Bool, url: String, seed: List<&2,U32>,
     peer: List<&2,U32>, local_port: U32)
@@ -284,8 +284,12 @@ def start(url: String, seed: List<&2,U32>, +peer: List<&2,U32>, +local_port: U32
     -> IO(Result<&1,&1,U32 & String,Bridge & U32>):
   start_checked(Wire.measure_limited(peer,32),U32.is_le(local_port,65535),url,seed,peer,local_port)
 
+def bridge_url(bridge: Bridge) -> String:
+  RelayPath{_,_,url} = bridge
+  url
+
 def stop(bridge: Bridge) -> IO(Result<&1,&1,U32 & String,Unit>):
-  RelayPath{shutdown,finished} = bridge
+  RelayPath{shutdown,finished,_} = bridge
   do IO<Result<&1,&1,U32 & String,Unit>>:
     Chan.close(Unit,shutdown)
     IO.join(Result<&1,&1,U32 & String,Unit>,finished)

@@ -468,7 +468,7 @@ def add_routed_source(conn: Quic.MultipathConnection, peer: State.PeerState, cha
     case Send.Changed{local,Send.Updated{}}:
       advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
     case Send.Changed{local,_}:
-      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},phase},now)
+      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
 
 # A peer with room for one address can still receive the new family's
 # local candidate in the next round.
@@ -523,6 +523,43 @@ def drive_frame(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe
     case (conn,Fail{error}) _:
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Fail{error}))
 
+def accept_observation(conn: Quic.MultipathConnection, peer: State.PeerState, change: Send.Change,
+    +phase: Phase, dirty: Bool, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
+  match change:
+    case Send.Changed{local,Send.Updated{}}:
+      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
+    case Send.Changed{local,_}:
+      IO.pure(Quic.MultipathConnection & DialerResult(),
+        (conn,Done{Dialer{peer,local,RoutedSockets{},dirty,phase}}))
+
+def include_routed_observation(
+    observation: Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>,
+    state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
+  match observation state:
+    case (conn,Done{+address}) Dialer{peer,local,RoutedSockets{},dirty,phase}:
+      accept_observation(conn,peer,fit_routed_address(Send.add(local,address),address),phase,dirty,now)
+    case (conn,_) current:
+      IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{current}))
+
+def update_routed_observation(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,
+    Maybe<&1,List<&2,U32> & U32>>, state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
+  match pair:
+    case (conn,Done{Some{address}}):
+      include_routed_observation(local_address((conn,Done{address})),state,now)
+    case (conn,_):
+      IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{state}))
+
+def poll_observation(result: Quic.MultipathConnection & DialerResult(), now: U32)
+    -> IO(Quic.MultipathConnection & DialerResult()):
+  match result:
+    case (conn,Done{Dialer{peer,local,RoutedSockets{},dirty,phase}}):
+      do IO<Quic.MultipathConnection & DialerResult()>:
+        observed : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>> <-
+          Quic.poll_routed_qad(conn)
+        update_routed_observation(observed,Dialer{peer,local,RoutedSockets{},dirty,phase},now)
+    case unchanged:
+      IO.pure(Quic.MultipathConnection & DialerResult(),unchanged)
+
 def drive_ready(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, state: Dialer)
     -> IO(Quic.MultipathConnection & DialerResult()):
   match pair state:
@@ -530,10 +567,11 @@ def drive_ready(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>,
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{Unavailable{}}))
     case (conn,Done{2}) active:
       do IO<Quic.MultipathConnection & DialerResult()>:
-        now : U32 <- Quic.multipath_micros()
+        +now : U32 <- Quic.multipath_micros()
         incoming : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
           Quic.read_multipath_nat_frame(conn)
-        drive_frame(incoming,active,now)
+        next : Quic.MultipathConnection & DialerResult() <- drive_frame(incoming,active,now)
+        poll_observation(next,now)
     case (conn,Done{_}) current:
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{current}))
     case (conn,Fail{error}) _:

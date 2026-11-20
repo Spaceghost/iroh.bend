@@ -98,6 +98,14 @@ def poll_multipath_qad(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>>):
   import "./quic_multipath.c"
 
+# Resolve the relay once for best-effort address discovery on routed sockets.
+def configure_routed_qad(conn: MultipathConnection, host: String, port: U32) -> IO(MultipathConnection):
+  import "./quic_multipath.c"
+
+def poll_routed_qad(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>>):
+  import "./quic_multipath.c"
+
 def multipath_nat_local_candidate(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"

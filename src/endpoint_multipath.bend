@@ -188,6 +188,41 @@ def dial_relay_offer(address: Endpoint.Address, identity: Endpoint.Identity, tim
   Endpoint.PeerKeys{seed,peer,alpn} = identity
   Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,routed_nat_limit(),U32.to_nat(timeout))
 
+def qad_name(parts: List<&2,String>) -> String:
+  match parts:
+    case Con{host,_}:
+      host
+    case Nil{}:
+      ""
+
+def qad_authority(+authority: String, bracketed: Bool, userinfo: Bool) -> String:
+  match bracketed userinfo:
+    case _ True{}:
+      ""
+    case True{} False{}:
+      qad_name(String.split(String.drop(authority,1n),']'))
+    case False{} False{}:
+      qad_name(String.split(authority,':'))
+
+def qad_path(parts: List<&2,String>) -> String:
+  match parts:
+    case Con{+authority,_}:
+      qad_authority(qad_name(String.split(qad_name(String.split(authority,'?')),'#')),
+        String.starts_with(authority,"["),String.contains(authority,"@"))
+    case Nil{}:
+      ""
+
+def qad_host(+url: String, secure: Bool) -> String:
+  match secure:
+    case True{}:
+      qad_path(String.split(String.drop(url,6n),'/'))
+    case False{}:
+      qad_path(String.split(String.drop(url,5n),'/'))
+
+def configure_relay_qad(conn: Quic.MultipathConnection, +url: String) -> IO(Quic.MultipathConnection):
+  # Iroh publishes QAD on its default QUIC port, independent of the WS port.
+  Quic.configure_routed_qad(conn,qad_host(url,String.starts_with(url,"wss://")),7842)
+
 def relay_route_ready(pair: Quic.MultipathConnection & Nat.DialerResult(), bridge: Relay.Bridge,
     +candidates: List<&2,Endpoint.Address>, now: U32) -> RoutedResult():
   match pair:
@@ -199,9 +234,10 @@ def relay_route_ready(pair: Quic.MultipathConnection & Nat.DialerResult(), bridg
 def setup_routed(result: ConnectResult(), candidates: List<&2,Endpoint.Address>, urls: List<&2,String>,
     identity: Endpoint.Identity, timeouts: Endpoint.Timeouts, now: U32) -> IO(RoutedResult()):
   match result:
-    case Done{(conn,Some{bridge})}:
+    case Done{(conn,Some{+bridge})}:
       do IO<RoutedResult()>:
-        driver : Quic.MultipathConnection & Nat.DialerResult() <- Nat.initialize_relay(conn,routed_nat_limit())
+        configured : Quic.MultipathConnection <- configure_relay_qad(conn,Relay.bridge_url(bridge))
+        driver : Quic.MultipathConnection & Nat.DialerResult() <- Nat.initialize_relay(configured,routed_nat_limit())
         return relay_route_ready(driver,bridge,candidates,now)
     case Done{owner}:
       IO.pure(RoutedResult(),Done{route_state(owner,candidates,urls,identity,timeouts,now)})

@@ -430,6 +430,10 @@ check-endpoint-multipath-qad: $(BUILD)/iroh-bend-endpoint-multipath-nat
 check-endpoint-multipath-dual-stack: $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath
 	python3 -B tests/endpoint_multipath_dual_stack.py "$<" "$(BUILD)/iroh-bend-endpoint-multipath" "$(RELAY_URL)"
 
+.PHONY: check-endpoint-multipath-automatic-qad
+check-endpoint-multipath-automatic-qad: $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath
+	python3 -B tests/endpoint_multipath_automatic_qad.py "$<" "$(BUILD)/iroh-bend-endpoint-multipath" "$(RELAY_URL)" "$(QAD_TEST_PORT)" "$(QAD_TEST_IP)"
+
 $(BUILD)/endpoint-multipath-dual-stack.c: tests/endpoint_multipath_dual_stack.bend tests/quic_multipath_listener.bend
 $(BUILD)/endpoint-multipath-nat.c: tests/endpoint_multipath_nat.bend
 $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend
