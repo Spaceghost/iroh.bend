@@ -294,7 +294,7 @@ def confirmed_address_frame(conn: Quic.MultipathConnection, result: NatSend.Chan
 
 def report_withdrawn(conn: Quic.MultipathConnection, _: NatSend.LocalState) -> IO(Quic.MultipathConnection):
   do IO<Quic.MultipathConnection>:
-    IO.print("PASS Iroh acknowledged the authenticated ADD_ADDRESS and REMOVE_ADDRESS frames")
+    IO.print("PASS peer acknowledged the authenticated ADD_ADDRESS and REMOVE_ADDRESS frames")
     return conn
 
 def advertise_candidate(conn: Quic.MultipathConnection, +candidate: NatState.Candidate)
@@ -371,6 +371,13 @@ def reconfigure(first: Quic.MultipathListener & Quic.MultipathConnection) -> IO(
     second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,unchanged)
     pause_and_exchange(second,conn)
 
+def serve_advertisement(first: Quic.MultipathListener & Quic.MultipathConnection,
+    local_address: NatState.Candidate) -> IO(Unit):
+  (listener,conn) = first
+  do IO<Unit>:
+    ready : Quic.MultipathConnection <- advertise_candidate(conn,local_address)
+    serve_affinity((listener,ready))
+
 def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   match mode:
     case 0:
@@ -385,6 +392,8 @@ def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32, l
       serve_affinity(first)
     case 5:
       serve_affinity(first)
+    case 7:
+      serve_advertisement(first,local_address)
     case port:
       serve_two_connections(first,port,local_address)
 
@@ -462,6 +471,8 @@ def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
       listen_nat_offer(host,5)
     case Some{6}:
       listen_nat_offer(host,6)
+    case Some{7}:
+      listen_nat_offer(host,7)
     case Some{+number}:
       listen_mode(host,number,U32.is_ge(number,1024))
     case None{}:

@@ -23,6 +23,22 @@ def start_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U
   import "./quic_multipath.c"
 
 # TLS protocol identifiers are 1 to 255 opaque bytes.
+def start_multipath_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
+def start_nat_parameter(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    parameter: Maybe<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  match parameter:
+    case Some{encoded}:
+      start_multipath_nat_offer(host,port,seed,peer,alpn,encoded)
+    case None{}:
+      IO.pure(Result<&1,&1,U32 & String,MultipathConnection>,Fail{(22,"invalid NAT traversal limit")})
+
+def start_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: String,
+    limit: U32) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  start_nat_parameter(host,port,seed,peer,alpn,NatWire.encode_limit(limit))
+
 def start_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
@@ -41,7 +57,7 @@ def peer_multipath_parameters(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_multipath.c"
 
-# Dequeue one authenticated NAT traversal REACH_OUT frame from an opted-in listener connection.
+# Dequeue a role-appropriate NAT traversal wire frame from an opted-in connection.
 def read_multipath_nat_frame(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>):
   import "./quic_multipath.c"
@@ -339,6 +355,12 @@ def connect_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2
     alpn: String, timeout_ms: Nat) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
     started : ConnectResult() <- start_multipath(host,port,seed,peer,alpn)
+    finish_connect(started,timeout_ms)
+
+def connect_multipath_with_nat_limit(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: String, limit: U32, timeout_ms: Nat) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    started : ConnectResult() <- start_multipath_with_nat_limit(host,port,seed,peer,alpn,limit)
     finish_connect(started,timeout_ms)
 
 def connect_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,

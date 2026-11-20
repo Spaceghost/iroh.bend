@@ -268,7 +268,7 @@ local QUIC_TRANSPORT_EXTENSION: uint16 <comptime> = 57
 
 ##[[
 local names = {
-  'start_multipath', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
+  'start_multipath', 'start_multipath_nat_offer', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
   'peer_multipath_parameters', 'take_multipath_session', 'drop_multipath_session', 'MultipathSession',
   'start_multipath_resume', 'multipath_resumption_status', 'start_multipath_early', 'multipath_early_status',
   'step_multipath', 'probe_multipath', 'multipath_status', 'multipath_path_timeouts', 'set_multipath_keepalive',
@@ -290,6 +290,7 @@ for _, name in ipairs(names) do
 end
 ]]
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_negotiated_multipath_alpn: uint32 <cimport,nodecl>
@@ -388,6 +389,9 @@ local NAT_INBOX_CAPACITY: csize <comptime> = 512
 local NAT_PROBE_CAPACITY: csize <comptime> = 255
 local NAT_PROBE_LIFETIME: uint64 <comptime> = 30000000
 local CHALLENGE_SIZE: csize <comptime> = 9
+local ADD_ADDRESS_V4: uint64 <comptime> = 0x3d7f90
+local ADD_ADDRESS_V6: uint64 <comptime> = 0x3d7f91
+local REMOVE_ADDRESS: uint64 <comptime> = 0x3d7f94
 local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
 local Listener = @record{
@@ -527,7 +531,7 @@ local VerifyCallback = @function(*verify_t,*tls_t,cstring,pointer,pointer,*iov_t
 local PinnedKey = @record{
   backend: pin_t, original: VerifyCallback, response: [4]ext_t, raw_type: uint8,
   alpns: *Alpn, retired: *Alpn, selected: *Alpn, check_extension: extension_cb_t,
-  peer_parameters: PeerParameters
+  peer_parameters: PeerParameters, nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer:boolean
 }
 
 local function pinned(quic: *quic_t): *PinnedKey
@@ -589,7 +593,7 @@ end
 local function check_client_extension(cb: *extension_self, tls: *tls_t, message: uint8, kind: uint16, data: iov_t): cint
   if message ~= PTLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS then return 0 end
   local pin = (@*PinnedKey)(ptls_get_context(tls).verify_certificate)
-  if kind == QUIC_TRANSPORT_EXTENSION and iroh_mp_peer_multipath_parameters ~= 0xffffffff then
+  if kind == QUIC_TRANSPORT_EXTENSION and (pin.sends_nat_offer or iroh_mp_peer_multipath_parameters ~= 0xffffffff) then
     return save_parameters(&pin.peer_parameters,data)
   end
   if kind ~= ALPN_EXTENSION then return 0 end
@@ -705,6 +709,15 @@ local function peer_offers_nat(data: iov_t): boolean
   return has_offer
 end
 
+local function merge_nat_offer(base:iov_t, offer:*uint8): iov_t
+  if base.len > 65535 - NAT_PARAMETER_SIZE then return {base=nilptr,len=0} end
+  local merged = (@*uint8)(C.malloc(base.len + NAT_PARAMETER_SIZE))
+  if merged == nilptr then return {base=nilptr,len=0} end
+  C.memcpy(merged,base.base,base.len)
+  C.memcpy(&((@*[0]uint8)(merged))[base.len],offer,NAT_PARAMETER_SIZE)
+  return {base=merged,len=base.len + NAT_PARAMETER_SIZE}
+end
+
 local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): cint
   local parsed = picoquic_tls_collected_extensions_cb(tls,props,slots)
   if parsed ~= 0 then return parsed end
@@ -743,15 +756,11 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
   local pending = pending_handshake(cnx,listener)
   if pending == nilptr then return PTLS_ALERT_NO_APPLICATION_PROTOCOL end
   if listener.sends_nat_offer then
-    local base = pin.response[0].data
-    if base.len > 65535 - NAT_PARAMETER_SIZE then return PTLS_ALERT_INTERNAL_ERROR end
-    local merged = (@*uint8)(C.malloc(base.len + NAT_PARAMETER_SIZE))
-    if merged == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
-    C.memcpy(merged,base.base,base.len)
-    C.memcpy(&((@*[0]uint8)(merged))[base.len],&listener.nat_offer[0],NAT_PARAMETER_SIZE)
+    local merged = merge_nat_offer(pin.response[0].data,&listener.nat_offer[0])
+    if merged.base == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
     C.free(pending.extensions)
-    pending.extensions = merged
-    pin.response[0].data = {base=merged,len=base.len + NAT_PARAMETER_SIZE}
+    pending.extensions = merged.base
+    pin.response[0].data = merged
     pending.nat_enabled = cnx.is_multipath_enabled ~= 0 and peer_offers_nat(transport.data)
   end
   if iroh_mp_peer_multipath_parameters ~= 0xffffffff then
@@ -784,7 +793,7 @@ local function with_rpk_selection(tls: *tls_t, buf: *buffer_t, offsets: *csize, 
 end
 
 local function client_rpk_message(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
-    props:*props_t):cint
+    props:*props_t, conn:*Connection):cint
   if props.additional_extensions == nilptr then return real_tls(tls,buf,offsets,epoch,bytes,len,props) end
   -- Offer the client raw key on every ClientHello, including after HelloRetryRequest.
   -- RFC 7250 client_certificate_type contains a single RawPublicKey entry.
@@ -796,6 +805,17 @@ local function client_rpk_message(tls:*tls_t, buf:*buffer_t, offsets:*csize, epo
     return real_tls(tls,buf,offsets,epoch,bytes,len,props)
   end
   extensions[0] = upstream[0]
+  local merged: *uint8
+  defer C.free(merged) end
+  if epoch == 0 and conn ~= nilptr then
+    local pin = pinned(conn.quic)
+    if pin.sends_nat_offer then
+      local data = merge_nat_offer(extensions[0].data,&pin.nat_offer[0])
+      if data.base == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
+      merged = data.base
+      extensions[0].data = data
+    end
+  end
   extensions[1] = {type=19,data={base=&offer[0],len=2}}
   extensions[2] = {type=65535}
   props.additional_extensions = &extensions[0]
@@ -868,7 +888,7 @@ local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:c
     props.client.max_early_data_size = conn.early and &cnx.max_early_data_size or nilptr
     if conn.early then restore_early_limits(cnx,conn.resume) end
   end
-  local result = client_rpk_message(tls,buf,offsets,epoch,bytes,len,props)
+  local result = client_rpk_message(tls,buf,offsets,epoch,bytes,len,props,conn)
   if conn ~= nilptr and conn.early and not conn.early_decided and epoch == 2 and
       (result == 0 or result == PTLS_ERROR_IN_PROGRESS) then
     local acceptance = props.client.early_data_acceptance
@@ -1154,7 +1174,18 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
       name = (@*Alpn)(name.next)
     end
   elseif kind == picoquic_callback_ready then
-    if conn.listener == nilptr then conn.selected_alpn = pinned(conn.quic).selected end
+    if conn.listener == nilptr then
+      local pin = pinned(conn.quic)
+      conn.selected_alpn = pin.selected
+      if conn.nat_inbox == nilptr and pin.sends_nat_offer and cnx.is_multipath_enabled ~= 0 and
+          peer_offers_nat({base=pin.peer_parameters.bytes,len=pin.peer_parameters.size}) then
+        conn.nat_inbox = (@*NatInbox)(C.calloc(1,#NatInbox))
+        if conn.nat_inbox == nilptr then
+          conn.closed = true
+          return -1
+        end
+      end
+    end
     if conn.selected_alpn == nilptr then
       conn.closed = true
       return -1
@@ -1243,7 +1274,8 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
 end
 
 local function match_nat_response(conn:*Connection, source:pointer, destination:pointer, frame:*uint8, now:uint64): csize
-  if source == nilptr or destination == nilptr or picoquic_compare_addr(destination,&conn.listener.local_addr) ~= 0 then return 0 end
+  if conn.listener == nilptr or source == nilptr or destination == nilptr or
+      picoquic_compare_addr(destination,&conn.listener.local_addr) ~= 0 then return 0 end
   local bytes = (@*[0]uint8)(frame)
   for i = 0,<NAT_PROBE_CAPACITY do
     local probe = &conn.nat_inbox.probes[i]
@@ -1253,6 +1285,18 @@ local function match_nat_response(conn:*Connection, source:pointer, destination:
     end
   end
   return 0
+end
+
+local function nat_body_size(kind:uint64, server:boolean): isize
+  if server then
+    if kind == REACH_OUT_V4 then return 6 end
+    if kind == REACH_OUT_V6 then return 18 end
+  else
+    if kind == ADD_ADDRESS_V4 then return 6 end
+    if kind == ADD_ADDRESS_V6 then return 18 end
+    if kind == REMOVE_ADDRESS then return 0 end
+  end
+  return -1
 end
 
 local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize, node:*receive_node_t,
@@ -1277,12 +1321,13 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
     local remaining = size - at
     local kind: uint64
     local tag_size = picoquic_varint_decode(&input[at],remaining,&kind)
-    if kind == REACH_OUT_V4 or kind == REACH_OUT_V6 then
-      local round: uint64
+    local body_size = nat_body_size(kind,conn.listener ~= nilptr)
+    if body_size >= 0 then
+      local sequence: uint64
       if tag_size ~= 4 then return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,kind) end
-      local round_size = picoquic_varint_decode(&input[at + tag_size],remaining - tag_size,&round)
-      local frame_size: csize = tag_size + round_size + (kind == REACH_OUT_V4 and 6 or 18)
-      if round_size == 0 or frame_size > remaining then
+      local sequence_size = picoquic_varint_decode(&input[at + tag_size],remaining - tag_size,&sequence)
+      local frame_size = tag_size + sequence_size + (@csize)(body_size)
+      if sequence_size == 0 or frame_size > remaining then
         return picoquic_connection_error(cnx,PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,kind)
       end
       if inbox.count + count == NAT_INBOX_CAPACITY then
@@ -1297,7 +1342,7 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
       item.size = frame_size
       C.memcpy(&item.bytes[0],&input[at],frame_size)
       count = count + 1
-      -- Reach-out is ack-eliciting and non-probing, like PING.
+      -- NAT address and reach-out frames are ack-eliciting and non-probing, like PING.
       -- Keep all vanilla frame offsets and the payload length intact.
       C.memset(&patch[at],0,frame_size)
       patch[at] = 1
@@ -1421,7 +1466,7 @@ local function early_status_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,io_box(e,iroh_mp_Some,accepted)))
 end
 
-local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean): Term
+local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Session, early: boolean, advertise_nat: boolean): Term
   defer free_session(session) end
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
@@ -1470,6 +1515,14 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
     destroy(conn)
     return io_fail(e,EACCES,'session ticket belongs to a different local key')
   end
+  if advertise_nat then
+    local pin = pinned(conn.quic)
+    if bytes_from_list(e,args[5],&pin.nat_offer[0],NAT_PARAMETER_SIZE) ~= NAT_PARAMETER_SIZE then
+      destroy(conn)
+      return io_fail(e,EINVAL,'invalid encoded NAT traversal parameter')
+    end
+    pin.sends_nat_offer = true
+  end
   conn.resume = session
   conn.early = early
   session = nilptr
@@ -1485,21 +1538,25 @@ local function start_client(e: Env, args: *[0]Term, mode: uint32, session: *Sess
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,0,nilptr,false)
+  return start_client(e,args,0,nilptr,false,false)
+end
+
+local function start_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,0,nilptr,false,true)
 end
 
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,1,nilptr,false)
+  return start_client(e,args,1,nilptr,false,false)
 end
 
 local function start_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,2,nilptr,false)
+  return start_client(e,args,2,nilptr,false,false)
 end
 
 local function start_resume(e: Env, args: *[0]Term, early: boolean): Term
   local session = remove_session(handle_id(e,args[5],iroh_mp_MultipathSession))
   if session == nilptr then return io_fail(e,EBADF,'multipath session is no longer available') end
-  return start_client(e,args,1,session,early)
+  return start_client(e,args,1,session,early,false)
 end
 
 local function start_resume_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -2046,7 +2103,9 @@ end
 local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
-  if not conn.ready or conn.nat_inbox == nilptr then return io_fail(e,ENOTSUP,'NAT traversal was not negotiated') end
+  if conn.listener == nilptr or not conn.ready or conn.nat_inbox == nilptr then
+    return io_fail(e,ENOTSUP,'operation requires an opted-in NAT traversal listener connection')
+  end
   local peer: storage_t
   local raw: [CHALLENGE_SIZE]uint8
   if not nat_address(e,args,conn,&peer) or
@@ -2089,12 +2148,14 @@ local function valid_nat_advertisement(bytes:*uint8, size:csize): boolean
   local width = picoquic_varint_decode(&frame[4],size - 4,&seq)
   if width == 0 then return false end
   local body = size - 4 - width
-  return (tag == 0x3d7f90 and body == 6) or (tag == 0x3d7f91 and body == 18) or (tag == 0x3d7f94 and body == 0)
+  return (tag == ADD_ADDRESS_V4 and body == 6) or (tag == ADD_ADDRESS_V6 and body == 18) or (tag == REMOVE_ADDRESS and body == 0)
 end
 
 local function advertise_nat(e:Env, conn:*Connection, value:Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
-  if not conn.ready or conn.nat_inbox == nilptr then return io_fail(e,ENOTSUP,'NAT traversal was not negotiated') end
+  if conn.listener == nilptr or not conn.ready or conn.nat_inbox == nilptr then
+    return io_fail(e,ENOTSUP,'operation requires an opted-in NAT traversal listener connection')
+  end
   local raw: NatFrame
   local size = bytes_from_list(e,value,&raw.bytes[0],#raw.bytes)
   if size < 0 or not valid_nat_advertisement(&raw.bytes[0],(@csize)(size)) then
@@ -2563,6 +2624,7 @@ end
 
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
+  if iroh_mp_start_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_start_multipath_nat_offer,start_nat_offer_run) end
   if iroh_mp_start_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes,start_bytes_run) end
   if iroh_mp_start_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_start_multipath_alpns,start_alpns_run) end
   if iroh_mp_negotiated_multipath_alpn ~= 0xffffffff then io_eff(iroh_mp_negotiated_multipath_alpn,negotiated_alpn_run) end

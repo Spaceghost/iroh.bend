@@ -42,8 +42,7 @@ def check(listener, fixture, host, mode, listener_mode="0"):
                 print(f"PASS Bend selected its preferred ALPN and the text fallback on {host}", flush=True)
 
 
-def check_affinity(listener, dialer, host, advertises_nat=False):
-    mode, args = ("5", ("bend-nat-offer",)) if advertises_nat else ("1", ())
+def check_affinity(listener, dialer, host, mode="1", *args):
     with process(listener, host, mode) as bend:
         port = read_address(bend)
         subprocess.run((dialer, host, str(port), *args), timeout=16, check=True)
@@ -130,7 +129,8 @@ if __name__ == "__main__":
     for host, mode in (("127.0.0.1", "dial"), ("::1", "dial6")):
         check(listener, fixture, host, mode)
         check_affinity(listener, dialer, host)
-        check_affinity(listener, dialer, host, advertises_nat=True)
+        check_affinity(listener, dialer, host, "5", "bend-nat-offer")
+        check_affinity(listener, dialer, host, "7", "bend-nat-dial")
         check(listener, fixture, host, mode, "6")
         check_off_path(listener, fixture, host, mode)
         check_off_path(listener, fixture, host, mode, drop_first=True)

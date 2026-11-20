@@ -62,6 +62,16 @@ check_family() {
     tail -n +2 "$work/listener"
 }
 
+check_nat_dial() {
+    start "$1"
+    if ! timeout 10s "$client" "$2" "${address##*:}" iroh-nat-dial || ! wait "$pid"; then
+        cat "$work/errors" >&2
+        exit 1
+    fi
+    pid=
+    tail -n +2 "$work/listener"
+}
+
 check_multiple() {
     start "$1" 1
     if ! timeout 10s "$client" "$2" "${address##*:}" multiple || ! wait "$pid"; then
@@ -74,6 +84,8 @@ check_multiple() {
 
 check_family listen 127.0.0.1
 check_family listen6 ::1
+check_nat_dial listen 127.0.0.1
+check_nat_dial listen6 ::1
 if [ "${CHECK_MULTIPLE_ALPNS:-0}" = 1 ]; then
     check_multiple listen 127.0.0.1
     check_multiple listen6 ::1
