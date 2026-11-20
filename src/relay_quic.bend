@@ -156,6 +156,11 @@ def send_relay(udp: Socket, relay: Client.Connection, port: U32, +from: U32, pee
         sent : Result<&1,&1,U32 & String,Client.Connection> <- Client.send_datagram(relay,peer,0,0,data)
         advanced(udp,from,sent)
 
+def forward_local(udp: Socket, relay: Client.Connection, +port: U32, peer: List<&2,U32>,
+    host: String, +from: U32, data: List<&2,U32>) -> IO(Flow):
+  send_relay(udp,relay,port,from,peer,data,
+    String.eq(host,"127.0.0.1") && (U32.is_eq(port,0) || U32.is_eq(port,from)))
+
 def local_input(packet: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
     relay: Client.Connection, +port: U32, +peer: List<&2,U32>) -> IO(Flow):
   match packet:
@@ -165,8 +170,7 @@ def local_input(packet: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U
       fail_both(udp,relay,error)
     case (udp,Ready{Done{(host,+from,data)}}):
       do IO<Flow>:
-        outgoing : Flow <- send_relay(udp,relay,port,from,peer,data,
-          String.eq(host,"127.0.0.1") && (U32.is_eq(port,0) || U32.is_eq(port,from)))
+        outgoing : Flow <- forward_local(udp,relay,port,peer,host,from,data)
         read_relay(outgoing,peer,0)
 
 def stop_flow(udp: Socket, relay: Client.Connection) -> IO(Result<&1,&1,U32 & String,Unit>):
@@ -175,12 +179,40 @@ def stop_flow(udp: Socket, relay: Client.Connection) -> IO(Result<&1,&1,U32 & St
     Client.close(relay)
     return Done{Unit{}}
 
+def drain_packet(packet: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
+    relay: Client.Connection, port: U32, peer: List<&2,U32>,
+    next: Flow -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match packet:
+    case (udp,Wait{_}):
+      stop_flow(udp,relay)
+    case (udp,Ready{Fail{error}}):
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        ended : Flow <- fail_both(udp,relay,error)
+        next(ended)
+    case (udp,Ready{Done{(host,from,data)}}):
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        forwarded : Flow <- forward_local(udp,relay,port,peer,host,from,data)
+        next(forwarded)
+
+# The QUIC owner queues its final packet before requesting bridge shutdown.
+def drain_outbound(fuel: Nat, flow: Flow, +peer: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match fuel flow:
+    case _ Ended{result}:
+      IO.pure(Result<&1,&1,U32 & String,Unit>,result)
+    case 0n Forwarding{udp,relay,_}:
+      stop_flow(udp,relay)
+    case 1n+left Forwarding{udp,relay,port}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        packet : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-
+          UDP.try_recv_bytes_from(udp,65507,0)
+        drain_packet(packet,relay,port,peer,outgoing => drain_outbound(left,outgoing,peer))
+
 def after_stop(udp: Socket, relay: Client.Connection, port: U32, peer: List<&2,U32>,
     poll: Poll<&1,&1,Maybe<&1,Unit>,Unit>, advance: Flow -> IO(Result<&1,&1,U32 & String,Unit>))
     -> IO(Result<&1,&1,U32 & String,Unit>):
   match poll:
     case Ready{_}:
-      stop_flow(udp,relay)
+      drain_outbound(64n,Forwarding{udp,relay,port},peer)
     case Wait{_}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
         packet : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-

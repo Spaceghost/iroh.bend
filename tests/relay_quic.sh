@@ -6,9 +6,20 @@ url=$2
 upstream=${3:-}
 pkarr_url=${4:-}
 dns_port=${5:-}
+shared=${6:-}
+shared_dial=${7:-}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/iroh-bend-relay-quic.XXXXXXXX")
 listener=
+bridge=
+stop_bridge() {
+    if [ -n "$bridge" ]; then
+        kill "$bridge" 2>/dev/null || :
+        wait "$bridge" 2>/dev/null || :
+        bridge=
+    fi
+}
 finish() {
+    stop_bridge
     if [ -n "$listener" ]; then
         kill "$listener" 2>/dev/null || :
         wait "$listener" 2>/dev/null || :
@@ -40,6 +51,61 @@ check() {
     printf 'PASS %s QUIC stream over the relay\n' "$3"
 }
 
+wait_line() {
+    for _ in $(seq 1 300); do
+        if IFS= read -r line < "$1"; then return 0; fi
+        kill -0 "$2" 2>/dev/null || break
+        sleep 0.05
+    done
+    cat "$3" >&2
+    return 1
+}
+
+open_fixture() {
+    ready="$scratch/$1.address"
+    log="$scratch/$1.listener"
+    : > "$ready"
+    timeout 25 "$2" "$3" > "$ready" 2> "$log" &
+    listener=$!
+    wait_line "$ready" "$listener" "$log"
+    address=$line
+}
+
+finish_fixture() {
+    if ! wait "$listener"; then
+        cat "$log" >&2
+        return 1
+    fi
+    listener=
+}
+
+endpoint_direct() {
+    open_fixture "endpoint-$1" "$shared" "$1"
+    timeout 14 "$native" dial-endpoint-direct "$2" "${address##*:}"
+    finish_fixture
+}
+
+endpoint_relay() {
+    open_fixture "$1" "$shared" listen
+    bridge_ready="$scratch/$1.bridge-ready"
+    bridge_log="$scratch/$1.bridge-log"
+    : > "$bridge_ready"
+    timeout 24 "$native" bridge-endpoint "$url" "${address##*:}" > "$bridge_ready" 2> "$bridge_log" &
+    bridge=$!
+    wait_line "$bridge_ready" "$bridge" "$bridge_log"
+    test "$line" = 'endpoint relay bridge ready'
+    timeout 14 "$native" "$1" "$2"
+    finish_fixture
+    stop_bridge
+}
+
+endpoint_listen() {
+    open_fixture "$1" "$native" "$1"
+    timeout 20 "$shared_dial" dial "$address"
+    finish_fixture
+    tail -n +2 "$ready"
+}
+
 "$native" endpoint-plan
 check "$native" "$native" bend-to-bend
 check "$native" "$native" fallback dial-fallback
@@ -66,4 +132,17 @@ fi
 if [ -n "$pkarr_url" ] && [ -n "$dns_port" ]; then
     timeout 10 "$native" publish-route "$pkarr_url" "$url"
     check "$native" "$native" dns dial-dns "$dns_port"
+fi
+if [ -n "$shared" ]; then
+    endpoint_direct listen 127.0.0.1
+    endpoint_direct listen6 ::1
+    endpoint_relay dial-endpoint-fallback "$url"
+    endpoint_relay dial-endpoint-pkarr "$url"
+    if [ -n "$pkarr_url" ] && [ -n "$dns_port" ]; then
+        endpoint_relay dial-endpoint-dns "$dns_port"
+    fi
+fi
+if [ -n "$shared_dial" ]; then
+    endpoint_listen listen-endpoint
+    endpoint_listen listen6-endpoint
 fi

@@ -3,6 +3,7 @@ import ./direct.bend as Direct
 import ./discovery.bend as Dns
 import ./pkarr.bend as Pkarr
 import ./relay_quic.bend as Path
+import ./quic_datagram.bend as Quic
 
 type Address is Data:
   IpAddress{host: String, port: U32}
@@ -24,6 +25,21 @@ def Connected() -> Type:
 
 def Outcome() -> Type:
   Result<&1,&1,U32 & String,Connected()>
+
+def Transport(-C: Type) -> Type:
+  C & Maybe<&1,Path.Bridge>
+
+def TransportResult(-C: Type) -> Type:
+  Result<&1,&1,U32 & String,Transport(C)>
+
+def Dialer(-C: Type) -> Type:
+  Address -> Identity -> U32 -> IO(Result<&1,&1,U32 & String,C>)
+
+def Connection() -> Type:
+  Transport(Quic.DatagramConnection)
+
+def ConnectResult() -> Type:
+  TransportResult(Quic.DatagramConnection)
 
 def ascii(bytes: List<&2,U32>) -> Bool:
   match bytes:
@@ -174,84 +190,206 @@ def routes(records: List<&2,Dns.Attribute>) -> Routes:
     case Nil{}:
       DialRoutes{[],[]}
 
-def try_relay(url: String, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
-  PeerKeys{+seed,+peer,alpn} = identity
-  HandshakeTimeouts{_,relay_ms} = timeouts
-  do IO<Outcome()>:
-    bridge : Result<&1,&1,U32 & String,Path.Bridge & U32> <- Path.start(url,seed,peer,0)
-    Path.dial_attached(bridge,seed,peer,alpn,relay_ms)
-
-def try_direct(address: Address, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
+def direct_stream(address: Address, identity: Identity, ms: U32)
+    -> IO(Result<&1,&1,U32 & String,Direct.QuicConnection>):
   IpAddress{host,port} = address
   PeerKeys{seed,peer,alpn} = identity
-  HandshakeTimeouts{direct_ms,_} = timeouts
-  do IO<Outcome()>:
-    conn : Result<&1,&1,U32 & String,Direct.QuicConnection> <-
-      Direct.quic_connect_with_timeout(host,port,seed,peer,alpn,direct_ms)
-    return Result.map(&1,&1,U32 & String,Direct.QuicConnection,Connected(),c => (c,None{}),conn)
+  Direct.quic_connect_with_timeout(host,port,seed,peer,alpn,ms)
 
-def continue_dial(outcome: Outcome(), next: (U32 & String) -> IO(Outcome())) -> IO(Outcome()):
+def direct_quic(address: Address, identity: Identity, ms: U32)
+    -> IO(Result<&1,&1,U32 & String,Quic.DatagramConnection>):
+  IpAddress{host,port} = address
+  PeerKeys{seed,peer,alpn} = identity
+  Quic.connect(host,port,seed,peer,alpn,U32.to_nat(ms))
+
+def attach_connection(-C: Type, outcome: Result<&1,&1,U32 & String,C>, bridge: Path.Bridge)
+    -> IO(TransportResult(C)):
   match outcome:
     case Done{conn}:
-      IO.pure(Outcome(),Done{conn})
+      IO.pure(TransportResult(C),Done{(conn,Some{bridge})})
+    case Fail{error}:
+      do IO<TransportResult(C)>:
+        _ : Result<&1,&1,U32 & String,Unit> <- Path.stop(bridge)
+        return Fail{error}
+
+def connect_bridge(~C: Type, ~attempt: Dialer(C), outcome: Result<&1,&1,U32 & String,Path.Bridge & U32>,
+    identity: Identity, ms: U32) -> IO(TransportResult(C)):
+  match outcome:
+    case Done{(bridge,port)}:
+      do IO<TransportResult(C)>:
+        result : Result<&1,&1,U32 & String,C> <- attempt(IpAddress{"127.0.0.1",port},identity,ms)
+        attach_connection(C,result,bridge)
+    case Fail{error}:
+      IO.pure(TransportResult(C),Fail{error})
+
+def try_relay(~C: Type, ~attempt: Dialer(C), url: String, +identity: Identity, ms: U32) -> IO(TransportResult(C)):
+  PeerKeys{seed,peer,_} = identity
+  do IO<TransportResult(C)>:
+    path : Result<&1,&1,U32 & String,Path.Bridge & U32> <- Path.start(url,seed,peer,0)
+    connect_bridge(~C,~attempt,path,identity,ms)
+
+def continue_dial(-C: Type, outcome: TransportResult(C), next: (U32 & String) -> IO(TransportResult(C)))
+    -> IO(TransportResult(C)):
+  match outcome:
+    case Done{conn}:
+      IO.pure(TransportResult(C),Done{conn})
     case Fail{error}:
       next(error)
 
-def try_relays(urls: List<&2,String>, +identity: Identity, +timeouts: Timeouts, last: U32 & String) -> IO(Outcome()):
+def try_relays(~C: Type, ~attempt: Dialer(C), urls: List<&2,String>, +identity: Identity, +ms: U32,
+    last: U32 & String) -> IO(TransportResult(C)):
   match urls:
     case Nil{}:
-      IO.pure(Outcome(),Fail{last})
+      IO.pure(TransportResult(C),Fail{last})
     case Con{url,rest}:
-      do IO<Outcome()>:
-        outcome : Outcome() <- try_relay(url,identity,timeouts)
-        continue_dial(outcome,error => try_relays(rest,identity,timeouts,error))
+      do IO<TransportResult(C)>:
+        outcome : TransportResult(C) <- try_relay(~C,~attempt,url,identity,ms)
+        continue_dial(C,outcome,error => try_relays(~C,~attempt,rest,identity,ms,error))
 
-def try_ips(ips: List<&2,Address>, urls: List<&2,String>, +identity: Identity, +timeouts: Timeouts,
-    last: U32 & String) -> IO(Outcome()):
+def direct_timeout(timeouts: Timeouts) -> U32:
+  HandshakeTimeouts{ms,_} = timeouts
+  ms
+
+def try_ips(~C: Type, ~attempt: Dialer(C), ips: List<&2,Address>, urls: List<&2,String>, +identity: Identity,
+    +timeouts: Timeouts, last: U32 & String) -> IO(TransportResult(C)):
   match ips:
     case Nil{}:
-      try_relays(urls,identity,timeouts,last)
+      HandshakeTimeouts{_,relay_ms} = timeouts
+      try_relays(~C,~attempt,urls,identity,relay_ms,last)
     case Con{ip,rest}:
-      do IO<Outcome()>:
-        outcome : Outcome() <- try_direct(ip,identity,timeouts)
-        continue_dial(outcome,error => try_ips(rest,urls,identity,timeouts,error))
+      do IO<TransportResult(C)>:
+        conn : Result<&1,&1,U32 & String,C> <- attempt(ip,identity,direct_timeout(timeouts))
+        continue_dial(C,Result.map(&1,&1,U32 & String,C,Transport(C),c => (c,None{}),conn),
+          error => try_ips(~C,~attempt,rest,urls,identity,timeouts,error))
+
+def dial_plan(~C: Type, ~attempt: Dialer(C), plan: Routes, identity: Identity, timeouts: Timeouts)
+    -> IO(TransportResult(C)):
+  DialRoutes{ips,urls} = plan
+  try_ips(~C,~attempt,ips,urls,identity,timeouts,(1,"endpoint has no usable direct address or relay"))
 
 def dial_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
-  DialRoutes{ips,urls} = plan
-  try_ips(ips,urls,identity,timeouts,(1,"endpoint has no usable direct address or relay"))
+  dial_plan(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)
 
-# Try published direct addresses, followed by published relays. QUIC pins
-# the peer to the endpoint key on either kind of path.
 def dial(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
   dial_routes(routes(records),identity,timeouts)
 
-def from_dns(reply: Result<&1,&1,U32 & String,Dns.Reply>, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
+# Try each published direct address before opening a relay path. The returned
+# QUIC connection exposes both streams and application datagrams.
+def connect_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
+  dial_plan(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+
+def connect(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
+  connect_routes(routes(records),identity,timeouts)
+
+def dns_routes(reply: Result<&1,&1,U32 & String,Dns.Reply>) -> Result<&1,&1,U32 & String,Routes>:
   match reply:
     case Done{Dns.Found{records}}:
-      dial(records,identity,timeouts)
+      Done{routes(records)}
     case Done{Dns.DnsError{code}}:
-      IO.pure(Outcome(),Fail{(code,"endpoint DNS lookup returned an error")})
+      Fail{(code,"endpoint DNS lookup returned an error")}
     case Done{_}:
-      IO.pure(Outcome(),Fail{(1,"endpoint DNS lookup did not return usable records")})
+      Fail{(1,"endpoint DNS lookup did not return usable records")}
     case Fail{error}:
-      IO.pure(Outcome(),Fail{error})
+      Fail{error}
 
-def lookup_and_dial(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(Outcome()):
+def lookup_routes(identity: Identity, resolver: DnsSource) -> IO(Result<&1,&1,U32 & String,Routes>):
   PeerKeys{_,key,_} = identity
   DnsResolver{origin,host,port,ms} = resolver
-  do IO<Outcome()>:
+  do IO<Result<&1,&1,U32 & String,Routes>>:
     reply : Result<&1,&1,U32 & String,Dns.Reply> <- Dns.lookup(key,origin,host,port,ms)
-    from_dns(reply,identity,timeouts)
+    return dns_routes(reply)
 
-def from_pkarr(verified: Pkarr.Verification, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
+def pkarr_routes(verified: Pkarr.Verification) -> Result<&1,&1,U32 & String,Routes>:
   match verified:
     case Pkarr.Verified{_,records}:
-      dial(records,identity,timeouts)
+      Done{routes(records)}
     case _:
-      IO.pure(Outcome(),Fail{(1,"invalid signed Pkarr endpoint packet")})
+      Fail{(1,"invalid signed Pkarr endpoint packet")}
+
+def verify_routes(identity: Identity, packet: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Routes>):
+  PeerKeys{_,key,_} = identity
+  do IO<Result<&1,&1,U32 & String,Routes>>:
+    verified : Pkarr.Verification <- Pkarr.verify(key,packet)
+    return pkarr_routes(verified)
+
+def connect_resolved(~C: Type, ~attempt: Dialer(C), planned: Result<&1,&1,U32 & String,Routes>,
+    identity: Identity, timeouts: Timeouts) -> IO(TransportResult(C)):
+  match planned:
+    case Done{plan}:
+      dial_plan(~C,~attempt,plan,identity,timeouts)
+    case Fail{error}:
+      IO.pure(TransportResult(C),Fail{error})
+
+def from_dns(reply: Result<&1,&1,U32 & String,Dns.Reply>, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
+  connect_resolved(~Direct.QuicConnection,~direct_stream,dns_routes(reply),identity,timeouts)
+
+def lookup_and_dial(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(Outcome()):
+  do IO<Outcome()>:
+    plan : Result<&1,&1,U32 & String,Routes> <- lookup_routes(identity,resolver)
+    connect_resolved(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)
+
+def from_pkarr(verified: Pkarr.Verification, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
+  connect_resolved(~Direct.QuicConnection,~direct_stream,pkarr_routes(verified),identity,timeouts)
 
 def verify_and_dial(+identity: Identity, packet: List<&2,U32>, timeouts: Timeouts) -> IO(Outcome()):
-  PeerKeys{_,key,_} = identity
   do IO<Outcome()>:
-    verified : Pkarr.Verification <- Pkarr.verify(key,packet)
-    from_pkarr(verified,identity,timeouts)
+    plan : Result<&1,&1,U32 & String,Routes> <- verify_routes(identity,packet)
+    connect_resolved(~Direct.QuicConnection,~direct_stream,plan,identity,timeouts)
+
+def lookup_and_connect(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    plan : Result<&1,&1,U32 & String,Routes> <- lookup_routes(identity,resolver)
+    connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+
+def verify_and_connect(+identity: Identity, packet: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    plan : Result<&1,&1,U32 & String,Routes> <- verify_routes(identity,packet)
+    connect_resolved(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
+
+def keep_path(-R: Type, outcome: Quic.DatagramConnection & R, path: Maybe<&1,Path.Bridge>) -> Connection() & R:
+  (conn,value) = outcome
+  ((conn,path),value)
+
+# Run a transport operation while retaining ownership of the selected path.
+def use_connection(-R: Type, connected: Connection(), operation: Quic.DatagramConnection -> IO(Quic.DatagramConnection & R))
+    -> IO(Connection() & R):
+  (conn,path) = connected
+  do IO<Connection() & R>:
+    outcome : Quic.DatagramConnection & R <- operation(conn)
+    return keep_path(R,outcome,path)
+
+def disconnect(connected: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match connected:
+    case (conn,None{}):
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        Quic.drop_quic_datagram(conn)
+        return Done{Unit{}}
+    case (conn,Some{path}):
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        Quic.drop_quic_datagram(conn)
+        Path.stop(path)
+
+def bind(address: Address, identity: Identity) -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
+  IpAddress{host,port} = address
+  PeerKeys{seed,peer,alpn} = identity
+  Quic.bind_shared_quic(host,port,seed,peer,alpn)
+
+def accepted(listener: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>>)
+    -> Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>:
+  match listener:
+    case (owner,Done{Some{conn}}):
+      (owner,Done{Some{(conn,None{})}})
+    case (owner,Done{None{}}):
+      (owner,Done{None{}})
+    case (owner,Fail{error}):
+      (owner,Fail{error})
+
+def try_accept(listener: Quic.QuicDatagramListener)
+    -> IO(Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>):
+  do IO<Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>>:
+    outcome : Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.DatagramConnection>> <-
+      Quic.try_accept_shared_quic(listener)
+    return accepted(outcome)
+
+def close_listener(listener: Quic.QuicDatagramListener) -> IO(Unit):
+  Quic.close_shared_quic(listener)

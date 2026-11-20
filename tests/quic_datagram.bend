@@ -255,9 +255,9 @@ def release_stream(conn: Quic.DatagramConnection, id: U32) -> IO(Quic.DatagramCo
     outcome : Quic.DatagramConnection & Result<&1,&1,U32 & String,Unit> <- Quic.drop_quic_stream(conn,id)
     released(outcome)
 
-def finish_shared(incoming: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Unit):
+def finish_shared(incoming: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Quic.DatagramConnection):
   (reading,+incoming_id) = incoming
-  do IO<Unit>:
+  do IO<Quic.DatagramConnection>:
     read : Quic.DatagramConnection <- receive_stream(2500n,reading,incoming_id,[7,0,255])
     bidi_only : Quic.DatagramConnection <- release_stream(read,incoming_id)
     bidi_flushed : Quic.DatagramConnection <- stream_submit(bidi_only,FlushStream{bidi_id})
@@ -266,13 +266,11 @@ def finish_shared(incoming: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(
     queued_fin : Quic.DatagramConnection <- stream_submit(tail_sent,QueueStream{bidi_id,[],1})
     fin_sent : Quic.DatagramConnection <- stream_submit(queued_fin,FlushStream{bidi_id})
     bidi_read : Quic.DatagramConnection <- receive_stream(2500n,fin_sent,bidi_id,List.replicate(U32,70000n,18))
-    complete : Quic.DatagramConnection <- release_stream(bidi_read,bidi_id)
-    Quic.drop_quic_datagram(complete)
-    IO.print("PASS binary, empty, and burst datagrams shared one Iroh connection with bidi and uni streams")
+    release_stream(bidi_read,bidi_id)
 
-def start_shared(outgoing: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Unit):
+def start_shared(outgoing: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(Quic.DatagramConnection):
   (both,+uni_id) = outgoing
-  do IO<Unit>:
+  do IO<Quic.DatagramConnection>:
     queued : Quic.DatagramConnection <- stream_submit(both,QueueStream{bidi_id,List.replicate(U32,16384n,17),0})
     first : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.flush_quic_stream(queued,bidi_id)
     partial : Quic.DatagramConnection & U32 <- check_progress(first)
@@ -285,9 +283,9 @@ def start_shared(outgoing: Quic.DatagramConnection & U32, +bidi_id: U32) -> IO(U
     incoming : Quic.DatagramConnection & U32 <- poll_stream(2500n,reply,AcceptStream{1})
     finish_shared(incoming,bidi_id)
 
-def shared_exchange(bidi: Quic.DatagramConnection & U32) -> IO(Unit):
+def shared_exchange(bidi: Quic.DatagramConnection & U32) -> IO(Quic.DatagramConnection):
   (conn,bidi_id) = bidi
-  do IO<Unit>:
+  do IO<Quic.DatagramConnection>:
     outgoing : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,OpenStream{1})
     start_shared(outgoing,bidi_id)
 
@@ -300,28 +298,39 @@ def receive_burst(count: Nat, conn: Quic.DatagramConnection) -> IO(Quic.Datagram
         next : Quic.DatagramConnection <- receive_reply(1500n,conn,[14,255])
         receive_burst(left,next)
 
-def after_burst(conn: Quic.DatagramConnection, shared: Bool) -> IO(Unit):
-  match shared:
-    case True{}:
-      do IO<Unit>:
-        bidi : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,OpenStream{0})
-        shared_exchange(bidi)
-    case False{}:
-      do IO<Unit>:
-        Quic.drop_quic_datagram(conn)
-        IO.print("PASS binary, empty, and burst datagrams exchanged with the upstream Iroh application")
+def echo_datagrams(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    received : Quic.DatagramConnection <- receive_reply(1500n,conn,[255,0,17,128,1])
+    sent : Quic.DatagramConnection <- send_datagram(1500n,received,[])
+    empty : Quic.DatagramConnection <- receive_reply(1500n,sent,[])
+    burst : Quic.DatagramConnection <- send_datagram(1500n,empty,[1])
+    receive_burst(24n,burst)
+
+def open_shared(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    bidi : Quic.DatagramConnection & U32 <- poll_stream(2500n,conn,OpenStream{0})
+    shared_exchange(bidi)
+
+def roundtrip(conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    sent : Quic.DatagramConnection <- send_datagram(1500n,conn,[0,98,101,110,100,255])
+    received : Quic.DatagramConnection <- echo_datagrams(sent)
+    open_shared(received)
 
 def exchange_result(conn: Quic.DatagramConnection, echo: Bool, shared: Bool) -> IO(Unit):
-  match echo:
-    case True{}:
+  match echo shared:
+    case True{} True{}:
       do IO<Unit>:
-        received : Quic.DatagramConnection <- receive_reply(1500n,conn,[255,0,17,128,1])
-        sent : Quic.DatagramConnection <- send_datagram(1500n,received,[])
-        empty : Quic.DatagramConnection <- receive_reply(1500n,sent,[])
-        burst : Quic.DatagramConnection <- send_datagram(1500n,empty,[1])
-        burst_done : Quic.DatagramConnection <- receive_burst(24n,burst)
-        after_burst(burst_done,shared)
-    case False{}:
+        burst : Quic.DatagramConnection <- echo_datagrams(conn)
+        finished : Quic.DatagramConnection <- open_shared(burst)
+        Quic.drop_quic_datagram(finished)
+        IO.print("PASS binary, empty, and burst datagrams shared one Iroh connection with bidi and uni streams")
+    case True{} False{}:
+      do IO<Unit>:
+        burst : Quic.DatagramConnection <- echo_datagrams(conn)
+        Quic.drop_quic_datagram(burst)
+        IO.print("PASS binary, empty, and burst datagrams exchanged with the upstream Iroh application")
+    case False{} _:
       wait_ack(1500n,conn)
 
 def exchange(conn: Quic.DatagramConnection, echo: Bool, shared: Bool) -> IO(Unit):

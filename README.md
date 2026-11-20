@@ -75,12 +75,14 @@ client requires a libcurl build with WebSocket support.
    Bend server with WS and WSS. Set
    `UPSTREAM_RELAY_CLIENT` to an Iroh client fixture that accepts a relay
    base URL and an optional CA certificate in DER format.
-   Run `make check-relay-quic` with the same `RELAY_URL` to exchange an
-   authenticated QUIC stream through the relay. An optional fixture at
+   Run `make check-relay-quic` with the same `RELAY_URL` and the ngtcp2
+   dependencies above to exercise QUIC through the relay. An optional fixture at
    `UPSTREAM_RELAY_QUIC` accepts `listen RELAY_URL` and `dial RELAY_URL` and
    uses the identity keys and ALPN from [the direct test](tests/direct.bend).
-   Set `PKARR_URL` and `DISCOVERY_DNS_PORT` to exercise publication and dial
-   through a local Iroh DNS server.
+   Set `UPSTREAM_QUIC_SHARED` and `UPSTREAM_QUIC_SHARED_DIAL` to test the
+   endpoint API over direct paths and the relay. Set `PKARR_URL` and
+   `DISCOVERY_DNS_PORT` to exercise publication and dialing through an Iroh
+   DNS server configured for `irohdns.example.`
 5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
    and run `make check-gpu` to decode 16,384 relay ping frames on the device.
 
@@ -195,11 +197,15 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   follows referrals in XOR-distance order, and selects the newest verified
   record. A search makes up to 64 sequential queries. Publishing returns the
   count of acknowledgements from distinct peers, up to eight.
-- [Endpoint dialing](src/endpoint.bend) takes the local secret, peer endpoint
-  ID, and ALPN. It tries the direct addresses in the endpoint records, then
-  the published relays. `lookup_and_dial` fetches the records from a caller's
-  DNS resolver. `verify_and_dial` verifies a signed Pkarr envelope against
-  the peer's key before using the records.
+- [Endpoint](src/endpoint.bend) opens one connection for streams and
+  datagrams. `connect` and `connect_routes` try the supplied direct
+  addresses before relays. `lookup_and_connect` fetches endpoint records
+  from a DNS resolver. `verify_and_connect` verifies a signed Pkarr envelope
+  against the peer's key before using its routes. `use_connection` runs a
+  QUIC operation while retaining the path. `disconnect` closes QUIC and
+  releases the path. `bind` and `try_accept` return the same connection
+  type for inbound direct connections. The stream-only `dial` interfaces
+  remain available.
 
 
 ## Conformance scope
@@ -214,6 +220,6 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits throttle each connection at the relay message layer, support live updates, and send v2 notices. Full values for repeated custom headers and transport-byte accounting are pending. |
-| Public endpoint lifecycle and QUIC features | Bend and Iroh exchange RFC 9221 application datagrams alongside bidirectional and unidirectional streams on the same authenticated connection in both dialing directions over IPv4 and IPv6. A Bend listener accepted two overlapping Iroh connections, rejected wrong keys and ALPN, and kept both sessions usable after it stopped accepting new connections. Integration into the main endpoint interface, 0-RTT, multipath, and stream affinity are pending. |
+| Public endpoint lifecycle and QUIC features | Bend and Iroh exchange RFC 9221 application datagrams alongside bidirectional and unidirectional streams on the same authenticated connection in both dialing directions over IPv4 and IPv6. The endpoint API exposes this connection for direct dialing, listening, and relay dialing. A Bend listener accepted two overlapping Iroh connections, rejected wrong keys and ALPN, and kept both sessions usable after it stopped accepting new connections. 0-RTT, multipath, and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
-| Connectivity | Bend endpoints exchanged pinned QUIC streams through the upstream Iroh relay over WS and WSS. Bend and Iroh QUIC engines also exchanged streams in both directions using the Bend relay bridge. Initial connection setup tries direct addresses from DNS or verified Pkarr records and falls back to a published relay. A local upstream Iroh DNS server supplied the published address data for a live relayed exchange. NAT traversal, adaptive path selection, and path migration are pending. |
+| Connectivity | The endpoint exchanged streams and datagrams with Iroh 1.5.0 over the upstream WS and WSS relay using timed direct fallback, verified Pkarr records, and an upstream Iroh DNS resolver. Bend and Iroh QUIC engines also exchanged streams in both directions using the relay bridge. NAT traversal, adaptive path selection, and path migration are pending. |
