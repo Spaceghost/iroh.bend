@@ -26,7 +26,7 @@ local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
 local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
 local native_sack_t <cimport,nodecl,codename 'picoquic_sack_list_t'> = @record{}
 local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer,send_queue:pointer,
-  remote_error:uint64,remote_stop_error:uint64,fin_sent:cuint,sent_offset:uint64,sack_list:native_sack_t}
+  remote_error:uint64,remote_stop_error:uint64,fin_sent:cuint,reset_acked:cuint,sent_offset:uint64,sack_list:native_sack_t}
 local packet_context_t <cimport,nodecl,codename 'picoquic_packet_context_t'> = @record{}
 local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{
   unique_path_id:uint64,send_mtu:csize,nb_retransmit:uint64,pkt_ctx:packet_context_t
@@ -303,7 +303,7 @@ local names = {
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'multipath_micros', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
-  'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_fin_acked', 'drop_multipath_stream', 'close_multipath',
+  'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_close_acked', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
@@ -361,7 +361,7 @@ local iroh_mp_assign_stream_path: uint32 <cimport,nodecl>
 local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_cancel_multipath_stream_half: uint32 <cimport,nodecl>
-local iroh_mp_multipath_stream_fin_acked: uint32 <cimport,nodecl>
+local iroh_mp_multipath_stream_close_acked: uint32 <cimport,nodecl>
 local iroh_mp_peer_multipath_stream_code: uint32 <cimport,nodecl>
 local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
@@ -4153,17 +4153,23 @@ local function acknowledged_fin(conn: *Connection, stream: *Stream): boolean
     picoquic_check_sack_list(&native.sack_list,0,native.sent_offset) ~= 0)
 end
 
-local function fin_acked(e: Env, conn: *Connection, id: Term): Term
+local function close_acked(e: Env, conn: *Connection, id: Term, reset: Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   local stream = find_stream(conn,id)
   if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
   if not has_stream_half(stream,0) then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
+  if reset ~= 0 then
+    if not stream.tx_reset then return io_done(e,0) end
+    local native = picoquic_find_stream(conn.cnx,stream.id)
+    -- The engine removes a reset send stream only after the RESET_STREAM ACK.
+    return io_done(e,(native == nilptr or native.reset_acked ~= 0) and 1 or 0)
+  end
   if stream.stop or stream.tx_reset then return io_fail(e,EPIPE,'QUIC stream send half was cancelled') end
   return io_done(e,acknowledged_fin(conn,stream) and 1 or 0)
 end
 
-local function fin_acked_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return io_tup(e,args[0],fin_acked(e,find_connection(e,args[0]),args[1]))
+local function close_acked_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],close_acked(e,find_connection(e,args[0]),args[1],args[2]))
 end
 
 local function cancel_half(e: Env, conn: *Connection, id: Term, half: Term, high: Term, low: Term): Term
@@ -4287,7 +4293,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_write_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_stream,write_run) end
   if iroh_mp_read_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_read_multipath_stream,read_run) end
   if iroh_mp_cancel_multipath_stream_half ~= 0xffffffff then io_eff(iroh_mp_cancel_multipath_stream_half,cancel_half_run) end
-  if iroh_mp_multipath_stream_fin_acked ~= 0xffffffff then io_eff(iroh_mp_multipath_stream_fin_acked,fin_acked_run) end
+  if iroh_mp_multipath_stream_close_acked ~= 0xffffffff then io_eff(iroh_mp_multipath_stream_close_acked,close_acked_run) end
   if iroh_mp_peer_multipath_stream_code ~= 0xffffffff then io_eff(iroh_mp_peer_multipath_stream_code,peer_code_run) end
   if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end

@@ -363,6 +363,14 @@ def multipath_stream_stop_code(conn: MultipathConnection, stream: U32)
 # One after the peer has acknowledged every byte and FIN. Zero while pending.
 def multipath_stream_fin_acked(conn: MultipathConnection, stream: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  multipath_stream_close_acked(conn,stream,0)
+
+def multipath_stream_reset_acked(conn: MultipathConnection, stream: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  multipath_stream_close_acked(conn,stream,1)
+
+def multipath_stream_close_acked(conn: MultipathConnection, stream: U32, reset: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
 def drop_multipath_stream(conn: MultipathConnection, stream: U32)
