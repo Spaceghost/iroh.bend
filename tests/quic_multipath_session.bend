@@ -89,22 +89,57 @@ def first(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,
         Quic.close_multipath(conn)
         IO.die(Unit,1,error)
 
-def reported(conn: Quic.MultipathConnection, +expected: U32, actual: U32, good: Bool) -> IO(Unit):
-  match good:
+def confirm_datagram(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>) -> IO(Unit):
+  match result:
+    case (conn,Done{_}):
+      Quic.close_multipath(conn)
+    case (conn,Fail{(_,error)}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.die(Unit,1,error)
+
+def finish_early(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, status: U32) -> IO(Unit):
+  match result:
+    case (conn,Done{1}):
+      do IO<Unit>:
+        progress : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
+        confirm_datagram(progress)
+        IO.print("PASS authenticated Picoquic early data status " ++ U32.show(status))
+    case (conn,Done{_}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.die(Unit,1,"could not queue the application datagram after authentication")
+    case (conn,Fail{(_,error)}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.die(Unit,1,error)
+
+def report_success(conn: Quic.MultipathConnection, actual: U32, early: Bool) -> IO(Unit):
+  match early:
     case True{}:
+      do IO<Unit>:
+        marker : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+          Quic.write_multipath_datagram(conn,[6,0,255])
+        finish_early(marker,actual)
+    case False{}:
       do IO<Unit>:
         Quic.close_multipath(conn)
         IO.print("PASS authenticated Picoquic TLS resumption status " ++ U32.show(actual))
+
+def reported(conn: Quic.MultipathConnection, +expected: U32, actual: U32, early: Bool, good: Bool) -> IO(Unit):
+  match good:
+    case True{}:
+      report_success(conn,actual,early)
     case False{}:
       do IO<Unit>:
         Quic.close_multipath(conn)
         IO.die(Unit,1,"expected resumption status " ++ U32.show(expected) ++ ", got " ++ U32.show(actual))
 
-def check_resume(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>, +expected: U32,
+def check_resume(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>, +expected: U32, early: Bool,
     retry: Quic.MultipathConnection -> IO(Unit)) -> IO(Unit):
   match result:
     case (conn,Done{Some{+status}}):
-      reported(conn,expected,status,U32.is_eq(status,expected))
+      reported(conn,expected,status,early,U32.is_eq(status,expected))
     case (conn,Done{None{}}):
       do IO<Unit>:
         IO.sleep(1)
@@ -114,20 +149,28 @@ def check_resume(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,Ma
         Quic.close_multipath(conn)
         IO.die(Unit,1,error)
 
-def resume_step(progress: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, expected: U32,
+def check_status(conn: Quic.MultipathConnection, early: Bool)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  match early:
+    case True{}:
+      Quic.multipath_early_status(conn)
+    case False{}:
+      Quic.multipath_resumption_status(conn)
+
+def resume_step(progress: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, expected: U32, +early: Bool,
     retry: Quic.MultipathConnection -> IO(Unit)) -> IO(Unit):
   match progress:
     case (conn,Done{_}):
       do IO<Unit>:
         result : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>> <-
-          Quic.multipath_resumption_status(conn)
-        check_resume(result,expected,retry)
+          check_status(conn,early)
+        check_resume(result,expected,early,retry)
     case (conn,Fail{(_,error)}):
       do IO<Unit>:
         Quic.close_multipath(conn)
         IO.die(Unit,1,error)
 
-def wait_resume(fuel: Nat, conn: Quic.MultipathConnection, +expected: U32) -> IO(Unit):
+def wait_resume(fuel: Nat, conn: Quic.MultipathConnection, +expected: U32, +early: Bool) -> IO(Unit):
   match fuel:
     case 0n:
       do IO<Unit>:
@@ -136,7 +179,7 @@ def wait_resume(fuel: Nat, conn: Quic.MultipathConnection, +expected: U32) -> IO
     case 1n+left:
       do IO<Unit>:
         progress : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
-        resume_step(progress,expected,next => wait_resume(left,next,expected))
+        resume_step(progress,expected,early,next => wait_resume(left,next,expected,early))
 
 def local_seed(mode: U32) -> List<&2,U32>:
   match mode:
@@ -178,7 +221,7 @@ def expected_status(mode: U32) -> U32:
 def check_start(result: Quic.ConnectResult(), expected: U32, deny: Bool) -> IO(Unit):
   match result deny:
     case Done{conn} False{}:
-      wait_resume(4000n,conn,expected)
+      wait_resume(4000n,conn,expected,False{})
     case Done{conn} True{}:
       do IO<Unit>:
         Quic.close_multipath(conn)
@@ -188,11 +231,33 @@ def check_start(result: Quic.ConnectResult(), expected: U32, deny: Bool) -> IO(U
     case Fail{(_,error)} _:
       IO.die(Unit,1,error)
 
-def resume(host: String, port: U32, ticket: Quic.MultipathSession, +expected: U32) -> IO(Unit):
-  do IO<Unit>:
-    started : Quic.ConnectResult() <- Quic.start_multipath_resume(
-      host,port,local_seed(expected),peer_key(expected),offered_alpn(expected),ticket)
-    check_start(started,expected_status(expected),U32.is_ge(expected,2) && U32.is_le(expected,4))
+def check_early_write(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, expected: U32) -> IO(Unit):
+  match result:
+    case (conn,Done{1}):
+      wait_resume(4000n,conn,expected,True{})
+    case (conn,Done{_}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.die(Unit,1,"the first flight did not carry the 0-RTT datagram")
+    case (conn,Fail{(_,error)}):
+      do IO<Unit>:
+        Quic.close_multipath(conn)
+        IO.die(Unit,1,error)
+
+def resume(host: String, port: U32, ticket: Quic.MultipathSession, +expected: U32, early: Bool) -> IO(Unit):
+  match early:
+    case True{}:
+      do IO<Unit>:
+        conn : Quic.MultipathConnection <- IO.try(Quic.MultipathConnection,Quic.start_multipath_early(
+          host,port,local_seed(expected),peer_key(expected),offered_alpn(expected),ticket))
+        sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+          Quic.write_multipath_early_datagram(conn,[4,0,255])
+        check_early_write(sent,U32.sub(7,expected))
+    case False{}:
+      do IO<Unit>:
+        started : Quic.ConnectResult() <- Quic.start_multipath_resume(
+          host,port,local_seed(expected),peer_key(expected),offered_alpn(expected),ticket)
+        check_start(started,expected_status(expected),U32.is_ge(expected,2) && U32.is_le(expected,4))
 
 def dial(+host: String, port: U32, target: U32, +expected: U32) -> IO(Unit):
   do IO<Unit>:
@@ -200,7 +265,7 @@ def dial(+host: String, port: U32, target: U32, +expected: U32) -> IO(Unit):
       Quic.start_multipath_bytes(host,port,List.replicate(U32,32n,73),peer(),warm_alpn(expected)))
     session : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathSession>> <-
       Quic.take_multipath_session(conn)
-    first(session,ticket => resume(host,target,ticket,expected))
+    first(session,ticket => resume(host,target,ticket,expected,U32.is_ge(expected,6)))
 
 def numbers(port: Maybe<&2,U32>, target: Maybe<&2,U32>, expected: Maybe<&2,U32>, host: String) -> IO(Unit):
   match port target expected:

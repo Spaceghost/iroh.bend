@@ -32,17 +32,26 @@ check() {
         return 1
     fi
     IFS=' ' read -r warm target < "$work/$mode.address"
-    timeout 12 "$client" "$host" "${warm##*:}" "${target##*:}" "$resume"
-    wait "$pid"
+    if ! timeout 12 "$client" "$host" "${warm##*:}" "${target##*:}" "$resume" || ! wait "$pid"; then
+        cat "$work/$mode.log" >&2
+        return 1
+    fi
     pid=
 }
 
-check listen 127.0.0.1 1
-check listen6 ::1 1
-check listen-binary 127.0.0.1 5
-check listen-rotated 127.0.0.1 0
-check listen6-rotated ::1 0
-check listen-mismatch 127.0.0.1 2
-check listen-mismatch 127.0.0.1 3
-check listen-mismatch 127.0.0.1 4
+if [ "${3:-}" = --early ]; then
+    check listen-early 127.0.0.1 6
+    check listen-early6 ::1 6
+    check listen-early-rotated 127.0.0.1 7
+    check listen-early6-rotated ::1 7
+else
+    check listen 127.0.0.1 1
+    check listen6 ::1 1
+    check listen-binary 127.0.0.1 5
+    check listen-rotated 127.0.0.1 0
+    check listen6-rotated ::1 0
+    check listen-mismatch 127.0.0.1 2
+    check listen-mismatch 127.0.0.1 3
+    check listen-mismatch 127.0.0.1 4
+fi
 printf 'QUIC session logs in %s\n' "$work"

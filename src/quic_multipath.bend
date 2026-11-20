@@ -53,6 +53,16 @@ def start_multipath_resume(host: String, port: U32, seed: List<&2,U32>, peer: Li
     alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
 
+# Opt in to sending replay-safe datagrams before the handshake completes.
+def start_multipath_early(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
+# None while handshaking. After authentication, 1 means TLS accepted early data.
+def multipath_early_status(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  import "./quic_multipath.c"
+
 # None while handshaking. After authentication, 1 means TLS resumed.
 def multipath_resumption_status(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
@@ -103,6 +113,35 @@ def multipath_datagram_limit(conn: MultipathConnection)
 def write_multipath_datagram(conn: MultipathConnection, bytes: List<&2,U32>)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
+
+def write_multipath_early_frame(conn: MultipathConnection, frame: List<&2,U32>)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+def early_datagram_frame(+size: U32, bytes: List<&2,U32>, short: Bool) -> List<&2,U32>:
+  match short:
+    case True{}:
+      Con{49,Con{size,bytes}}
+    case False{}:
+      Con{49,Con{U32.or(64,U32.shrn(size,8n)),Con{U32.and(size,255),bytes}}}
+
+def checked_early_datagram(conn: MultipathConnection, bytes: List<&2,U32>, length: Nat, fits: Bool)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  match fits:
+    case True{}:
+      +size = U32.from_nat(length)
+      write_multipath_early_frame(conn,early_datagram_frame(size,bytes,U32.is_lt(size,64)))
+    case False{}:
+      IO.pure(MultipathConnection & Result<&1,&1,U32 & String,U32>,
+        (conn,Fail{(1,"early QUIC datagram exceeds packet capacity")}))
+
+# Call immediately after start_multipath_early, before stepping the connection.
+# 1 means packetized. 0 means no packet included this datagram.
+# QUIC datagrams can be lost and rejected early datagrams are never retried.
+def write_multipath_early_datagram(conn: MultipathConnection, +bytes: List<&2,U32>)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  +length = List.length(&2,U32,bytes)
+  checked_early_datagram(conn,bytes,length,Nat.is_lt(length,16384n))
 
 # An empty received datagram is Some{[]}.
 def read_multipath_datagram(conn: MultipathConnection)
