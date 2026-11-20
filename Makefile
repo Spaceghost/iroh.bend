@@ -1,9 +1,9 @@
 BEND ?= bend
 BUILD ?= build
 
-.PHONY: check check-gpu check-dns-tcp check-relay-websocket
+.PHONY: check check-gpu check-dns-tcp check-relay-websocket check-relay-http
 
-check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate check-relay-websocket
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate check-relay-websocket check-relay-http
 	$(BUILD)/iroh-bend-check
 	$(BUILD)/iroh-bend-handshake
 	$(BUILD)/iroh-bend-discovery
@@ -32,6 +32,13 @@ $(BUILD)/iroh-bend-websocket: tests/relay_websocket.bend src/relay_websocket.ben
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_websocket.bend -o $@
 
+check-relay-http: $(BUILD)/iroh-bend-relay-http
+	$(BUILD)/iroh-bend-relay-http
+
+$(BUILD)/iroh-bend-relay-http: tests/relay_http.bend src/relay_http.bend src/relay_websocket.bend src/relay.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_http.bend -o $@
+
 check-dns-tcp: $(BUILD)/iroh-bend-discovery
 	python3 tests/discovery_tcp.py $(BUILD)/iroh-bend-discovery
 
@@ -46,6 +53,23 @@ NELUA ?= nelua
 CLANG ?= clang
 PKG_CONFIG ?= pkg-config
 UPSTREAM ?= iroh-upstream-peer
+
+.PHONY: check-relay-http-accept
+
+check-relay-http-accept: $(BUILD)/iroh-bend-relay-http-accept
+	$(BUILD)/iroh-bend-relay-http-accept
+
+$(BUILD)/relay-http-accept.c: tests/relay_http_accept.bend src/relay_http.bend src/relay_http_accept.bend src/relay_http_accept.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/relay-http-accept-stage/src" "$(BUILD)/relay-http-accept-stage/tests"
+	cp src/relay_http.bend src/relay_http_accept.bend "$(BUILD)/relay-http-accept-stage/src/"
+	cp tests/relay_http_accept.bend "$(BUILD)/relay-http-accept-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/relay_http_accept.nelua \
+		"$(abspath $(BUILD)/relay-http-accept-stage/src/relay_http_accept.c)"
+	cd "$(BUILD)/relay-http-accept-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_http_accept.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-relay-http-accept: $(BUILD)/relay-http-accept.c
+	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl) $< \
+		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl)
 
 .PHONY: check-direct
 

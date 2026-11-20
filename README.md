@@ -19,7 +19,11 @@ client requires a libcurl build with WebSocket support.
    framing, BLAKE3 challenge vectors, and DNS query and TXT vectors. It also
    exercises the [Bend WebSocket codec](src/relay_websocket.bend) with partial
    reads, fragmented messages, interleaved control frames, and size limits.
-   The live relay still uses libwebsockets for framing.
+   The [Bend HTTP parser](src/relay_http.bend) is checked against split
+   upgrade requests, repeated fields, and coalesced WebSocket bytes.
+   Run `make check-relay-http-accept` to check the RFC 6455 accept digest
+   and Iroh subprotocol response with Nelua and OpenSSL. The live relay
+   still uses libwebsockets for upgrades and framing.
    Run `make check-dns-tcp` with Python 3 for the loopback DNS fallback test.
 2. Run `make check-relay-auth` and `make check-pkarr` for Ed25519 challenge and TLS-exporter proofs,
    canonical Pkarr signing, and rejection of tampered packets and wrong keys.

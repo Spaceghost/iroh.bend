@@ -1,0 +1,59 @@
+-- OpenSSL primitives for RFC 6455's WebSocket accept challenge.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<openssl/evp.h>'
+## cinclude '<errno.h>'
+##[[
+for _, name in ipairs{'digest_accept','Con'} do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_http_%s CID(%s)\n#else\n#define iroh_http_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_http_digest_accept: uint32 <cimport,nodecl>
+local iroh_http_Con: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, effect: Effect) <cimport,nodecl> end
+local function io_list(e: Env, p: cstring, n: uint64): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]uint64, t: Term): uint64 <cimport,nodecl> end
+local function EVP_Q_digest(ctx: pointer, name: cstring, props: cstring, data: pointer,
+    len: csize, digest: *cuchar, digest_len: *csize): cint <cimport,nodecl> end
+local function EVP_EncodeBlock(out: *cuchar, input: *cuchar, len: cint): cint <cimport,nodecl> end
+
+-- The request head permits at most 32 KiB plus the fixed RFC GUID.
+local MAX_MATERIAL <comptime> = 32804
+local function digest_accept(e: Env, args: *[0]Term, work: *IoWork): Term
+  local input: [MAX_MATERIAL]cuchar
+  local size: csize = 0
+  local item = args[0]
+  while term_aux(item) == iroh_http_Con do
+    local at = term_peek(e.mem,item)
+    local value = e.mem[at]
+    if size >= MAX_MATERIAL or value > 255 then
+      return io_fail(e,EINVAL,'invalid WebSocket accept challenge')
+    end
+    input[size] = (@cuchar)(value)
+    size = size + 1
+    item = e.mem[at + 1]
+  end
+  local digest: [20]cuchar
+  local digest_len: csize
+  local encoded: [29]cuchar
+  if EVP_Q_digest(nilptr,'SHA1',nilptr,&input[0],size,&digest[0],&digest_len) ~= 1 or digest_len ~= 20 or
+      EVP_EncodeBlock(&encoded[0],&digest[0],20) ~= 28 then
+    return io_fail(e,EIO,'WebSocket accept digest failed')
+  end
+  return io_done(e,io_list(e,(@cstring)(&encoded[0]),28))
+end
+
+local function register() <cexport,codename 'iroh_register_relay_http_accept',cattribute 'constructor'>
+  if iroh_http_digest_accept ~= 0xffffffff then io_eff(iroh_http_digest_accept,digest_accept) end
+end
