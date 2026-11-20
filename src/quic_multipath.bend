@@ -9,6 +9,9 @@ type MultipathListener is Type:
 type MultipathSession is Type:
   MultipathSession{id: U32}
 
+type MultipathEarlyStream is Type:
+  MultipathEarlyStream{id: U32}
+
 type MultipathRead is Data:
   MultipathReadPending{}
   MultipathReadFin{}
@@ -53,7 +56,7 @@ def start_multipath_resume(host: String, port: U32, seed: List<&2,U32>, peer: Li
     alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
 
-# Opt in to sending replay-safe datagrams before the handshake completes.
+# Opt in to sending replay-safe application data before the handshake completes.
 def start_multipath_early(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
     alpn: List<&2,U32>, session: MultipathSession) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
@@ -150,6 +153,21 @@ def read_multipath_datagram(conn: MultipathConnection)
 
 # Direction zero is bidirectional. Direction one is send-only.
 def open_multipath_stream(conn: MultipathConnection, direction: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
+  import "./quic_multipath.c"
+
+# Open and queue replay-safe bytes before stepping the resumed connection.
+def open_multipath_early_stream(conn: MultipathConnection, direction: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,MultipathEarlyStream>>):
+  import "./quic_multipath.c"
+
+def write_multipath_early_stream(conn: MultipathConnection, stream: MultipathEarlyStream, bytes: List<&2,U32>, fin: U32)
+    -> IO(MultipathConnection & (MultipathEarlyStream & Result<&1,&1,U32 & String,U32>)):
+  import "./quic_multipath.c"
+
+# Call after authentication. A rejected stream returns None and its bytes
+# are discarded. An accepted stream ID can be used with the regular API.
+def resolve_multipath_early_stream(conn: MultipathConnection, stream: MultipathEarlyStream)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
   import "./quic_multipath.c"
 

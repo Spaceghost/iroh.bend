@@ -319,7 +319,7 @@ $(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
-.PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-endpoint-multipath
+.PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-quic-multipath-early-streams check-endpoint-multipath
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -378,6 +378,10 @@ check-quic-multipath-session: $(BUILD)/iroh-bend-quic-multipath-session
 check-quic-multipath-early: $(BUILD)/iroh-bend-quic-multipath-session
 	@test -x "$(UPSTREAM_QUIC_MULTIPATH_SESSION)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH_SESSION to the Iroh listener fixture with early-data modes.' >&2; exit 2; }
 	sh tests/quic_multipath_session.sh "$<" "$(UPSTREAM_QUIC_MULTIPATH_SESSION)" --early
+
+check-quic-multipath-early-streams: $(BUILD)/iroh-bend-quic-multipath-session
+	@test -x "$(UPSTREAM_QUIC_EARLY)" || { echo 'Set UPSTREAM_QUIC_EARLY to the Iroh early-stream and datagram fixture.' >&2; exit 2; }
+	sh tests/quic_multipath_session.sh "$<" "$(UPSTREAM_QUIC_EARLY)" --early-streams
 
 check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }

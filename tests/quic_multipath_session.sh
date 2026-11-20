@@ -39,7 +39,12 @@ check() {
     pid=
 }
 
-if [ "${3:-}" = --early ]; then
+if [ "${3:-}" = --early-streams ]; then
+    check listen 127.0.0.1 8
+    check listen6 ::1 8
+    check listen-rotated 127.0.0.1 9
+    check listen6-rotated ::1 9
+elif [ "${3:-}" = --early ]; then
     check listen-early 127.0.0.1 6
     check listen-early6 ::1 6
     check listen-early-rotated 127.0.0.1 7

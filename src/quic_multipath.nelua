@@ -2,6 +2,7 @@
 ## pragmas.nogc = true
 ## cinclude '<picoquic.h>'
 ## cinclude '<picoquic_internal.h>'
+## cinclude '<tls_api.h>'
 ## cinclude '<picotls.h>'
 ## cinclude '<picotls/openssl.h>'
 ## cinclude '<picoquic_crypto_provider_api.h>'
@@ -14,13 +15,22 @@ require 'C.stdlib'
 require 'C.string'
 local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer, cnx_in_progress:pointer}
 local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize}
-local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{max_datagram_frame_size:uint32}
+local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{
+  initial_max_data:uint64,initial_max_stream_data_bidi_local:uint64,initial_max_stream_data_bidi_remote:uint64,
+  initial_max_stream_data_uni:uint64,initial_max_streams_bidi:uint64,initial_max_streams_uni:uint64,
+  max_datagram_frame_size:uint32,active_connection_id_limit:uint32,max_packet_size:uint32
+}
 local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
 local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer}
+local packet_context_t <cimport,nodecl,codename 'picoquic_packet_context_t'> = @record{}
+local crypto_context_t <cimport,nodecl,codename 'picoquic_crypto_context_t'> = @record{}
+local tree_t <cimport,nodecl,codename 'picosplay_tree_t'> = @record{}
 local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
   is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64,
   remote_parameters:transport_t,first_datagram:*frame_t,
-  max_early_data_size:csize,zero_rtt_data_accepted:cuint,first_misc_frame:*frame_t,last_misc_frame:*frame_t
+  max_early_data_size:csize,zero_rtt_data_accepted:cuint,first_misc_frame:*frame_t,last_misc_frame:*frame_t,
+  maxdata_remote:uint64,max_streams_bidir_remote:uint64,max_streams_unidir_remote:uint64,data_sent:uint64,
+  next_stream_id:[4]uint64,pkt_ctx:[3]packet_context_t,queue_data_repeat_tree:tree_t,crypto_context:[4]crypto_context_t
 }
 local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
 local buffer_t <cimport,nodecl,codename 'ptls_buffer_t'> = @record{}
@@ -31,7 +41,7 @@ local client_tls_t <cimport,nodecl,codename 'picoquic_tls_ctx_t'> = @record{
 local ext_t <cimport,nodecl,codename 'ptls_raw_extension_t'> = @record{type:uint16,data:iov_t}
 ## cdefine 'iroh_mp_client_props __typeof__(((ptls_handshake_properties_t*)0)->client)'
 local client_props_t <cimport,nodecl,codename 'iroh_mp_client_props'> = @record{
-  session_ticket:iov_t, max_early_data_size:*csize
+  session_ticket:iov_t, max_early_data_size:*csize, early_data_acceptance:cint
 }
 local props_t <cimport,nodecl,codename 'ptls_handshake_properties_t'> = @record{
   additional_extensions:*ext_t,collect_extension:pointer,collected_extensions:pointer,client:client_props_t
@@ -92,6 +102,10 @@ local function picoquic_set_alpn_select_fn(quic:*quic_t, selector:AlpnSelector) 
 local function picoquic_set_default_tp_value(quic:*quic_t, kind:uint64, value:uint64):cint <cimport,nodecl> end
 local function picoquic_queue_datagram_frame(cnx:*cnx_t,len:csize,data:*uint8):cint <cimport,nodecl> end
 local function picoquic_is_0rtt_available(cnx:*cnx_t):cint <cimport,nodecl> end
+local function picoquic_reset_packet_context(cnx:*cnx_t,context:*packet_context_t) <cimport,nodecl> end
+local function picoquic_crypto_context_free(context:*crypto_context_t) <cimport,nodecl> end
+local picoquic_epoch_0rtt:cint <cimport,nodecl>
+local function picosplay_empty_tree(tree:*tree_t) <cimport,nodecl> end
 local function picoquic_queue_misc_frame(cnx:*cnx_t,data:*uint8,len:csize,ack:cint,pc:cint):cint <cimport,nodecl> end
 local function picoquic_delete_misc_or_dg(first:**frame_t,last:**frame_t,frame:*frame_t) <cimport,nodecl> end
 local function picoquic_decode_datagram_frame_header(data:*uint8,limit:*uint8,kind:*uint8,len:*uint64):*uint8 <cimport,nodecl> end
@@ -112,7 +126,7 @@ local function picoquic_probe_new_tuple(cnx:*cnx_t, path:*path_t, peer:pointer, 
     iface:cint, time:uint64, preferred:cint):cint <cimport,nodecl> end
 local function picoquic_set_stream_path_affinity(cnx:*cnx_t,id:uint64,path:uint64):cint <cimport,nodecl> end
 local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <cimport,nodecl> end
-local function picoquic_add_to_stream(cnx:*cnx_t,id:uint64, data:pointer,count:csize,fin:cint):cint <cimport,nodecl> end
+local function picoquic_add_to_stream_with_ctx(cnx:*cnx_t,id:uint64,data:pointer,count:csize,fin:cint,ctx:pointer):cint <cimport,nodecl> end
 local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
 local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
     index:*cint):cint <cimport,nodecl> end
@@ -150,6 +164,7 @@ local function picoquic_close(cnx: *cnx_t, reason: uint64): cint <cimport,nodecl
 local function picoquic_compare_addr(expected: pointer, actual: pointer): cint <cimport,nodecl> end
 local function picoquic_set_app_stream_ctx(cnx: *cnx_t, id: uint64, ctx: pointer): cint <cimport,nodecl> end
 local function picoquic_find_stream(cnx: *cnx_t, id: uint64): *native_stream_t <cimport,nodecl> end
+local function picoquic_delete_stream(cnx:*cnx_t,stream:*native_stream_t) <cimport,nodecl> end
 local function picoquic_abandon_path(cnx: *cnx_t, id: uint64, reason: uint64, now: uint64): cint <cimport,nodecl> end
 local function picoquic_set_path_status(cnx: *cnx_t, id:uint64, status:cint): cint <cimport,nodecl> end
 local picoquic_path_status_available: cint <cimport,nodecl>
@@ -209,7 +224,11 @@ local EMSGSIZE: uint32 <cimport,nodecl>
 local PTLS_ALERT_BAD_CERTIFICATE: cint <cimport,nodecl>
 local PTLS_ALERT_UNSUPPORTED_CERTIFICATE: cint <cimport,nodecl>
 local PTLS_ALERT_INTERNAL_ERROR: cint <cimport,nodecl>
+local PTLS_ALERT_ILLEGAL_PARAMETER: cint <cimport,nodecl>
 local PTLS_ALERT_NO_APPLICATION_PROTOCOL: cint <cimport,nodecl>
+local PTLS_ERROR_IN_PROGRESS: cint <cimport,nodecl>
+local PTLS_EARLY_DATA_ACCEPTED: cint <cimport,nodecl>
+local PTLS_EARLY_DATA_REJECTED: cint <cimport,nodecl>
 local PTLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS: uint8 <cimport,nodecl>
 local ALPN_EXTENSION: uint16 <comptime> = 16
 
@@ -221,6 +240,7 @@ local names = {
   'step_multipath', 'probe_multipath', 'multipath_status',
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
+  'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'bind_multipath', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
@@ -254,6 +274,10 @@ local iroh_mp_retire_multipath_path: uint32 <cimport,nodecl>
 local iroh_mp_multipath_millis: uint32 <cimport,nodecl>
 local iroh_mp_probe_multipath_alternate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_MultipathEarlyStream: uint32 <cimport,nodecl>
+local iroh_mp_open_multipath_early_stream: uint32 <cimport,nodecl>
+local iroh_mp_write_multipath_early_stream: uint32 <cimport,nodecl>
+local iroh_mp_resolve_multipath_early_stream: uint32 <cimport,nodecl>
 local iroh_mp_assign_stream_path: uint32 <cimport,nodecl>
 local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
@@ -326,13 +350,15 @@ local Path = @record{
 }
 local Stream = @record{
   next: pointer, id: uint32, rx: *[0]uint8, size: csize,
-  incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean
+  incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean, early: boolean
 }
 local Datagram = @record{next:pointer,size:csize}
 local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean, retained:boolean}
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
-  local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32
+  local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32,
+  max_data:uint64,stream_bidi_local:uint64,stream_bidi_remote:uint64,stream_uni:uint64,streams_bidi:uint64,streams_uni:uint64,
+  active_connection_id_limit:uint32,max_packet_size:uint32
 }
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
@@ -341,7 +367,8 @@ local Connection = @record{
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, ready: boolean, closed: boolean, buffer_error: boolean,
-  ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8, early: boolean
+  ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
+  early: boolean, early_decided: boolean
 }
 local connections: *Connection
 local next_connection: uint32 = 1
@@ -617,24 +644,8 @@ local function with_rpk_selection(tls: *tls_t, buf: *buffer_t, offsets: *csize, 
   return status
 end
 
-local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
-    props:*props_t):cint <cexport,codename '__wrap_ptls_handle_message'>
-  local context = ptls_get_context(tls)
-  if context.verify_certificate == nilptr or context.verify_certificate.cb ~= (@pointer)(verify_raw) or props == nilptr then
-    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
-  end
-  if ptls_is_server(tls) ~= 0 then return with_rpk_selection(tls,buf,offsets,epoch,bytes,len,props) end
-  if epoch == 0 and len == 0 then
-    local cnx = (@*cnx_t)($ptls_get_data_ptr(tls))
-    if cnx ~= nilptr then
-      local conn = (@*Connection)(picoquic_get_callback_context(cnx))
-      if conn ~= nilptr and conn.resume ~= nilptr then
-        -- Supply the scoped ticket directly so no SNI or C-string ALPN cache is needed.
-        props.client.session_ticket = {base=conn.resume.ticket,len=conn.resume.length}
-        props.client.max_early_data_size = conn.early and &cnx.max_early_data_size or nilptr
-      end
-    end
-  end
+local function client_rpk_message(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
+    props:*props_t):cint
   if props.additional_extensions == nilptr then return real_tls(tls,buf,offsets,epoch,bytes,len,props) end
   -- Offer the client raw key on every ClientHello, including after HelloRetryRequest.
   -- RFC 7250 client_certificate_type contains a single RawPublicKey entry.
@@ -651,6 +662,89 @@ local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:c
   props.additional_extensions = &extensions[0]
   local result = real_tls(tls,buf,offsets,epoch,bytes,len,props)
   props.additional_extensions = original
+  return result
+end
+
+local function restore_early_limits(cnx:*cnx_t, session:*Session)
+  local remote = &cnx.remote_parameters
+  remote.initial_max_data = session.max_data
+  remote.initial_max_stream_data_bidi_local = session.stream_bidi_local
+  remote.initial_max_stream_data_bidi_remote = session.stream_bidi_remote
+  remote.initial_max_stream_data_uni = session.stream_uni
+  remote.initial_max_streams_bidi = session.streams_bidi
+  remote.initial_max_streams_uni = session.streams_uni
+  remote.max_datagram_frame_size = session.datagram_limit
+  remote.active_connection_id_limit = session.active_connection_id_limit
+  remote.max_packet_size = session.max_packet_size
+  local path = ((@*[0]*path_t)(cnx.path))[0]
+  if session.max_packet_size < path.send_mtu then path.send_mtu = session.max_packet_size end
+end
+
+local function accepted_early_limits(cnx:*cnx_t, session:*Session):boolean
+  local remote = &cnx.remote_parameters
+  return remote.initial_max_data >= session.max_data and
+    remote.initial_max_stream_data_bidi_local >= session.stream_bidi_local and
+    remote.initial_max_stream_data_bidi_remote >= session.stream_bidi_remote and
+    remote.initial_max_stream_data_uni >= session.stream_uni and
+    remote.initial_max_streams_bidi >= session.streams_bidi and remote.initial_max_streams_uni >= session.streams_uni and
+    remote.active_connection_id_limit >= session.active_connection_id_limit and
+    remote.max_datagram_frame_size >= session.datagram_limit
+end
+
+local function reject_early(conn:*Connection, cnx:*cnx_t)
+  -- EncryptedExtensions has installed the new transport parameters. The
+  -- application packet context still contains only the 0-RTT flight.
+  picosplay_empty_tree(&cnx.queue_data_repeat_tree)
+  picoquic_reset_packet_context(cnx,&cnx.pkt_ctx[picoquic_packet_context_application])
+  conn.output_size = 0
+  while conn.streams ~= nilptr do
+    local stream = conn.streams
+    conn.streams = (@*Stream)(stream.next)
+    local native = picoquic_find_stream(cnx,stream.id)
+    if native ~= nilptr then picoquic_delete_stream(cnx,native) end
+    C.free(stream.rx)
+    C.free(stream)
+  end
+  conn.stream_count = 0
+  conn.received = 0
+  cnx.next_stream_id[0] = 0
+  cnx.next_stream_id[2] = 2
+  cnx.nb_bytes_queued = 0
+  cnx.data_sent = 0
+  cnx.maxdata_remote = cnx.remote_parameters.initial_max_data
+end
+
+local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
+    props:*props_t):cint <cexport,codename '__wrap_ptls_handle_message'>
+  local context = ptls_get_context(tls)
+  if context.verify_certificate == nilptr or context.verify_certificate.cb ~= (@pointer)(verify_raw) or props == nilptr then
+    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  end
+  if ptls_is_server(tls) ~= 0 then return with_rpk_selection(tls,buf,offsets,epoch,bytes,len,props) end
+  local cnx = (@*cnx_t)($ptls_get_data_ptr(tls))
+  local conn = cnx ~= nilptr and (@*Connection)(picoquic_get_callback_context(cnx)) or nilptr
+  if conn ~= nilptr and conn.resume ~= nilptr and epoch == 0 and len == 0 then
+    -- Supply the scoped ticket directly so no SNI or C-string ALPN cache is needed.
+    props.client.session_ticket = {base=conn.resume.ticket,len=conn.resume.length}
+    props.client.max_early_data_size = conn.early and &cnx.max_early_data_size or nilptr
+    if conn.early then restore_early_limits(cnx,conn.resume) end
+  end
+  local result = client_rpk_message(tls,buf,offsets,epoch,bytes,len,props)
+  if conn ~= nilptr and conn.early and not conn.early_decided and epoch == 2 and
+      (result == 0 or result == PTLS_ERROR_IN_PROGRESS) then
+    local acceptance = props.client.early_data_acceptance
+    if acceptance == PTLS_EARLY_DATA_REJECTED or acceptance == PTLS_EARLY_DATA_ACCEPTED then
+      -- New flow-control limits are for 1-RTT only. Stop formatting 0-RTT
+      -- packets once EncryptedExtensions has passed them to Picoquic.
+      picoquic_crypto_context_free(&cnx.crypto_context[picoquic_epoch_0rtt])
+      conn.early_decided = true
+      if acceptance == PTLS_EARLY_DATA_REJECTED then
+        reject_early(conn,cnx)
+      elseif not accepted_early_limits(cnx,conn.resume) then
+        return PTLS_ALERT_ILLEGAL_PARAMETER
+      end
+    end
+  end
   return result
 end
 
@@ -798,7 +892,16 @@ local function save_session(self: *save_ticket_t, tls: *tls_t, input: iov_t, pro
   C.memcpy(&captured.peer_key[0],&conn.peer_key[0],32)
   C.memcpy(&captured.alpn[0],&selected.wire[3],selected.size)
   captured.alpn_length = selected.size
-  captured.datagram_limit = cnx.remote_parameters.max_datagram_frame_size
+  local remote = &cnx.remote_parameters
+  captured.datagram_limit = remote.max_datagram_frame_size
+  captured.max_data = remote.initial_max_data
+  captured.stream_bidi_local = remote.initial_max_stream_data_bidi_local
+  captured.stream_bidi_remote = remote.initial_max_stream_data_bidi_remote
+  captured.stream_uni = remote.initial_max_stream_data_uni
+  captured.streams_bidi = remote.initial_max_streams_bidi
+  captured.streams_uni = remote.initial_max_streams_uni
+  captured.active_connection_id_limit = remote.active_connection_id_limit
+  captured.max_packet_size = remote.max_packet_size ~= 0 and remote.max_packet_size or 65527
   free_session(conn.ticket)
   conn.ticket = captured
   return 0
@@ -1708,15 +1811,18 @@ local function write_datagram_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],write_datagram(e,find_connection(e,args[0]),args[1]))
 end
 
+local function early_window(conn: *Connection): boolean
+  if not conn.early or conn.early_decided or conn.ready then return false end
+  local state = picoquic_get_cnx_state(conn.cnx)
+  return (state == picoquic_state_client_init or state == picoquic_state_client_init_sent) and
+    picoquic_is_0rtt_available(conn.cnx) ~= 0
+end
+
 local function write_early_frame(e: Env, conn: *Connection, payload: Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
-  if not conn.early or conn.ready then return io_done(e,0) end
+  if not early_window(conn) then return io_done(e,0) end
   local cnx = conn.cnx
-  local state = picoquic_get_cnx_state(cnx)
-  if (state ~= picoquic_state_client_init and state ~= picoquic_state_client_init_sent) or
-      picoquic_is_0rtt_available(cnx) == 0 or cnx.first_misc_frame ~= nilptr then
-    return io_done(e,0)
-  end
+  if cnx.first_misc_frame ~= nilptr then return io_done(e,0) end
   if conn.resume.datagram_limit == 0 then
     return io_fail(e,ENOTSUP,'session peer did not negotiate QUIC datagrams')
   end
@@ -1768,13 +1874,21 @@ local function read_datagram_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],io_done(e,io_box(e,iroh_mp_Some,bytes)))
 end
 
-local function open_stream(e: Env, conn: *Connection, direction: Term): Term
+local function open_stream(e: Env, conn: *Connection, direction: Term, early: boolean): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
-  if not conn.ready then return none(e) end
+  if early then
+    if not early_window(conn) then return none(e) end
+  elseif not conn.ready then
+    return none(e)
+  end
   if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
   if conn.stream_count >= STREAM_LIMIT then return io_fail(e,ENOBUFS,'too many open QUIC streams') end
   local id = picoquic_get_next_local_stream_id(conn.cnx,(@cint)(direction))
   if id > 0xffffffff then return io_fail(e,ENOBUFS,'QUIC stream IDs exhausted') end
+  if early then
+    local limit = direction == 0 and conn.resume.streams_bidi or conn.resume.streams_uni
+    if id // 4 >= limit then return none(e) end
+  end
   local stream = (@*Stream)(C.calloc(1,#Stream))
   if stream == nilptr then return io_fail(e,ENOMEM,nilptr) end
   if picoquic_set_app_stream_ctx(conn.cnx,id,stream) ~= 0 then
@@ -1782,15 +1896,34 @@ local function open_stream(e: Env, conn: *Connection, direction: Term): Term
     return none(e)
   end
   stream.id = (@uint32)(id)
-  stream.accepted = true
+  stream.early = early
+  stream.accepted = not early
   stream.next = conn.streams
   conn.streams = stream
   conn.stream_count = conn.stream_count + 1
-  return optional_id(e,id)
+  return optional_id(e,early and term_pak(iroh_mp_MultipathEarlyStream,id) or id)
 end
 
 local function open_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return io_tup(e,args[0],open_stream(e,find_connection(e,args[0]),args[1]))
+  return io_tup(e,args[0],open_stream(e,find_connection(e,args[0]),args[1],false))
+end
+
+local function open_early_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],open_stream(e,find_connection(e,args[0]),args[1],true))
+end
+
+local function resolve_early_stream(e: Env, conn: *Connection, id: uint64): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready then return io_fail(e,EAGAIN,'QUIC handshake is incomplete') end
+  local stream = find_stream(conn,id)
+  if conn.cnx.zero_rtt_data_accepted == 0 or stream == nilptr or not stream.early then return none(e) end
+  stream.accepted = true
+  return optional_id(e,id)
+end
+
+local function resolve_early_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],resolve_early_stream(e,find_connection(e,args[0]),
+    handle_id(e,args[1],iroh_mp_MultipathEarlyStream)))
 end
 
 local function accept_stream(e: Env, conn: *Connection, direction: Term): Term
@@ -1835,17 +1968,22 @@ local function assign_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],assign(e,find_connection(e,args[0]),args[1],args[2]))
 end
 
-local function write_stream(e: Env, conn: *Connection, id: Term, payload: Term, fin: Term): Term
+local function write_stream(e: Env, conn: *Connection, id: Term, payload: Term, fin: Term, early: boolean): Term
   local bytes: [STREAM_CHUNK]uint8
   local size = bytes_from_list(e,payload,&bytes[0],STREAM_CHUNK)
   if size < 0 or fin > 1 then return io_fail(e,EINVAL,'invalid or oversized QUIC stream write') end
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   local stream = find_stream(conn,id)
-  if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if early then
+    if stream == nilptr or not stream.early then return io_fail(e,EBADF,'unknown early QUIC stream') end
+    if not early_window(conn) then return io_done(e,0) end
+  elseif stream == nilptr or not stream.accepted then
+    return io_fail(e,EBADF,'unknown QUIC stream')
+  end
   if stream.incoming and (id & 2) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
   if stream.sent_fin or stream.stop then return io_fail(e,EPIPE,'QUIC stream send half closed') end
   if conn.cnx.nb_bytes_queued + (@uint64)(size) > TX_LIMIT then return io_done(e,0) end
-  if picoquic_add_to_stream(conn.cnx,id,&bytes[0],(@csize)(size),(@cint)(fin)) ~= 0 then
+  if picoquic_add_to_stream_with_ctx(conn.cnx,id,&bytes[0],(@csize)(size),(@cint)(fin),stream) ~= 0 then
     return io_fail(e,EPIPE,'could not queue QUIC stream bytes')
   end
   stream.sent_fin = fin == 1
@@ -1853,7 +1991,13 @@ local function write_stream(e: Env, conn: *Connection, id: Term, payload: Term, 
 end
 
 local function write_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return io_tup(e,args[0],write_stream(e,find_connection(e,args[0]),args[1],args[2],args[3]))
+  return io_tup(e,args[0],write_stream(e,find_connection(e,args[0]),args[1],args[2],args[3],false))
+end
+
+local function write_early_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local result = write_stream(e,find_connection(e,args[0]),handle_id(e,args[1],iroh_mp_MultipathEarlyStream),
+    args[2],args[3],true)
+  return io_tup(e,args[0],io_tup(e,args[1],result))
 end
 
 local function read_stream(e: Env, conn: *Connection, id: Term, max: Term): Term
@@ -1942,6 +2086,9 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_multipath_millis ~= 0xffffffff then io_eff(iroh_mp_multipath_millis,millis_run) end
   if iroh_mp_probe_multipath_alternate ~= 0xffffffff then io_eff(iroh_mp_probe_multipath_alternate,alternate_run) end
   if iroh_mp_open_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_stream,open_stream_run) end
+  if iroh_mp_open_multipath_early_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_early_stream,open_early_stream_run) end
+  if iroh_mp_write_multipath_early_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_early_stream,write_early_stream_run) end
+  if iroh_mp_resolve_multipath_early_stream ~= 0xffffffff then io_eff(iroh_mp_resolve_multipath_early_stream,resolve_early_stream_run) end
   if iroh_mp_assign_stream_path ~= 0xffffffff then io_eff(iroh_mp_assign_stream_path,assign_run) end
   if iroh_mp_write_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_stream,write_run) end
   if iroh_mp_read_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_read_multipath_stream,read_run) end
