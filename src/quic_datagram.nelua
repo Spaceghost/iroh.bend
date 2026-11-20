@@ -269,7 +269,7 @@ for _, name in ipairs{'start_quic_datagram','step_quic_datagram','write_quic_dat
     'open_quic_stream','accept_quic_stream','queue_quic_stream','flush_quic_stream','read_quic_stream',
     'take_quic_session','start_quic_resume','drop_quic_session','write_early_datagram','quic_resumption_status',
     'QuicSession','open_early_quic_stream','bind_resumable_quic','bind_shared_quic','bind_quic_identity','bind_dual_quic_identity','quic_remote_id','try_accept_shared_quic','close_shared_quic','QuicDatagramListener',
-    'cancel_quic_stream_half','peer_quic_stream_code','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
+    'cancel_quic_stream_half','peer_quic_stream_code','quic_stream_fin_acked','drop_quic_stream','QuicStreamPending','QuicStreamFin','QuicStreamBytes','Con','Nil','Unit','Some','None'} do
   cinclude(string.format(
     '#ifdef CID(%s)\n#define iroh_dgram_%s CID(%s)\n#else\n#define iroh_dgram_%s UINT32_MAX\n#endif',
     name,name,name,name))
@@ -313,6 +313,7 @@ local iroh_dgram_queue_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_flush_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_read_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_cancel_quic_stream_half: uint32 <cimport,nodecl>
+local iroh_dgram_quic_stream_fin_acked: uint32 <cimport,nodecl>
 local iroh_dgram_peer_quic_stream_code: uint32 <cimport,nodecl>
 local iroh_dgram_drop_quic_stream: uint32 <cimport,nodecl>
 local iroh_dgram_QuicStreamPending: uint32 <cimport,nodecl>
@@ -391,7 +392,7 @@ local Stream = @record{
   tx: *[0]cuchar, tx_size: csize, tx_sent: csize, tx_offset: uint64,
   announced: boolean, had_open_callback: boolean, rx_fin: boolean, rx_reset: boolean,
   reset_code: uint64, stop_code: uint64, tx_stopped: boolean, tx_reset: boolean, rx_stopped: boolean, read_finished: boolean,
-  tx_fin: boolean, tx_fin_sent: boolean, early: boolean, early_rejected: boolean, closed: boolean, discarded: boolean
+  tx_fin: boolean, tx_fin_sent: boolean, tx_fin_acked: boolean, early: boolean, early_rejected: boolean, closed: boolean, discarded: boolean
 }
 local CID_SIZE <comptime> = 8
 local MAX_PENDING <comptime> = 64
@@ -643,6 +644,9 @@ local function stream_acknowledged(engine: *ngtcp2_conn, id: int64, offset: uint
   if stream ~= nilptr and stream.tx ~= nilptr and stream.tx_sent == stream.tx_size and
       offset + size >= stream.tx_offset + stream.tx_size and
       (stream.tx_size ~= 0 or (stream.tx_fin_sent and size == 0)) then
+    -- Writes are retained until their contiguous ACK. For a FIN-only write
+    -- ngtcp2 calls back at its final offset with a zero data length.
+    if stream.tx_fin_sent then stream.tx_fin_acked = true end
     stream.tx_offset = stream.tx_offset + stream.tx_size
     C.free(stream.tx)
     stream.tx = nilptr
@@ -2064,6 +2068,21 @@ local function has_stream_half(conn: *Connection, stream: *Stream, half: Term): 
   return (stream.id & 2) == 0 or (ngtcp2_conn_is_local_stream2(conn.engine,stream.id) ~= 0) == (half == 0)
 end
 
+local function fin_acked(e: Env, conn: *Connection, handle: Term): Term
+  if conn == nilptr then return closed(e) end
+  local stream = stream_by_handle(conn,handle)
+  if stream == nilptr or not stream.announced then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if not has_stream_half(conn,stream,0) then return io_fail(e,EPIPE,'QUIC stream is receive-only') end
+  if stream.early_rejected or stream.tx_stopped or stream.tx_reset then return io_fail(e,EPIPE,'QUIC stream send half was cancelled') end
+  if stream.tx_fin_acked then return io_done(e,1) end
+  if conn.failed then return closed(e) end
+  return io_done(e,0)
+end
+
+local function fin_acked_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],fin_acked(e,find(e,args[0]),args[1]))
+end
+
 local function cancel_half(e: Env, conn: *Connection, handle: Term, half: Term, high: Term, low: Term): Term
   if conn == nilptr or conn.failed then return closed(e) end
   if half > 1 or high > 0x3fffffff then return io_fail(e,EINVAL,'invalid QUIC stream cancellation') end
@@ -2074,7 +2093,7 @@ local function cancel_half(e: Env, conn: *Connection, handle: Term, half: Term, 
   local status: cint
   if half == 0 then
     if stream.tx_reset or stream.tx_stopped or stream.closed or stream.early_rejected or
-        (stream.tx_fin_sent and stream.tx == nilptr) then return io_fail(e,EPIPE,'QUIC stream send half is closed') end
+        stream.tx_fin_acked then return io_fail(e,EPIPE,'QUIC stream send half is closed') end
     status = ngtcp2_conn_shutdown_stream_write(conn.engine,0,stream.id,code)
     if status == 0 then
       stream.tx_reset = true
@@ -2353,6 +2372,7 @@ local function register_quic_datagram() <cexport,codename 'iroh_register_quic_da
   if iroh_dgram_flush_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_flush_quic_stream,flush_stream_run) end
   if iroh_dgram_read_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_read_quic_stream,read_stream_run) end
   if iroh_dgram_cancel_quic_stream_half ~= 0xffffffff then io_eff(iroh_dgram_cancel_quic_stream_half,cancel_half_run) end
+  if iroh_dgram_quic_stream_fin_acked ~= 0xffffffff then io_eff(iroh_dgram_quic_stream_fin_acked,fin_acked_run) end
   if iroh_dgram_peer_quic_stream_code ~= 0xffffffff then io_eff(iroh_dgram_peer_quic_stream_code,peer_code_run) end
   if iroh_dgram_drop_quic_stream ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_stream,drop_stream_run) end
   if iroh_dgram_drop_quic_datagram ~= 0xffffffff then io_eff(iroh_dgram_drop_quic_datagram,drop_run) end

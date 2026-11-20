@@ -212,6 +212,11 @@ def quic_stream_stop_code(conn: DatagramConnection, stream: U32)
     raw : Stream.CodeWords(DatagramConnection) <- peer_quic_stream_code(conn,stream,0)
     Stream.peer_code(DatagramConnection,raw)
 
+# One after the peer has acknowledged every byte and FIN. Zero while pending.
+def quic_stream_fin_acked(conn: DatagramConnection, stream: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
 def drop_quic_stream(conn: DatagramConnection, stream: U32)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,Unit>):
   import "./quic_datagram.c"
