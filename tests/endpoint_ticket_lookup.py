@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from urllib.request import Request, urlopen
 
+from endpoint_lookup_race import check_race
 from endpoint_ticket_dial import read_ticket
 from quic_rebind import process
 
@@ -47,13 +48,18 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if response.status != 204:
                 raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
 
+        if isinstance(source, tuple):
+            check_race(client, ticket, peer, pkarr, dns_port, *source)
+            print(f"PASS {family} authenticated {source[1]} exchange with {source[0]} pending", flush=True)
+            return
+
         base = pkarr
         if invalid:
             invalid.requests.clear()
             invalid.packet = bytes([packet[0] ^ 1]) + packet[1:]
             base = f"http://127.0.0.1:{invalid.server_port}/pkarr"
-        args = {"dns": (dns_port,), "pkarr": (base,), "pkarr-dns": (base, dns_port)}
-        result = subprocess.run((client, "lookup-ticket", ticket, source, *args[source]),
+        args = {"dns": ("dns", dns_port), "pkarr": ("pkarr", base), "pkarr-dns": ("pkarr", base, "dns", dns_port)}
+        result = subprocess.run((client, "lookup-ticket", ticket, *args[source]),
                                 capture_output=True, timeout=15)
         if expected_error:
             if result.returncode == 0 or expected_error not in result.stderr:
@@ -88,6 +94,8 @@ def main(client, fixture, pkarr, dns_port):
             check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,
                   expected_error=b"invalid signed Pkarr endpoint packet")
             check(client, fixture, family, "id-only", "pkarr-dns", pkarr, dns_port, invalid)
+            for slow, fast in (("dns", "pkarr"), ("pkarr", "dns"), ("dns", "dns"), ("pkarr", "pkarr")):
+                check(client, fixture, family, "id-only", (slow, fast), pkarr, dns_port)
 
 
 if __name__ == "__main__":

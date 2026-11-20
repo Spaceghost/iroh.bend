@@ -274,13 +274,38 @@ def lookup_ticket(ticket: String, sources: List<&2,Endpoint.AddressLookup>) -> I
       Fixture.alpn(),Endpoint.HandshakeTimeouts{700,6000},sources)
     check_endpoint(outcome,False{})
 
-def lookup_dns_ticket(ticket: String, port: Maybe<&2,U32>, initial: List<&2,Endpoint.AddressLookup>) -> IO(Unit):
+def prepend_lookup(source: Maybe<&2,Endpoint.AddressLookup>, tail: Maybe<&2,List<&2,Endpoint.AddressLookup>>)
+    -> Maybe<&2,List<&2,Endpoint.AddressLookup>>:
+  match source tail:
+    case Some{item} Some{rest}:
+      Some{Con{item,rest}}
+    case _ _:
+      None{}
+
+def lookup_port(port: Maybe<&2,U32>) -> Maybe<&2,Endpoint.AddressLookup>:
   match port:
     case Some{p}:
-      dns = {Endpoint.DnsLookup{Endpoint.DnsResolver{"dns.iroh.link.","127.0.0.1",p,1500}} : Endpoint.AddressLookup}
-      lookup_ticket(ticket,List.append(&2,Endpoint.AddressLookup,initial,[dns]))
+      Some{Endpoint.DnsLookup{Endpoint.DnsResolver{"dns.iroh.link.","127.0.0.1",p,20000}}}
     case None{}:
-      IO.die(Unit,2,"expected a DNS port")
+      None{}
+
+def lookup_sources(args: List<&1,String>) -> Maybe<&2,List<&2,Endpoint.AddressLookup>>:
+  match args:
+    case Nil{}:
+      Some{[]}
+    case Con{"dns",Con{port,rest}}:
+      prepend_lookup(lookup_port(U32.read(port)),lookup_sources(rest))
+    case Con{"pkarr",Con{url,rest}}:
+      prepend_lookup(Some{Endpoint.PkarrLookup{url,20000}},lookup_sources(rest))
+    case _:
+      None{}
+
+def lookup_args(ticket: String, sources: Maybe<&2,List<&2,Endpoint.AddressLookup>>) -> IO(Unit):
+  match sources:
+    case Some{configured}:
+      lookup_ticket(ticket,configured)
+    case None{}:
+      IO.die(Unit,2,"expected DNS ports or Pkarr relay URLs")
 
 def endpoint_fallback(url: String, bound: Socket & Result<&1,&1,U32 & String,U32>) -> IO(Unit):
   match bound:
@@ -638,12 +663,8 @@ def run(args: List<String>) -> IO(Unit):
       do IO<Unit>:
         id : Endpoint.Identity <- CheckOptions.identity(choice)
         check_options(mode,id,U32.read(port))
-    case [_, "lookup-ticket", ticket, "dns", port]:
-      lookup_dns_ticket(ticket,U32.read(port),[])
-    case [_, "lookup-ticket", ticket, "pkarr", url]:
-      lookup_ticket(ticket,[Endpoint.PkarrLookup{url,1500}])
-    case [_, "lookup-ticket", ticket, "pkarr-dns", url, port]:
-      lookup_dns_ticket(ticket,U32.read(port),[Endpoint.PkarrLookup{url,1500}])
+    case Con{_,Con{"lookup-ticket",Con{ticket,sources}}}:
+      lookup_args(ticket,lookup_sources(sources))
     case [_, "dial-ticket", ticket, "direct"]:
       dial_ticket(ticket,False{})
     case [_, "dial-ticket", ticket, "relay"]:

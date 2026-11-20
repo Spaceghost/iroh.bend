@@ -346,9 +346,9 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   published IP addresses in order, then tries its relay URLs. Custom addresses
   can coexist with usable IP or relay addresses.
   `Endpoint.connect_ticket_with_lookup(text, seed, alpn, timeouts, sources)`
-  tries the ticket's routes first. If they are absent or all fail, it tries
-  each configured `DnsLookup{resolver}` or `PkarrLookup{relay, timeout_ms}`
-  in order. Every attempt pins the same endpoint ID. A Pkarr response must
+  tries the ticket's routes first. If they are absent or all fail, it starts all
+  configured `DnsLookup{resolver}` and `PkarrLookup{relay, timeout_ms}` services
+  together and tries the routes each one returns. Every attempt pins the same endpoint ID. A Pkarr response must
   verify under that key. For a caller-supplied route list and identity, use
   `Endpoint.connect_with_lookup(plan, identity, timeouts, sources)`.
   `Endpoint.with_ticket` accepts a route dialer such as
@@ -699,9 +699,9 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 
 Full drop-in compatibility remains open. Three known differences affect applications.
 
-- A ticket with missing or stale routes uses the configured DNS and Pkarr services
-  in order. Upstream queries its registered address lookup services concurrently
-  and delivers results as they arrive. [Upstream address lookup](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/address_lookup.rs#L544-L552)
+- DNS and Pkarr lookup results arrive in completion order. A connection can use a
+  responsive service while another is waiting. Outstanding service I/O can run
+  until its configured timeout after the connection succeeds. [Upstream address lookup](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/address_lookup.rs#L509-L529)
 - The ticket codec preserves the supplied UTF-8 relay URL. Applications currently
   supply its canonical form. Matching upstream parsing and normalization of other
   URL spellings remains open. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
