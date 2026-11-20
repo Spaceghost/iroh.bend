@@ -539,7 +539,7 @@ local Path = @record{
 }
 local Stream = @record{
   next: pointer, id: uint32, rx: *[0]uint8, size: csize,
-  reset_code: uint64, stop_code: uint64, tx_reset: boolean, rx_stopped: boolean,
+  reset_code: uint64, stop_code: uint64, tx_reset: boolean, rx_stopped: boolean, read_finished: boolean,
   incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean, early: boolean
 }
 local Datagram = @record{next:pointer,size:csize}
@@ -4109,9 +4109,13 @@ local function read_stream(e: Env, conn: *Connection, id: Term, max: Term): Term
   local stream = find_stream(conn,id)
   if stream == nilptr or not stream.accepted then return io_fail(e,EBADF,'unknown QUIC stream') end
   if not stream.incoming and (id & 2) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
-  if stream.rx_stopped then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
-  if stream.reset then return io_fail(e,ECONNRESET,'QUIC stream reset by peer') end
+  if stream.rx_stopped or stream.read_finished then return io_done(e,term_pak(iroh_mp_MultipathReadFin,0)) end
+  if stream.reset then
+    stream.read_finished = true
+    return io_fail(e,ECONNRESET,'QUIC stream reset by peer')
+  end
   if stream.size == 0 then
+    stream.read_finished = stream.fin
     return io_done(e,term_pak(stream.fin and iroh_mp_MultipathReadFin or iroh_mp_MultipathReadPending,0))
   end
   local size = stream.size
@@ -4149,7 +4153,7 @@ local function cancel_half(e: Env, conn: *Connection, id: Term, half: Term, high
     end
     stream.tx_reset = true
   else
-    if stream.rx_stopped then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
+    if stream.rx_stopped or stream.read_finished then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
     if not stream.reset and not stream.fin and picoquic_stop_sending(conn.cnx,id,code) ~= 0 then
       return io_fail(e,EPIPE,'could not stop the QUIC stream')
     end

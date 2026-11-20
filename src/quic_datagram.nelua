@@ -390,7 +390,7 @@ local Stream = @record{
   rx: *[0]cuchar, rx_head: csize, rx_end: csize, rx_total: uint64,
   tx: *[0]cuchar, tx_size: csize, tx_sent: csize, tx_offset: uint64,
   announced: boolean, had_open_callback: boolean, rx_fin: boolean, rx_reset: boolean,
-  reset_code: uint64, stop_code: uint64, tx_stopped: boolean, tx_reset: boolean, rx_stopped: boolean,
+  reset_code: uint64, stop_code: uint64, tx_stopped: boolean, tx_reset: boolean, rx_stopped: boolean, read_finished: boolean,
   tx_fin: boolean, tx_fin_sent: boolean, early: boolean, early_rejected: boolean, closed: boolean, discarded: boolean
 }
 local CID_SIZE <comptime> = 8
@@ -671,6 +671,7 @@ local function stream_reset(engine: *ngtcp2_conn, id: int64, final_size: uint64,
     user: pointer, stream_user: pointer): cint
   local stream = peer_stream((@*Connection)(user),id)
   if stream == nilptr then return NGTCP2_ERR_CALLBACK_FAILURE end
+  if stream.read_finished then return 0 end
   stream.rx_reset = true
   stream.reset_code = app_code
   discard_received((@*Connection)(user),stream)
@@ -2025,7 +2026,7 @@ local function read_stream(e: Env, conn: *Connection, handle: Term, limit: Term)
   if limit == 0 then return io_fail(e,EINVAL,'QUIC stream read limit must be positive') end
   local stream = stream_by_handle(conn,handle)
   if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
-  if stream.rx_stopped then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
+  if stream.rx_stopped or stream.read_finished then return io_done(e,term_pak(iroh_dgram_QuicStreamFin,0)) end
   if stream.early_rejected then return io_fail(e,ECONNRESET,'QUIC early stream was rejected') end
   if not authenticated(conn) then return io_done(e,term_pak(iroh_dgram_QuicStreamPending,0)) end
   if (stream.id & 2) ~= 0 and ngtcp2_conn_is_local_stream2(conn.engine,stream.id) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
@@ -2048,8 +2049,10 @@ local function read_stream(e: Env, conn: *Connection, handle: Term, limit: Term)
     return io_done(e,io_box(e,iroh_dgram_QuicStreamBytes,value))
   end
   if stream.rx_reset then
+    stream.read_finished = true
     return io_fail(e,ECONNRESET,'QUIC stream was reset by the peer')
   end
+  stream.read_finished = stream.rx_fin
   return io_done(e,term_pak(stream.rx_fin and iroh_dgram_QuicStreamFin or iroh_dgram_QuicStreamPending,0))
 end
 
@@ -2079,7 +2082,7 @@ local function cancel_half(e: Env, conn: *Connection, handle: Term, half: Term, 
       stream.tx = nilptr
     end
   else
-    if stream.rx_stopped or stream.early_rejected then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
+    if stream.rx_stopped or stream.read_finished or stream.early_rejected then return io_fail(e,EPIPE,'QUIC stream receive half is closed') end
     status = ngtcp2_conn_shutdown_stream_read(conn.engine,0,stream.id,code)
     if status == 0 then
       stream.rx_stopped = true

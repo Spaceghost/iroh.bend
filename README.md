@@ -403,7 +403,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   `quic_stream_reset_code` for a peer reset of the receive half and
   `quic_stream_stop_code` for a peer stop on the send half. Each returns
   `None` until its event or `Some{code}` once observed. Both codes remain
-  available until the stream handle is dropped. The Picoquic connection
+  available until the stream handle is dropped. After a local stop, reads
+  return end-of-stream. A read reports a peer reset once and subsequent
+  reads return end-of-stream. Stopping a receive half after consuming its
+  FIN or reset reports a closed stream. The Picoquic connection
   provides `reset_multipath_stream`, `stop_multipath_stream`,
   `multipath_stream_reset_code`, and `multipath_stream_stop_code`.
 - Use `bind_shared_quic` on a concrete IPv4 or IPv6 address to accept
