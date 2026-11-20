@@ -131,12 +131,17 @@ $(BUILD)/iroh-bend-endpoint-id: $(BUILD)/endpoint-id.c
 		-o "$@" -pthread -lm $$($(PKG_CONFIG) --libs openssl)
 
 .PHONY: check-endpoint-ticket
+UPSTREAM_ENDPOINT_TICKET_CODEC ?=
+URL_TESTDATA ?=
 check-endpoint-ticket: $(BUILD)/iroh-bend-endpoint-ticket
 	$<
+	python3 -B tests/endpoint_ticket_urls.py "$<" $(if $(UPSTREAM_ENDPOINT_TICKET_CODEC),--upstream "$(UPSTREAM_ENDPOINT_TICKET_CODEC)") $(if $(URL_TESTDATA),--url-testdata "$(URL_TESTDATA)")
 
-$(BUILD)/endpoint-ticket.c: tests/endpoint_ticket.bend src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/ed25519.bend src/ed25519.nelua tools/nelua-effect.sh
+RELAY_URL_SOURCES = src/relay_url.bend src/url_text.bend src/url_path.bend src/url_ip.bend src/ip.bend
+
+$(BUILD)/endpoint-ticket.c: tests/endpoint_ticket.bend $(RELAY_URL_SOURCES) src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/ed25519.bend src/ed25519.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/ed25519.bend "$(@:.c=-stage)/src/"
+	cp $(RELAY_URL_SOURCES) src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/ed25519.bend "$(@:.c=-stage)/src/"
 	cp tests/endpoint_ticket.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
 		"$(abspath $(@:.c=-stage))/src/ed25519.c"
@@ -174,7 +179,7 @@ UPSTREAM_RELAY_QUIC ?=
 UPSTREAM_QUIC_ROUTE_MIGRATION ?=
 UPSTREAM_IROH_RELAY_URL ?=
 DISCOVERY_DNS_PORT ?=
-RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/lookup_socket.bend src/endpoint_ticket.bend src/endpoint_id.bend src/ip.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
+RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/lookup_socket.bend src/endpoint_ticket.bend src/endpoint_id.bend $(RELAY_URL_SOURCES) src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
 RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_http pkarr_publisher lookup_socket
 
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic

@@ -711,9 +711,11 @@ Full drop-in compatibility remains open. Known differences include the following
 - Ticket dialing starts lookup after its supplied routes fail. Iroh can start
   lookup while it still has candidate addresses and no selected path. Timing
   parity for that case remains open. [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
-- The ticket codec preserves the supplied UTF-8 relay URL. Applications currently
-  supply its canonical form. Matching upstream parsing and normalization of other
-  URL spellings remains open. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
+- Ticket construction and decoding normalize relay URLs before sorting and
+  deduplication. The Bend codec handles default ports, IPv4 and IPv6 literals,
+  credentials, dot segments, percent encoding, query strings, and fragments.
+  Internationalized domain names and validation of Punycode labels remain open.
+  Run `make check-endpoint-ticket` for the upstream serialization examples. [Upstream RelayUrl](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh-base/src/relay_url.rs)
 - A listener can advertise its initial observed UDP address. Refreshing that
   advertisement after a live listener's NAT mapping changes is parked. The
   outbound routed connection has a separate passing address-refresh test below.

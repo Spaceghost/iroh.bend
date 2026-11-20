@@ -1,6 +1,7 @@
 import Base
 import ../src/endpoint_ticket.bend as Tickets
 import ../src/endpoint_id.bend as Id
+import ../src/url_text.bend as T
 
 def display(value: Maybe<&2,String>) -> String:
   match value:
@@ -63,10 +64,42 @@ def print_tickets(inputs: List<String>) -> IO(Unit):
         IO.print(canonical(ticket))
         print_tickets(rest)
 
+# Construct raw Relay values independently of ticket decoding.
+def unhex(s: String) -> List<&2,U32>:
+  match s:
+    case SCon{a,SCon{b,t}}:
+      Con{U32.or(U32.shln(T.hex_value(Char.to_u32(a)),4n),T.hex_value(Char.to_u32(b))),unhex(t)}
+    case _:
+      []
+
+def raw_relays(args: List<String>) -> List<&2,Tickets.TransportAddress>:
+  match args:
+    case Con{h,t}:
+      Con{Tickets.Relay{unhex(h)},raw_relays(t)}
+    case Nil{}:
+      []
+
+def build_relays(inputs: List<String>) -> String:
+  key = Id.decode("ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6")
+  display(Maybe.bind(&2,List<&2,U32>,String,key,k => Tickets.encode(Tickets.Ticket{k,raw_relays(inputs)})))
+
+def print_builds(inputs: List<String>) -> IO(Unit):
+  match inputs:
+    case Con{h,t}:
+      do IO<Unit>:
+        IO.print(build_relays([h]))
+        print_builds(t)
+    case Nil{}:
+      IO.pure(Unit,Unit{})
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_]:
       vectors()
+    case Con{_,Con{"build-relays",rest}}:
+      print_builds(rest)
+    case Con{_,Con{"build-set",rest}}:
+      IO.print(build_relays(rest))
     case Con{_,rest}:
       print_tickets(rest)
     case _:

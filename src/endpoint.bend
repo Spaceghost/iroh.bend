@@ -1,5 +1,6 @@
 import Base
 import ./endpoint_ticket.bend as Tickets
+import ./relay_url.bend as RelayUrl
 import ./ip.bend as Ip
 import ./ed25519.bend as Ed
 import ./direct.bend as Direct
@@ -172,8 +173,11 @@ def decoded_relay(bytes: List<&2,U32>, valid: Bool) -> Maybe<&2,String>:
     case False{}:
       None{}
 
-def relay_url(+bytes: List<&2,U32>) -> Maybe<&2,String>:
+def canonical_relay(+bytes: List<&2,U32>) -> Maybe<&2,String>:
   decoded_relay(bytes,ascii(bytes))
+
+def relay_url(bytes: List<&2,U32>) -> Maybe<&2,String>:
+  Maybe.bind(&2,List<&2,U32>,String,RelayUrl.normalize(bytes),canonical => canonical_relay(canonical))
 
 def add_ip(candidate: Maybe<&2,Address>, routes: Routes) -> Routes:
   match candidate routes:

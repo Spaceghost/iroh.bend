@@ -1,4 +1,5 @@
 import Base
+import ./relay_url.bend as Url
 import ./ed25519.bend as Ed
 import ./endpoint_id.bend as Id
 import ./relay.bend as Wire
@@ -60,17 +61,24 @@ type ReadAddress is Data:
   Address{value: TransportAddress, tail: List<&2,U32>}
   InvalidAddress{}
 
+def parsed_relay(url: Maybe<&2,List<&2,U32>>, tail: List<&2,U32>) -> ReadAddress:
+  match url:
+    case Some{canonical}:
+      Address{Relay{canonical},tail}
+    case None{}:
+      InvalidAddress{}
+
 def relay_bytes(url: List<&2,U32>, tail: List<&2,U32>, valid: Bool) -> ReadAddress:
   match valid:
     case True{}:
-      Address{Relay{url},tail}
+      parsed_relay(Url.normalize(url),tail)
     case False{}:
       InvalidAddress{}
 
 def read_relay(payload: Wire.Split) -> ReadAddress:
   match payload:
-    case Wire.Prefix{+url,tail}:
-      relay_bytes(url,tail,Wire.utf8_scan(url,Wire.Lead{}))
+    case Wire.Prefix{url,tail}:
+      parsed_relay(Url.normalize(url),tail)
     case Wire.ShortPrefix{}:
       InvalidAddress{}
 
@@ -330,7 +338,7 @@ def byte_values(size: Wire.Size) -> Bool:
 def valid_address(address: TransportAddress) -> Bool:
   match address:
     case Relay{url}:
-      Wire.utf8_scan(url,Wire.Lead{})
+      Maybe.is_some(&2,List<&2,U32>,Url.normalize(url))
     case IPv4{ip,port}:
       exact_bytes(Wire.measure_limited(ip,4),4) && U32.is_le(port,65535)
     case IPv6{ip,port}:
@@ -352,9 +360,32 @@ def ticket_bytes(key: List<&2,U32>, +addresses: List<&2,TransportAddress>, valid
     case False{}:
       None{}
 
+def canonical_address(+address: TransportAddress) -> Maybe<&2,TransportAddress>:
+  match address:
+    case Relay{url}:
+      Maybe.map(&2,List<&2,U32>,TransportAddress,s => Relay{s},Url.normalize(url))
+    case _:
+      Bool.pick(Maybe<&2,TransportAddress>,valid_address(address),Some{address},None{})
+
+def prepend_address(head: Maybe<&2,TransportAddress>, tail: Maybe<&2,List<&2,TransportAddress>>)
+    -> Maybe<&2,List<&2,TransportAddress>>:
+  match head tail:
+    case Some{h} Some{t}:
+      Some{Con{h,t}}
+    case _ _:
+      None{}
+
+def canonical_addresses(items: List<&2,TransportAddress>) -> Maybe<&2,List<&2,TransportAddress>>:
+  match items:
+    case Nil{}:
+      Some{[]}
+    case Con{h,t}:
+      prepend_address(canonical_address(h),canonical_addresses(t))
+
 def encode_bytes(ticket: EndpointTicket) -> Maybe<&2,List<&2,U32>>:
-  Ticket{+key,+addresses} = ticket
-  ticket_bytes(key,ordered(addresses),exact_bytes(Wire.measure_limited(key,32),32) && addresses_valid(addresses))
+  Ticket{+key,addresses} = ticket
+  Maybe.bind(&2,List<&2,TransportAddress>,List<&2,U32>,canonical_addresses(addresses),
+    sorted => ticket_bytes(key,ordered(sorted),exact_bytes(Wire.measure_limited(key,32),32)))
 
 def base32_char(index: Nat, symbols: List<&2,Char>) -> Char:
   match index symbols:
