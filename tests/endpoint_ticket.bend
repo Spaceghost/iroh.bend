@@ -1,5 +1,6 @@
 import Base
 import ../src/endpoint_ticket.bend as Tickets
+import ../src/custom_addr.bend as Address
 import ../src/endpoint_id.bend as Id
 import ../src/url_text.bend as T
 import ./punycode.bend as Punycode
@@ -46,10 +47,34 @@ def build_golden(key: Maybe<&2,List<&2,U32>>) -> String:
       relay = {Tickets.Relay{[104,116,116,112,58,47,47,100,101,114,112,46,109,101,46,47]} : Tickets.TransportAddress}
       display(Tickets.encode(Tickets.Ticket{bytes,[ip,relay,ip]}))
 
+def build_custom(key: Maybe<&2,List<&2,U32>>, addr: Result<&2,&2,Address.ParseError,Tickets.TransportAddress>) -> String:
+  match key addr:
+    case Some{k} Done{a}:
+      display(Tickets.encode(Tickets.Ticket{k,[a]}))
+    case _ _:
+      "invalid"
+
+def custom_in(ticket: Maybe<&2,Tickets.EndpointTicket>) -> String:
+  match ticket:
+    case Some{Tickets.Ticket{_,[a]}}:
+      display(Address.format(a))
+    case _:
+      "invalid"
+
+def custom_ticket() -> IO(Unit):
+  +wire = {"endpointacxfr74igmsbvsbnn73wcecg5vt3kbzncqwfrdiampuufwnhkublmaic6c67hvmjz6kzueqcad7q" : String}
+  key = Id.decode("ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6")
+  built = build_custom(key,Address.parse("+00123456789ABCDEF0_00ff"))
+  do IO<Unit>:
+    assert_result(String.eq(built,wire))
+    decoded : Maybe<&2,Tickets.EndpointTicket> <- Tickets.decode(wire)
+    assert_result(String.eq(custom_in(decoded),"123456789abcdef0_00ff"))
+
 def vectors() -> IO(Unit):
   do IO<Unit>:
     Punycode.vectors()
     Custom.vectors()
+    custom_ticket()
     assert_ticket(golden(),golden())
     assert_ticket(mixed(),mixed())
     assert_ticket("Endpointacxfr74i","invalid")
