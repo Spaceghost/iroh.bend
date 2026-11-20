@@ -155,7 +155,7 @@ def assert_live(pair: Quic.MultipathConnection & U32) -> IO(Unit):
     case (conn,1):
       do IO<Unit>:
         Quic.close_multipath(conn)
-        IO.print("PASS Bend exchanged two streams across simultaneous paths")
+        IO.print("PASS Bend exchanged datagrams and two streams on one multipath connection")
     case (conn,_):
       reject(Unit,conn,1,"alternate QUIC path disappeared")
 
@@ -187,11 +187,99 @@ def send_second(sent: Quic.MultipathConnection & U32, +path: U32) -> IO(Unit):
     sent_b : Quic.MultipathConnection & U32 <- send(opened,path,22)
     second(sent_b,path,first)
 
+def same_bytes(actual: List<&2,U32>, expected: List<&2,U32>) -> Bool:
+  match actual expected:
+    case Nil{} Nil{}:
+      True{}
+    case Con{a,rest} Con{b,tail}:
+      U32.is_eq(a,b) && same_bytes(rest,tail)
+    case _ _:
+      False{}
+
+def checked_datagram(conn: Quic.MultipathConnection, valid: Bool) -> IO(Quic.MultipathConnection):
+  match valid:
+    case True{}:
+      IO.pure(Quic.MultipathConnection,conn)
+    case False{}:
+      reject(Quic.MultipathConnection,conn,1,"unexpected multipath datagram bytes")
+
+def received_datagram(value: Quic.MultipathConnection & Maybe<&1,List<&2,U32>>, expected: List<&2,U32>,
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match value:
+    case (conn,Some{bytes}):
+      checked_datagram(conn,same_bytes(bytes,expected))
+    case (conn,None{}):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def read_datagram(fuel: Nat, conn: Quic.MultipathConnection, +expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      reject(Quic.MultipathConnection,conn,1,"multipath datagram timed out")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        active : Quic.MultipathConnection <- step(conn)
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
+          Quic.read_multipath_datagram(active)
+        value : Quic.MultipathConnection & Maybe<&1,List<&2,U32>> <- ok(Maybe<&1,List<&2,U32>>,result)
+        received_datagram(value,expected,next => read_datagram(left,next,expected))
+
+def written_datagram(value: Quic.MultipathConnection & U32,
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match value:
+    case (conn,1):
+      IO.pure(Quic.MultipathConnection,conn)
+    case (conn,_):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def send_datagram(fuel: Nat, conn: Quic.MultipathConnection, +bytes: List<&2,U32>) -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      reject(Quic.MultipathConnection,conn,1,"multipath datagram queue remained full")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        active : Quic.MultipathConnection <- step(conn)
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.write_multipath_datagram(active,bytes)
+        value : Quic.MultipathConnection & U32 <- ok(U32,result)
+        written_datagram(value,next => send_datagram(left,next,bytes))
+
+def oversize_result(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>)
+    -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,Fail{(90,_)}):
+      IO.pure(Quic.MultipathConnection,conn)
+    case (conn,_):
+      reject(Quic.MultipathConnection,conn,1,"oversized multipath datagram was accepted")
+
+def test_limit(pair: Quic.MultipathConnection & U32) -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,0):
+      reject(Quic.MultipathConnection,conn,1,"multipath datagrams were not negotiated")
+    case (conn,limit):
+      do IO<Quic.MultipathConnection>:
+        result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <-
+          Quic.write_multipath_datagram(conn,List.replicate(U32,Nat.add(U32.to_nat(limit),1n),0))
+        oversize_result(result)
+
+def datagram_exchange(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.multipath_datagram_limit(conn)
+    limit : Quic.MultipathConnection & U32 <- ok(U32,result)
+    tested : Quic.MultipathConnection <- test_limit(limit)
+    sent : Quic.MultipathConnection <- send_datagram(3000n,tested,[0,128,255])
+    reply : Quic.MultipathConnection <- read_datagram(3000n,sent,[255,128,0])
+    empty : Quic.MultipathConnection <- send_datagram(3000n,reply,[])
+    read_datagram(3000n,empty,[])
+
 def run_paths(candidate: Quic.MultipathConnection & U32) -> IO(Unit):
   (conn,+path) = candidate
   do IO<Unit>:
     ready : Quic.MultipathConnection <- wait_path(3000n,conn,path)
-    opened : Quic.MultipathConnection & U32 <- open(ready)
+    datagrams : Quic.MultipathConnection <- datagram_exchange(ready)
+    opened : Quic.MultipathConnection & U32 <- open(datagrams)
     sent : Quic.MultipathConnection & U32 <- send(opened,0,11)
     send_second(sent,path)
 

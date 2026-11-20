@@ -38,6 +38,21 @@ def next_multipath_path(conn: MultipathConnection, after: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
   import "./quic_multipath.c"
 
+# Largest payload the peer and all current paths can carry. Zero before negotiation.
+def multipath_datagram_limit(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+# 1 means queued. 0 means retry after stepping. QUIC never retransmits datagrams.
+def write_multipath_datagram(conn: MultipathConnection, bytes: List<&2,U32>)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+# An empty received datagram is Some{[]}.
+def read_multipath_datagram(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>):
+  import "./quic_multipath.c"
+
 # Direction zero is bidirectional. Direction one is send-only.
 def open_multipath_stream(conn: MultipathConnection, direction: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):

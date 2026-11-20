@@ -67,9 +67,17 @@ def echo_pair(conn: Quic.MultipathConnection, first: U32, second: U32, path: U32
     b : Quic.MultipathConnection & U32 <- incoming(4000n,echoed_a,0)
     echo(b,path,second)
 
+def datagram_echo(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    binary : Quic.MultipathConnection <- Fixture.read_datagram(4000n,conn,[0,128,255])
+    sent : Quic.MultipathConnection <- Fixture.send_datagram(4000n,binary,[255,128,0])
+    empty : Quic.MultipathConnection <- Fixture.read_datagram(4000n,sent,[])
+    Fixture.send_datagram(4000n,empty,[])
+
 def exchange(conn: Quic.MultipathConnection, uni: U32, first: U32, second: U32) -> IO(Unit):
   do IO<Unit>:
-    primed : Quic.MultipathConnection <- receive_uni(conn,uni)
+    datagrams : Quic.MultipathConnection <- datagram_echo(conn)
+    primed : Quic.MultipathConnection <- receive_uni(datagrams,uni)
     echoed : Quic.MultipathConnection <- echo_pair(primed,first,second,0)
     confirmed : Quic.MultipathConnection <- receive_uni(echoed,77)
     Quic.close_multipath(confirmed)
@@ -112,7 +120,8 @@ def wait_close(fuel: Nat, conn: Quic.MultipathConnection) -> IO(Unit):
 def echo_affine(candidate: Quic.MultipathConnection & U32) -> IO(Unit):
   (conn,path) = candidate
   do IO<Unit>:
-    echoed : Quic.MultipathConnection <- echo_pair(conn,11,22,path)
+    datagrams : Quic.MultipathConnection <- datagram_echo(conn)
+    echoed : Quic.MultipathConnection <- echo_pair(datagrams,11,22,path)
     wait_close(5000n,echoed)
 
 def serve_affinity(first: Quic.MultipathListener & Quic.MultipathConnection) -> IO(Unit):

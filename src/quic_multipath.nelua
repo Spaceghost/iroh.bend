@@ -12,10 +12,13 @@
 require 'C.stdlib'
 require 'C.string'
 local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer}
-local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64}
+local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize}
+local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{max_datagram_frame_size:uint32}
+local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
 local native_stream_t <cimport,nodecl,codename 'picoquic_stream_head_t'> = @record{app_stream_ctx:pointer}
 local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
-  is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64
+  is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64,
+  remote_parameters:transport_t,first_datagram:*frame_t
 }
 local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
 local buffer_t <cimport,nodecl,codename 'ptls_buffer_t'> = @record{}
@@ -65,6 +68,11 @@ local function picoquic_current_time():uint64 <cimport,nodecl> end
 local function picoquic_create(max:uint32, cert:cstring,key:cstring,ca:cstring,alpn:cstring, cb:pointer, cbctx:pointer,
     cidcb:pointer,cidctx:pointer,seed:pointer, now:uint64, sim:pointer,tickets:cstring,enckey:pointer,enclen:csize):*quic_t <cimport,nodecl> end
 local function picoquic_set_default_multipath_option(quic:*quic_t, enabled:cint) <cimport,nodecl> end
+local function picoquic_set_default_tp_value(quic:*quic_t, kind:uint64, value:uint64):cint <cimport,nodecl> end
+local function picoquic_queue_datagram_frame(cnx:*cnx_t,len:csize,data:*uint8):cint <cimport,nodecl> end
+local picoquic_tp_max_datagram_frame_size:uint64 <cimport,nodecl>
+local picoquic_callback_datagram:cint <cimport,nodecl>
+local PICOQUIC_ERROR_DATAGRAM_TOO_LONG:cint <cimport,nodecl>
 local function picoquic_set_verify_certificate_callback(quic:*quic_t, verify:*verify_t, dispose:pointer) <cimport,nodecl> end
 local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
 local function picoquic_set_tls_certificate_chain(quic:*quic_t, certs:*iov_t, count:csize) <cimport,nodecl> end
@@ -157,6 +165,7 @@ local ENOTSUP: uint32 <cimport,nodecl>
 local ECONNRESET: uint32 <cimport,nodecl>
 local EPIPE: uint32 <cimport,nodecl>
 local ENOBUFS: uint32 <cimport,nodecl>
+local EMSGSIZE: uint32 <cimport,nodecl>
 local PTLS_ALERT_BAD_CERTIFICATE: cint <cimport,nodecl>
 local PTLS_ALERT_UNSUPPORTED_CERTIFICATE: cint <cimport,nodecl>
 local PTLS_ALERT_INTERNAL_ERROR: cint <cimport,nodecl>
@@ -167,6 +176,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'bind_multipath', 'accept_multipath', 'close_multipath_listener', 'accept_multipath_stream', 'next_multipath_path',
+  'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram',
   'MultipathConnection', 'MultipathListener', 'MultipathReadPending', 'MultipathReadFin', 'MultipathReadBytes',
   'Some', 'None', 'Unit', 'Con', 'Nil'
 }
@@ -191,6 +201,9 @@ local iroh_mp_accept_multipath: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath_listener: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_next_multipath_path: uint32 <cimport,nodecl>
+local iroh_mp_multipath_datagram_limit: uint32 <cimport,nodecl>
+local iroh_mp_write_multipath_datagram: uint32 <cimport,nodecl>
+local iroh_mp_read_multipath_datagram: uint32 <cimport,nodecl>
 local iroh_mp_MultipathConnection: uint32 <cimport,nodecl>
 local iroh_mp_MultipathListener: uint32 <cimport,nodecl>
 local iroh_mp_MultipathReadPending: uint32 <cimport,nodecl>
@@ -233,6 +246,7 @@ local PATH_LIMIT: uint32 <comptime> = 8
 local STREAM_LIMIT: uint32 <comptime> = 128
 local LISTENER_LIMIT: uint32 <comptime> = 64
 local HANDSHAKE_LIMIT: uint64 <comptime> = 10000000
+local DATAGRAM_QUEUE_LIMIT: uint32 <comptime> = 64
 local Listener = @record{
   next: pointer, id: uint32, fd: cint, quic: *quic_t, local_addr: storage_t,
   refs: uint32, stopped: boolean
@@ -245,11 +259,13 @@ local Stream = @record{
   next: pointer, id: uint32, rx: *[0]uint8, size: csize,
   incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean
 }
+local Datagram = @record{next:pointer,size:csize}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, listener: *Listener, accepted: boolean,
+  datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   ready: boolean, closed: boolean, buffer_error: boolean
 }
 local connections: *Connection
@@ -470,6 +486,31 @@ local function release_listener(listener: *Listener)
   C.free(listener)
 end
 
+local function pop_datagram(conn: *Connection)
+  local item = conn.datagram_first
+  conn.datagram_first = (@*Datagram)(item.next)
+  if conn.datagram_first == nilptr then conn.datagram_last = nilptr end
+  conn.datagram_count = conn.datagram_count - 1
+  C.free(item)
+end
+
+local function datagram_bytes(item: *Datagram): *uint8
+  return &((@*[0]uint8)(item))[#Datagram]
+end
+
+local function receive_datagram(conn: *Connection, bytes: *uint8, size: csize)
+  if size > IO_CAPACITY then return end
+  local item = (@*Datagram)(C.malloc(#Datagram + size))
+  if item == nilptr then return end
+  item.next = nilptr
+  item.size = size
+  if size ~= 0 then C.memcpy(datagram_bytes(item),bytes,size) end
+  if conn.datagram_count >= DATAGRAM_QUEUE_LIMIT then pop_datagram(conn) end
+  if conn.datagram_last == nilptr then conn.datagram_first = item else conn.datagram_last.next = item end
+  conn.datagram_last = item
+  conn.datagram_count = conn.datagram_count + 1
+end
+
 local function destroy(conn: *Connection)
   if conn.listener ~= nilptr then
     picoquic_set_callback(conn.cnx,nilptr,nilptr)
@@ -489,6 +530,7 @@ local function destroy(conn: *Connection)
     C.free(stream.rx)
     C.free(stream)
   end
+  while conn.datagram_first ~= nilptr do pop_datagram(conn) end
   C.free(conn)
 end
 
@@ -565,6 +607,8 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
   local conn = (@*Connection)(user)
   if kind == picoquic_callback_ready then
     conn.ready = true
+  elseif kind == picoquic_callback_datagram then
+    receive_datagram(conn,bytes,size)
   elseif kind == picoquic_callback_path_available or kind == picoquic_callback_path_suspended or
       kind == picoquic_callback_path_deleted then
     local path = find_path(conn,id)
@@ -684,7 +728,8 @@ local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
   initial.status = 1
   local now = picoquic_current_time()
   conn.quic = picoquic_create(1,nilptr,nilptr,nilptr,alpn,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if conn.quic == nilptr or not install_identity(conn.quic,&seed[0],&key[0]) then
+  if conn.quic == nilptr or not install_identity(conn.quic,&seed[0],&key[0]) or
+      picoquic_set_default_tp_value(conn.quic,picoquic_tp_max_datagram_frame_size,IO_CAPACITY) ~= 0 then
     destroy(conn)
     return io_fail(e,EIO,'could not configure pinned QUIC raw public keys')
   end
@@ -926,7 +971,8 @@ local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local now = picoquic_current_time()
   listener.quic = picoquic_create(LISTENER_LIMIT,nilptr,nilptr,nilptr,alpn,(@pointer)(server_event),listener,
     nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],&key[0]) then
+  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],&key[0]) or
+      picoquic_set_default_tp_value(listener.quic,picoquic_tp_max_datagram_frame_size,IO_CAPACITY) ~= 0 then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure pinned QUIC listener')
   end
@@ -1055,6 +1101,79 @@ local function next_path_run(e: Env, args: *[0]Term, work: *IoWork): Term
     path = (@*Path)(path.next)
   end
   return io_tup(e,args[0],next == nilptr and none(e) or optional_id(e,next.id))
+end
+
+local function datagram_frame_limit(conn: *Connection): csize
+  if not conn.ready then return 0 end
+  local mtu = IO_CAPACITY
+  local paths = (@*[0]*path_t)(conn.cnx.path)
+  for i = 0, < conn.cnx.nb_paths do
+    if paths[i].send_mtu < mtu then mtu = paths[i].send_mtu end
+  end
+  -- Reserve the short header, maximum connection ID and packet number, and AEAD tag.
+  if mtu <= 41 then return 0 end
+  local frame = mtu - 41
+  local remote = conn.cnx.remote_parameters.max_datagram_frame_size
+  if remote < frame then frame = remote end
+  return frame
+end
+
+local function limit_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local frame = datagram_frame_limit(conn)
+  local payload: Term = 0
+  if frame >= 67 then
+    payload = frame - 3
+  elseif frame >= 65 then
+    payload = 63
+  elseif frame >= 2 then
+    payload = frame - 2
+  end
+  return io_tup(e,args[0],io_done(e,payload))
+end
+
+local function write_datagram(e: Env, conn: *Connection, payload: Term): Term
+  local bytes: [IO_CAPACITY]uint8
+  local size = bytes_from_list(e,payload,&bytes[0],IO_CAPACITY)
+  if size == -1 then return io_fail(e,EINVAL,'invalid QUIC datagram bytes') end
+  if size < 0 then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds packet capacity') end
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready then return io_done(e,0) end
+  if conn.cnx.remote_parameters.max_datagram_frame_size == 0 then
+    return io_fail(e,ENOTSUP,'peer did not negotiate QUIC datagrams')
+  end
+  local overhead: csize = size >= 64 and 3 or 2
+  if (@csize)(size) + overhead > datagram_frame_limit(conn) then
+    return io_fail(e,EMSGSIZE,'QUIC datagram exceeds the negotiated path limit')
+  end
+  local item = conn.cnx.first_datagram
+  local queued: uint32 = 0
+  while item ~= nilptr do
+    queued = queued + 1
+    if queued >= DATAGRAM_QUEUE_LIMIT then return io_done(e,0) end
+    item = (@*frame_t)(item.next_misc_frame)
+  end
+  local status = picoquic_queue_datagram_frame(conn.cnx,(@csize)(size),&bytes[0])
+  if status == PICOQUIC_ERROR_DATAGRAM_TOO_LONG then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds path size') end
+  if status ~= 0 then return io_fail(e,EIO,picoquic_error_name((@uint64)(status))) end
+  return io_done(e,1)
+end
+
+local function write_datagram_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],write_datagram(e,find_connection(e,args[0]),args[1]))
+end
+
+local function read_datagram_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr then return io_tup(e,args[0],closed_error(e,conn)) end
+  if not conn.ready or conn.datagram_first == nilptr then
+    return io_tup(e,args[0],conn.closed and closed_error(e,conn) or none(e))
+  end
+  local item = conn.datagram_first
+  local bytes = io_list(e,(@cstring)(datagram_bytes(item)),item.size)
+  pop_datagram(conn)
+  return io_tup(e,args[0],io_done(e,io_box(e,iroh_mp_Some,bytes)))
 end
 
 local function open_stream(e: Env, conn: *Connection, direction: Term): Term
@@ -1228,4 +1347,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_close_multipath_listener ~= 0xffffffff then io_eff(iroh_mp_close_multipath_listener,close_listener_run) end
   if iroh_mp_accept_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_accept_multipath_stream,accept_stream_run) end
   if iroh_mp_next_multipath_path ~= 0xffffffff then io_eff(iroh_mp_next_multipath_path,next_path_run) end
+  if iroh_mp_multipath_datagram_limit ~= 0xffffffff then io_eff(iroh_mp_multipath_datagram_limit,limit_run) end
+  if iroh_mp_write_multipath_datagram ~= 0xffffffff then io_eff(iroh_mp_write_multipath_datagram,write_datagram_run) end
+  if iroh_mp_read_multipath_datagram ~= 0xffffffff then io_eff(iroh_mp_read_multipath_datagram,read_datagram_run) end
 end
