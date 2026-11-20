@@ -46,7 +46,8 @@ async def main():
                 if not fragmented and opcode == 0x82 and len(payload) == 114:
                     fragmented = True
                     noticed.clear()
-                    # The 14-byte prefix and its 6 bytes of framing exhaust the 20-byte burst.
+                    # The masked proof spends 104 of the 124 tokens.
+                    # The masked 14-byte prefix spends the remaining 20.
                     upstream_writer.write(fragment(0x02, payload[:14]))
                     await upstream_writer.drain()
                     await asyncio.wait_for(noticed.wait(), 2)

@@ -267,12 +267,19 @@ stop
 start rate-ws rate
 timeout 8 "$client" "ws://127.0.0.1:$port/relay" rate
 timeout 8 "$client" "ws://127.0.0.1:$port/relay" rate-v1
+timeout 8 "$client" "ws://127.0.0.1:$port/relay" rate-early
+stop
+
+start fragment-ws fragment-rate
 python3 -B tests/relay_server_fragments.py "$port" "$client"
 stop
 
 start rate-wss rate "$scratch/cert.pem" "$scratch/key.pem"
 timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate
 timeout 8 "$client" "wss://127.0.0.1:$port/relay" rate-paced
+stop
+
+start fragment-wss fragment-rate "$scratch/cert.pem" "$scratch/key.pem"
 python3 -B tests/relay_server_fragments.py "$port" "$client" "$scratch/ca.pem"
 stop
 

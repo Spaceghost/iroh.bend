@@ -26,10 +26,10 @@ def serve(cert: String, key: String, access: Access.Control) -> IO(Unit):
     bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,Relay.bind_with_access("127.0.0.1",0,cert,key,access))
     run_server(bound)
 
-def serve_limited(cert: String, key: String) -> IO(Unit):
+def serve_limited(cert: String, key: String, burst: U32) -> IO(Unit):
   do IO<Unit>:
     bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
-      Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{200,Some{20}}))
+      Relay.bind_configured("127.0.0.1",0,cert,key,Access.AllowAll{},Rate.ReceiveLimit{200,Some{burst}}))
     run_server(bound)
 
 def read_command_result(result: File & Result<&1,&1,U32 & String,String>) -> IO(String):
@@ -268,9 +268,13 @@ def run(args: List<String>) -> IO(Unit):
     case Con{_,Con{"headers",Con{cert,Con{key,Nil{}}}}}:
       serve(cert,key,header_fixture(8n))
     case Con{_,Con{"rate",Nil{}}}:
-      serve_limited("","")
+      serve_limited("","",20)
     case Con{_,Con{"rate",Con{cert,Con{key,Nil{}}}}}:
-      serve_limited(cert,key)
+      serve_limited(cert,key,20)
+    case Con{_,Con{"fragment-rate",Nil{}}}:
+      serve_limited("","",124)
+    case Con{_,Con{"fragment-rate",Con{cert,Con{key,Nil{}}}}}:
+      serve_limited(cert,key,124)
     case Con{_,Con{"live-rate",Con{path,Nil{}}}}:
       serve_live("","",path)
     case Con{_,Con{"live-rate",Con{path,Con{cert,Con{key,Nil{}}}}}}:

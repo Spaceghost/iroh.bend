@@ -14,7 +14,7 @@ require 'C.string'
 
 ##[[
 for _, name in ipairs{'relay_bind','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
-                      'relay_resume_rx','relay_reconfigure_rx','relay_kick','relay_stop',
+                      'relay_meter_challenge','relay_resume_rx','relay_reconfigure_rx','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayRead','RelayLeft',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material',
@@ -28,6 +28,7 @@ local iroh_srv_relay_bind: uint32 <cimport,nodecl>
 local iroh_srv_relay_poll: uint32 <cimport,nodecl>
 local iroh_srv_relay_queue: uint32 <cimport,nodecl>
 local iroh_srv_relay_authorized_with_meter: uint32 <cimport,nodecl>
+local iroh_srv_relay_meter_challenge: uint32 <cimport,nodecl>
 local iroh_srv_relay_resume_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_reconfigure_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_kick: uint32 <cimport,nodecl>
@@ -159,7 +160,7 @@ local Header = @record{next: pointer, name: cstring, size: csize, values: pointe
 local HeaderCapture = @record{ws: *lws, text: cstring, headers: pointer, used: csize, failed: boolean}
 local Peer = @record{
   next: pointer, ws: *lws, id: uint32, deadline: uint64, authorized: boolean, closing: boolean,
-  metered: boolean, rx_held: boolean, inside_frame: boolean,
+  metered: boolean, challenged: boolean, rx_held: boolean, inside_frame: boolean,
   auth_header: [152]cchar, auth_len: cint,
   path: [24]cchar, path_len: cint, authorization: pointer, query: pointer, headers: pointer,
   body: pointer, length: csize, capacity: csize, queued: cuint, outgoing: pointer, tail: pointer,
@@ -769,6 +770,15 @@ local function export_run(e: Env, f: *[0]Term, work: *IoWork): Term
   return io_tup(e,f[0],io_box(e,iroh_srv_Some,io_list(e,&material[0],32)))
 end
 
+local function meter_challenge_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer ~= nilptr then
+    peer.challenged = true
+    peer.metered = term_aux(f[2]) == iroh_srv_True
+  end
+  return f[0]
+end
+
 local function authorized_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
   if peer ~= nilptr then
@@ -804,7 +814,7 @@ local function reconfigure_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
   at = server.peers
   while at ~= nilptr do
     local peer = (@*Peer)(at)
-    if peer.authorized and not peer.closing then
+    if (peer.authorized or peer.challenged) and not peer.closing then
       peer.metered = metered
       resume_rx(peer)
     end
@@ -861,6 +871,7 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   if iroh_srv_relay_millis ~= 0xffffffff then io_eff(iroh_srv_relay_millis,millis_run) end
   if iroh_srv_relay_queue ~= 0xffffffff then io_eff(iroh_srv_relay_queue,queue_run) end
   if iroh_srv_relay_authorized_with_meter ~= 0xffffffff then io_eff(iroh_srv_relay_authorized_with_meter,authorized_run) end
+  if iroh_srv_relay_meter_challenge ~= 0xffffffff then io_eff(iroh_srv_relay_meter_challenge,meter_challenge_run) end
   if iroh_srv_relay_resume_rx ~= 0xffffffff then io_eff(iroh_srv_relay_resume_rx,resume_rx_run) end
   if iroh_srv_relay_reconfigure_rx ~= 0xffffffff then io_eff(iroh_srv_relay_reconfigure_rx,reconfigure_rx_run) end
   if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end

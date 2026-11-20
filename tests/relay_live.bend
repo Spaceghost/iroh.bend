@@ -179,6 +179,18 @@ def heartbeat(+url: String) -> IO(Unit):
     Client.close(kept)
     IO.print("PASS relay keepalive accepts the matching pong and closes the connection with a mismatched pong")
 
+def accept_rate_data(reply: Client.Connection & Wire.Frame, bytes: List<&2,U32>) -> IO(Client.Connection):
+  match reply:
+    case (conn,Wire.Message{13,[2]}):
+      expect(conn,6,bytes)
+    case other:
+      check_frame(other,6,bytes)
+
+def expect_rate_data(conn: Client.Connection, bytes: List<&2,U32>) -> IO(Client.Connection):
+  do IO<Client.Connection>:
+    reply : Client.Connection & Wire.Frame <- IO.try(Client.Connection & Wire.Frame,Client.receive(conn))
+    accept_rate_data(reply,bytes)
+
 def rate_payload() -> List<&2,U32>:
   List.replicate(U32,80n,42)
 
@@ -204,7 +216,7 @@ def finish_rate(sender: Client.Connection, receiver: Client.Connection, started:
     finished : Nat <- IO.now()
     elapsed_limit(Nat.is_ge(finished,Nat.add(750n,started)))
     returning : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(receiver,source(),0,0,payload()))
-    confirmed : Client.Connection <- expect(sender,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    confirmed : Client.Connection <- expect_rate_data(sender,List.append(&2,U32,peer(),Con{0,payload()}))
     Client.close(returning)
     Client.close(confirmed)
     IO.print("PASS relay throttled and resumed datagrams with the expected rate-limit notice")
@@ -217,9 +229,9 @@ def rate_exchange(sender: Client.Connection, receiver: Client.Connection, versio
     second : Client.Connection <- send_rate_frame(first)
     third : Client.Connection <- send_rate_frame(second)
     noticed : Client.Connection <- rate_notice(third,version)
-    arrived : Client.Connection <- expect(receiver,6,frame)
-    received : Client.Connection <- expect(arrived,6,frame)
-    drained : Client.Connection <- expect(received,6,frame)
+    arrived : Client.Connection <- expect_rate_data(receiver,frame)
+    received : Client.Connection <- expect_rate_data(arrived,frame)
+    drained : Client.Connection <- expect_rate_data(received,frame)
     finish_rate(noticed,drained,started)
 
 # Wait for each delivery before writing again so an upstream transport read
@@ -230,11 +242,11 @@ def paced_rate_exchange(sender: Client.Connection, receiver: Client.Connection) 
     started : Nat <- IO.now()
     first : Client.Connection <- send_rate_frame(sender)
     noticed : Client.Connection <- rate_notice(first,2)
-    arrived : Client.Connection <- expect(receiver,6,frame)
+    arrived : Client.Connection <- expect_rate_data(receiver,frame)
     second : Client.Connection <- send_rate_frame(noticed)
-    received : Client.Connection <- expect(arrived,6,frame)
+    received : Client.Connection <- expect_rate_data(arrived,frame)
     last : Client.Connection <- send_rate_frame(second)
-    drained : Client.Connection <- expect(received,6,frame)
+    drained : Client.Connection <- expect_rate_data(received,frame)
     finish_rate(last,drained,started)
 
 def test_paced_rate(+url: String) -> IO(Unit):
@@ -255,15 +267,15 @@ def live_rate_exchange(sender: Client.Connection, receiver: Client.Connection) -
   do IO<Unit>:
     first : Client.Connection <- send_rate_frame(sender)
     notified : Client.Connection <- rate_notice(first,2)
-    arrived : Client.Connection <- expect(receiver,6,frame)
     queued : Client.Connection <- send_rate_frame(notified)
     IO.print("rate paused")
-    resumed : Client.Connection <- expect(arrived,6,frame)
+    arrived : Client.Connection <- expect_rate_data(receiver,frame)
+    resumed : Client.Connection <- expect_rate_data(arrived,frame)
     IO.print("rate resumed")
     after : Client.Connection <- send_rate_frame(queued)
-    received : Client.Connection <- expect(resumed,6,frame)
+    received : Client.Connection <- expect_rate_data(resumed,frame)
     returning : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(received,source(),0,0,payload()))
-    confirmed : Client.Connection <- expect(after,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    confirmed : Client.Connection <- expect_rate_data(after,List.append(&2,U32,peer(),Con{0,payload()}))
     Client.close(returning)
     Client.close(confirmed)
     IO.print("PASS live receive limit changed on existing connections")
@@ -273,6 +285,20 @@ def test_live_rate(+url: String) -> IO(Unit):
     receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
     sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
     live_rate_exchange(sender,receiver)
+
+def test_early_rate(+url: String) -> IO(Unit):
+  do IO<Unit>:
+    receiver : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,42)))
+    ready : Client.Connection <- rate_notice(receiver,2)
+    sender : Client.Connection <- IO.try(Client.Connection,Client.connect(url,List.replicate(U32,32n,73)))
+    limited : Client.Connection <- rate_notice(sender,2)
+    sent : Client.Connection <- send_rate_frame(limited)
+    arrived : Client.Connection <- expect(ready,6,List.append(&2,U32,source(),Con{0,rate_payload()}))
+    returning : Client.Connection <- IO.try(Client.Connection,Client.send_datagram(arrived,source(),0,0,payload()))
+    confirmed : Client.Connection <- expect(sent,6,List.append(&2,U32,peer(),Con{0,payload()}))
+    Client.close(returning)
+    Client.close(confirmed)
+    IO.print("PASS both relay connections received their rate notice before application traffic")
 
 def empty_poll(reply: Client.Connection & Maybe<&1,Wire.Frame>) -> IO(Client.Connection):
   match reply:
@@ -363,6 +389,8 @@ def run(args: List<String>) -> IO(Unit):
       test_rate(url,2)
     case Con{_,Con{url,Con{"rate-v1",Nil{}}}}:
       test_rate(url,1)
+    case Con{_,Con{url,Con{"rate-early",Nil{}}}}:
+      test_early_rate(url)
     case Con{_,Con{url,Con{"rate-paced",Nil{}}}}:
       test_paced_rate(url)
     case Con{_,Con{url,Con{"live-rate",Nil{}}}}:

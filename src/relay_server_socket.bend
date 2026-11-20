@@ -47,6 +47,9 @@ def relay_authorized(server: ServerSocket, id: U32) -> IO(ServerSocket):
 def relay_authorized_with_meter(server: ServerSocket, id: U32, metered: Bool) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 
+def relay_meter_challenge(server: ServerSocket, id: U32, metered: Bool) -> IO(ServerSocket):
+  import "./relay_server_socket.c"
+
 def relay_resume_rx(server: ServerSocket, id: U32) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 

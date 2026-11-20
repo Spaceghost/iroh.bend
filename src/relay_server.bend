@@ -9,7 +9,7 @@ import ./relay_access.bend as Access
 import ./relay_rate.bend as Rate
 
 type Client is Data:
-  Challenged{id: U32, version: Wire.Version, nonce: List<&2,U32>}
+  Challenged{id: U32, version: Wire.Version, nonce: List<&2,U32>, rate: Rate.Bucket}
   Authorized{id: U32, version: Wire.Version, key: List<&2,U32>, heartbeat: Health.Heartbeat, rate: Rate.Bucket}
 
 # Delivery history belongs to the endpoint and survives session promotion.
@@ -29,7 +29,7 @@ type Server is Type:
 
 def id_of(client: Client) -> U32:
   match client:
-    case Challenged{id,_,_}:
+    case Challenged{id,_,_,_}:
       id
     case Authorized{id,_,_,_,_}:
       id
@@ -358,11 +358,26 @@ def kick(socket: Net.ServerSocket, +id: U32, flush: U32, +clients: Clients) -> I
     next : Net.ServerSocket <- Net.relay_kick(socket,id,flush)
     unregister(next,clients,id,find_id(clients,id))
 
-def registered(result: Net.ServerSocket & Bool, clients: Clients, +id: U32,
+def configured_limits(clients: Clients) -> Rate.Limits:
+  Registry{_,_,limits} = clients
+  limits
+
+def rate_notice(socket: Net.ServerSocket, id: U32, version: Wire.Version, first: Bool)
+    -> IO(Net.ServerSocket):
+  match version first:
+    case Wire.V2{} True{}:
+      notify(socket,id,Wire.V2{},13,[2])
+    case _ _:
+      IO.pure(Net.ServerSocket,socket)
+
+def registered(result: Net.ServerSocket & Bool, +clients: Clients, +id: U32,
     protocol: Wire.Version, nonce: List<&2,U32>) -> IO(State):
   match result:
     case (socket,True{}):
-      IO.pure(State,Serving{socket,add_client(clients,Challenged{id,protocol,nonce})})
+      do IO<State>:
+        metered : Net.ServerSocket <- Net.relay_meter_challenge(socket,id,Rate.metered(configured_limits(clients)))
+        now : U32 <- Net.relay_millis()
+        return Serving{metered,add_client(clients,Challenged{id,protocol,nonce,Rate.initial(configured_limits(clients),now)})}
     case (socket,False{}):
       kick(socket,id,0,clients)
 
@@ -385,17 +400,20 @@ def send_frame(socket: Net.ServerSocket, clients: Clients, id: U32, wire: Wire.E
     queued : Net.ServerSocket & Bool <- queue_frame(socket,id,wire)
     return after_send(queued,clients)
 
-def configured_limits(clients: Clients) -> Rate.Limits:
-  Registry{_,_,limits} = clients
-  limits
+def admission_bucket(session: Maybe<&2,Client>, limits: Rate.Limits, now: U32) -> Rate.Bucket:
+  match session:
+    case Some{Challenged{_,_,_,bucket}}:
+      bucket
+    case _:
+      Rate.initial(limits,now)
 
-def new_client(+clients: Clients, +id: U32, protocol: Wire.Version, key: List<&2,U32>,
-    +now: U32, random: U32) -> Clients:
+def new_client(clients: Clients, +id: U32, protocol: Wire.Version, key: List<&2,U32>,
+    now: U32, random: U32, bucket: Rate.Bucket) -> Clients:
   add_client(drop_client(clients,id),
-    Authorized{id,protocol,key,Health.initial(now,random),Rate.initial(configured_limits(clients),now)})
+    Authorized{id,protocol,key,Health.initial(now,random),bucket})
 
 def confirmed(queued: Net.ServerSocket & Bool, +clients: Clients, +id: U32,
-    protocol: Wire.Version, +key: List<&2,U32>, +previous: Maybe<&2,Client>) -> IO(State):
+    +protocol: Wire.Version, +key: List<&2,U32>, +previous: Maybe<&2,Client>) -> IO(State):
   match queued:
     case (socket,True{}):
       do IO<State>:
@@ -403,8 +421,10 @@ def confirmed(queued: Net.ServerSocket & Bool, +clients: Clients, +id: U32,
         next : Net.ServerSocket <- status(marked,previous,1,
           "Another endpoint connected with the same endpoint id. No more messages will be received.")
         random : Result<&1,&1,U32 & String,U32> <- IO.random_u32()
-        now : U32 <- Net.relay_millis()
-        return Serving{next,new_client(clients,id,protocol,key,now,Result.default(&1,&1,U32 & String,U32,random,id))}
+        +now : U32 <- Net.relay_millis()
+        +bucket : Rate.Bucket = admission_bucket(find_id(clients,id),configured_limits(clients),now)
+        notified : Net.ServerSocket <- rate_notice(next,id,protocol,Rate.was_notified(bucket))
+        return Serving{notified,new_client(clients,id,protocol,key,now,Result.default(&1,&1,U32 & String,U32,random,id),bucket)}
     case (socket,False{}):
       do IO<State>:
         next : State <- kick(socket,id,0,clients)
@@ -534,14 +554,6 @@ def authenticated_frame(socket: Net.ServerSocket, clients: Clients, +id: U32, +v
   updated = update_client(clients,Authorized{id,version,sender,received_activity(timer,now,frame),bucket})
   relay_frame(socket,updated,id,version,sender,frame)
 
-def rate_notice(socket: Net.ServerSocket, id: U32, version: Wire.Version, first: Bool)
-    -> IO(Net.ServerSocket):
-  match version first:
-    case Wire.V2{} True{}:
-      notify(socket,id,Wire.V2{},13,[2])
-    case _ _:
-      IO.pure(Net.ServerSocket,socket)
-
 def save_charge(socket: Net.ServerSocket, clients: Clients, id: U32, version: Wire.Version,
     sender: List<&2,U32>, timer: Health.Heartbeat, bucket: Rate.Bucket) -> State:
   Serving{socket,update_client(clients,Authorized{id,version,sender,timer,bucket})}
@@ -558,9 +570,21 @@ def metered_read(socket: Net.ServerSocket, clients: Clients, +id: U32, +version:
         notified : Net.ServerSocket <- rate_notice(socket,id,version,first)
         return save_charge(notified,clients,id,version,sender,timer,bucket)
 
+def metered_challenge(socket: Net.ServerSocket, clients: Clients, +id: U32, version: Wire.Version,
+    nonce: List<&2,U32>, charge: Rate.Charge) -> IO(State):
+  match charge:
+    case Rate.KeepReading{bucket}:
+      do IO<State>:
+        opened : Net.ServerSocket <- Net.relay_resume_rx(socket,id)
+        return Serving{opened,update_client(clients,Challenged{id,version,nonce,bucket})}
+    case Rate.HoldReading{bucket,_}:
+      IO.pure(State,Serving{socket,update_client(clients,Challenged{id,version,nonce,bucket})})
+
 def handle_read(socket: Net.ServerSocket, clients: Clients, current: Maybe<&2,Client>, now: U32, bytes: U32)
     -> IO(State):
   match current:
+    case Some{Challenged{id,version,nonce,bucket}}:
+      metered_challenge(socket,clients,id,version,nonce,Rate.consume(bucket,now,bytes))
     case Some{Authorized{id,version,key,timer,bucket}}:
       metered_read(socket,clients,id,version,key,timer,Rate.consume(bucket,now,bytes))
     case _:
@@ -569,7 +593,7 @@ def handle_read(socket: Net.ServerSocket, clients: Clients, current: Maybe<&2,Cl
 def handle_bytes(socket: Net.ServerSocket, clients: Clients, current: Maybe<&2,Client>,
     bytes: List<&2,U32>, now: U32) -> IO(State):
   match current:
-    case Some{Challenged{id,version,nonce}}:
+    case Some{Challenged{id,version,nonce,_}}:
       verify(socket,clients,id,version,Handshake.decode(bytes),nonce)
     case Some{Authorized{id,+version,key,timer,bucket}}:
       authenticated_frame(socket,clients,id,version,key,timer,now,Wire.decode(Wire.ToRelay{},version,bytes),bucket)
@@ -625,8 +649,8 @@ def due(sessions: List<&2,Client>, +now: U32) -> Due:
     case Con{Authorized{+id,+version,+key,+timer,+bucket},rest}:
       rx_deadline(Rate.ready(now,bucket),Authorized{id,version,key,timer,Rate.resume(bucket)},
         _ => deadline(Health.action(timer,now),id,version,key,timer,bucket,_ => due(rest,now)))
-    case Con{_,rest}:
-      due(rest,now)
+    case Con{Challenged{id,version,nonce,+bucket},rest}:
+      rx_deadline(Rate.ready(now,bucket),Challenged{id,version,nonce,Rate.resume(bucket)},_ => due(rest,now))
 
 def ping_queued(queued: Net.ServerSocket & Bool, clients: Clients, +id: U32, version: Wire.Version,
     key: List<&2,U32>, next: Health.Heartbeat, bucket: Rate.Bucket) -> IO(State):
@@ -853,8 +877,8 @@ def reset_buckets(sessions: List<&2,Client>, +limits: Rate.Limits, +now: U32) ->
       []
     case Con{Authorized{id,version,key,timer,bucket},rest}:
       Con{Authorized{id,version,key,timer,Rate.reconfigure(limits,now,bucket)},reset_buckets(rest,limits,now)}
-    case Con{pending,rest}:
-      Con{pending,reset_buckets(rest,limits,now)}
+    case Con{Challenged{id,version,nonce,bucket},rest}:
+      Con{Challenged{id,version,nonce,Rate.reconfigure(limits,now,bucket)},reset_buckets(rest,limits,now)}
 
 def reconfigure_clients(clients: Clients, +limits: Rate.Limits, now: U32) -> Clients:
   Registry{sessions,deliveries,_} = clients
