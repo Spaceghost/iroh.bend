@@ -1,6 +1,7 @@
 ## pragmas.noentrypoint = true
 ## pragmas.nogc = true
 ## cinclude '<picoquic.h>'
+## cinclude '<picosocks.h>'
 ## cinclude '<picoquic_internal.h>'
 ## cinclude '<tls_api.h>'
 ## cinclude '<picotls.h>'
@@ -91,7 +92,7 @@ local addr_t <cimport,nodecl,codename 'iroh_mp_v4'> = @record{sin_family:uint16,
 local addr6_t <cimport,nodecl,codename 'iroh_mp_v6'> = @record{sin6_family:uint16,sin6_port:uint16,sin6_addr:[16]uint8}
 local storage_t <cimport,nodecl,codename 'iroh_mp_sock_store'> = @record{ss_family:uint16,padding:[118]uint8,alignment:uint64}
 local stateless_t <cimport,nodecl,codename 'picoquic_stateless_packet_t'> = @record{
-  addr_to:storage_t,length:csize,bytes:[1536]uint8
+  addr_to:storage_t,addr_local:storage_t,if_index_local:cint,length:csize,bytes:[1536]uint8
 }
 
 local function ptls_get_context(tls:*tls_t):*context_t <cimport,nodecl> end
@@ -213,6 +214,11 @@ local function picoquic_reset_stream(cnx: *cnx_t, id: uint64, code: uint64): cin
 local function picoquic_stop_sending(cnx: *cnx_t, id: uint64, code: uint64): cint <cimport,nodecl> end
 local function bind(fd: cint, address: pointer, size: cuint): cint <cimport,nodecl> end
 local function sendto(fd: cint, data: pointer, size: csize, flags: cint, addr: pointer, length: cuint): isize <cimport,nodecl> end
+local function picoquic_socket_set_pkt_info(fd:cint, family:cint):cint <cimport,nodecl> end
+local function picoquic_recvmsg(fd:cint, peer:*storage_t, local_addr:*storage_t, iface:*cint,
+    ecn:*uint8, bytes:*uint8, capacity:cint):cint <cimport,nodecl> end
+local function picoquic_sendmsg(fd:cint, peer:pointer, local_addr:pointer, iface:cint,
+    bytes:cstring, size:cint, segment:cint, sock_error:*cint):cint <cimport,nodecl> end
 local function recvfrom(fd: cint, data: pointer, size: csize, flags: cint, addr: pointer, length: *cuint): isize <cimport,nodecl> end
 local function ntohs(port: uint16): uint16 <cimport,nodecl> end
 local function picoquic_set_callback(cnx: *cnx_t, callback: pointer, ctx: pointer) <cimport,nodecl> end
@@ -290,7 +296,7 @@ local names = {
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
-  'bind_resumable_multipath', 'bind_multipath_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
+  'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -358,6 +364,7 @@ local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
+local iroh_mp_bind_dual_multipath_identity: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_identity: uint32 <cimport,nodecl>
 local iroh_mp_multipath_remote_id: uint32 <cimport,nodecl>
 local iroh_mp_bind_resumable_multipath: uint32 <cimport,nodecl>
@@ -504,7 +511,8 @@ local REMOVE_ADDRESS: uint64 <comptime> = 0x3d7f94
 local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
 local Listener = @record{
-  next: pointer, id: uint32, fd: cint, quic: *quic_t, local_addr: storage_t,
+  next: pointer, id: uint32, fd: cint, ipv4_fd:cint, quic: *quic_t, local_addr: storage_t,
+  ipv4_addr:storage_t, dispatch_ipv4:boolean,
   refs: uint32, stopped: boolean, ossl:*mp_ssl_ctx, ossl_peer:*evp_t, resumable:boolean,
   nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer: boolean
 }
@@ -554,7 +562,7 @@ local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
-  output_peer: storage_t, listener: *Listener, accepted: boolean,
+  output_peer: storage_t, output_source:storage_t, output_iface:cint, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
@@ -1407,6 +1415,7 @@ local function release_listener(listener: *Listener)
   if listener.refs ~= 0 then return end
   if listener.quic ~= nilptr then picoquic_free(listener.quic) end
   if listener.fd >= 0 then close(listener.fd) end
+  if listener.ipv4_fd >= 0 then close(listener.ipv4_fd) end
   SSL_CTX_free(listener.ossl)
   EVP_PKEY_free(listener.ossl_peer)
   C.free(listener)
@@ -2141,6 +2150,33 @@ local function address_size(addr: *storage_t): cuint
   return addr.ss_family == AF_INET and IROH_MP_V4_SIZE or IROH_MP_V6_SIZE
 end
 
+local function listener_socket(listener:*Listener, source:*storage_t, peer:*storage_t):cint
+  if listener.ipv4_fd >= 0 then
+    if source.ss_family == AF_INET or (source.ss_family == 0 and peer.ss_family == AF_INET) then
+      return listener.ipv4_fd
+    end
+  elseif source.ss_family ~= 0 and picoquic_compare_addr(&listener.local_addr,source) ~= 0 then
+    return -1
+  end
+  return listener.fd
+end
+
+local function send_listener(listener:*Listener, peer:*storage_t, source:*storage_t, iface:cint,
+    bytes:*uint8, size:csize):isize
+  local fd = listener_socket(listener,source,peer)
+  if fd < 0 then
+    -- A packet scheduled on a retired local path should be retransmitted.
+    return (@isize)(size)
+  end
+  if listener.ipv4_fd < 0 or source.ss_family == 0 then
+    return sendto(fd,bytes,size,0,peer,address_size(peer))
+  end
+  local code:cint
+  local sent = picoquic_sendmsg(fd,peer,source,iface,(@cstring)(bytes),(@cint)(size),0,&code)
+  if sent < 0 then errno = code end
+  return (@isize)(sent)
+end
+
 local function flush_output(conn: *Connection): uint32
   if conn.output_size == 0 then return 0 end
   local path = conn.output_path
@@ -2151,7 +2187,7 @@ local function flush_output(conn: *Connection): uint32
   local sent: isize
   if path == nilptr or path.fd < 0 then
     local peer = &conn.output_peer
-    sent = sendto(conn.listener.fd,&conn.output[0],conn.output_size,0,peer,address_size(peer))
+    sent = send_listener(conn.listener,peer,&conn.output_source,conn.output_iface,&conn.output[0],conn.output_size)
   elseif path.unconnected then
     local peer = &conn.output_peer
     sent = sendto(path.fd,&conn.output[0],conn.output_size,0,peer,address_size(peer))
@@ -2207,10 +2243,11 @@ local function write_packet(conn: *Connection, now: uint64): uint32
   end
   if size == 0 then return 0 end
   local path = route_packet(conn,&from,&to)
-  if path == nilptr and (conn.listener == nilptr or (from.ss_family ~= 0 and
-      picoquic_compare_addr(&conn.listener.local_addr,&from) ~= 0)) then return 0 end
+  if path == nilptr and conn.listener == nilptr then return 0 end
   conn.output_path = path
   conn.output_peer = to
+  conn.output_source = from
+  conn.output_iface = iface
   conn.output_size = size
   return flush_output(conn)
 end
@@ -2296,10 +2333,32 @@ end
 local function receive_listener(listener: *Listener, now: uint64): uint32
   local bytes: [65536]uint8
   local peer: storage_t
-  local length = IROH_MP_STORAGE_SIZE
-  local count = recvfrom(listener.fd,&bytes[0],#bytes,0,&peer,&length)
+  local destination: storage_t
+  local iface:cint
+  local ecn:uint8
+  local count:isize
+  if listener.ipv4_fd >= 0 then
+    listener.dispatch_ipv4 = not listener.dispatch_ipv4
+    local fd = listener.dispatch_ipv4 and listener.ipv4_fd or listener.fd
+    count = picoquic_recvmsg(fd,&peer,&destination,&iface,&ecn,&bytes[0],#bytes)
+    if count > 0 then
+      if destination.ss_family == AF_INET then
+        local ipv4 = (@*addr_t)(&destination)
+        ipv4.sin_port = ((@*addr_t)(&listener.ipv4_addr)).sin_port
+      elseif destination.ss_family == AF_INET6 then
+        local ipv6 = (@*addr6_t)(&destination)
+        ipv6.sin6_port = ((@*addr6_t)(&listener.local_addr)).sin6_port
+      else
+        return 0
+      end
+    end
+  else
+    local length = IROH_MP_STORAGE_SIZE
+    count = recvfrom(listener.fd,&bytes[0],#bytes,0,&peer,&length)
+    destination = listener.local_addr
+  end
   if count > 0 then
-    picoquic_incoming_packet(listener.quic,&bytes[0],(@csize)(count),&peer,&listener.local_addr,0,0,now)
+    picoquic_incoming_packet(listener.quic,&bytes[0],(@csize)(count),&peer,&destination,iface,ecn,now)
   elseif count < 0 and errno ~= EAGAIN and errno ~= EINTR then
     return (@uint32)(errno)
   end
@@ -2312,7 +2371,7 @@ local function handshake_packet(listener: *Listener, cnx: *cnx_t, now: uint64)
   local from: storage_t, to: storage_t
   local iface: cint
   if prepare_server_early_packet(cnx,now,&out[0],IO_CAPACITY,&size,&to,&from,&iface) == 0 and size > 0 then
-    sendto(listener.fd,&out[0],size,0,&to,address_size(&to))
+    send_listener(listener,&to,&from,iface,&out[0],size)
   end
 end
 
@@ -2322,7 +2381,7 @@ local function pump_listener(listener: *Listener, now: uint64): uint32
   local packet = picoquic_dequeue_stateless_packet(listener.quic)
   if packet ~= nilptr then
     if not listener.stopped then
-      sendto(listener.fd,&packet.bytes[0],packet.length,0,&packet.addr_to,address_size(&packet.addr_to))
+      send_listener(listener,&packet.addr_to,&packet.addr_local,packet.if_index_local,&packet.bytes[0],packet.length)
     end
     picoquic_delete_stateless_packet(packet)
   end
@@ -2405,7 +2464,7 @@ local function unspecified_address(addr:*storage_t): boolean
   return C.memcmp(&((@*addr6_t)(addr)).sin6_addr,&zero[0],16) == 0
 end
 
-local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean, dual:boolean): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
   local alpn_term = args[discover_peer and 3 or 4]
@@ -2420,20 +2479,38 @@ local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat
   if size == 0 or seed_size ~= 32 or (not discover_peer and peer == nilptr) or (alpns == nilptr and not empty) then
     return io_fail(e,EINVAL,'invalid numeric listen address, Ed25519 key, or ALPN')
   end
-  if unspecified_address(&local_addr) then
+  local wildcard = unspecified_address(&local_addr)
+  if dual and (not wildcard or local_addr.ss_family ~= AF_INET6) then
+    return io_fail(e,EINVAL,'dual-stack multipath listener requires the IPv6 wildcard address')
+  elseif not dual and wildcard then
     return io_fail(e,EINVAL,'multipath listener requires a concrete IP address')
   end
   if next_listener == 0 then return io_fail(e,ENOMEM,'multipath listener handles exhausted') end
   local listener = (@*Listener)(C.calloc(1,#Listener))
   if listener == nilptr then return io_fail(e,ENOMEM,nilptr) end
   listener.refs = 1
+  listener.ipv4_fd = -1
   listener.fd = socket((@cint)(local_addr.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
   local bound_size = IROH_MP_STORAGE_SIZE
-  if listener.fd < 0 or bind(listener.fd,&local_addr,size) ~= 0 or
+  if listener.fd < 0 or (dual and picoquic_socket_set_pkt_info(listener.fd,AF_INET6) ~= 0) or
+      bind(listener.fd,&local_addr,size) ~= 0 or
       getsockname(listener.fd,&listener.local_addr,&bound_size) ~= 0 then
     local code = (@uint32)(errno)
     release_listener(listener)
     return io_fail(e,code,nilptr)
+  end
+  if dual then
+    local port = ntohs(((@*addr6_t)(&listener.local_addr)).sin6_port)
+    local ipv4_size = address('0.0.0.0',port,&local_addr)
+    listener.ipv4_fd = socket(AF_INET,SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+    bound_size = IROH_MP_STORAGE_SIZE
+    if listener.ipv4_fd < 0 or picoquic_socket_set_pkt_info(listener.ipv4_fd,AF_INET) ~= 0 or
+        bind(listener.ipv4_fd,&local_addr,ipv4_size) ~= 0 or
+        getsockname(listener.ipv4_fd,&listener.ipv4_addr,&bound_size) ~= 0 then
+      local code = (@uint32)(errno)
+      release_listener(listener)
+      return io_fail(e,code,'could not bind IPv4 socket for the dual-stack multipath listener')
+    end
   end
   if advertise_nat then
     if bytes_from_list(e,args[5],&listener.nat_offer[0],NAT_PARAMETER_SIZE) ~= NAT_PARAMETER_SIZE then
@@ -2490,32 +2567,37 @@ local function accept_connection(e: Env, listener: *Listener): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,false,false,false)
+  return bind_listener(e,args,0,false,false,false,false)
 end
 
 local function bind_nat_offer_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,0,true,false,false)
+  return bind_listener(e,args,0,true,false,false,false)
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,1,false,false,false)
+  return bind_listener(e,args,1,false,false,false,false)
 end
 
 local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,false,false,false)
+  return bind_listener(e,args,2,false,false,false,false)
 end
 
 local function bind_resumable_run(e:Env, args:*[0]Term, work:*IoWork):Term
-  return bind_listener(e,args,1,false,true,false)
+  return bind_listener(e,args,1,false,true,false,false)
 end
 
 local function bind_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
   if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
-  return bind_listener(e,args,2,false,args[4] == 1,true)
+  return bind_listener(e,args,2,false,args[4] == 1,true,false)
+end
+
+local function bind_dual_identity_run(e:Env,args:*[0]Term,work:*IoWork):Term
+  if args[4] > 1 then return io_fail(e,EINVAL,'invalid QUIC early-data setting') end
+  return bind_listener(e,args,2,false,args[4] == 1,true,true)
 end
 
 local function bind_nat_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,2,true,false,false)
+  return bind_listener(e,args,2,true,false,false,false)
 end
 
 local function used_alpns(listener: *Listener)
@@ -3822,6 +3904,9 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_bind_resumable_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_resumable_multipath,bind_resumable_run) end
   if iroh_mp_bind_multipath_identity ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_identity,bind_identity_run) end
+  if iroh_mp_bind_dual_multipath_identity ~= 0xffffffff then
+    io_eff(iroh_mp_bind_dual_multipath_identity,bind_dual_identity_run)
+  end
   if iroh_mp_multipath_remote_id ~= 0xffffffff then io_eff(iroh_mp_multipath_remote_id,remote_id_run) end
   if iroh_mp_set_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_set_multipath_alpns,set_alpns_run) end
   if iroh_mp_accept_multipath ~= 0xffffffff then io_eff(iroh_mp_accept_multipath,accept_run) end

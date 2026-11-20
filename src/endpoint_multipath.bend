@@ -3,12 +3,64 @@ import ./endpoint.bend as Endpoint
 import ./quic_multipath.bend as Quic
 import ./quic_multipath_nat.bend as Nat
 import ./relay_quic.bend as Relay
+import ./relay_quic_inbound.bend as Inbound
 
 def Connection() -> Type:
   Endpoint.Transport(Quic.MultipathConnection)
 
 def ConnectResult() -> Type:
   Endpoint.TransportResult(Quic.MultipathConnection)
+
+type RelayedListener is Type:
+  RelayListener{listener: Quic.MultipathListener, bridge: Relay.Bridge}
+
+def attached_listener(bridge: Result<&1,&1,U32 & String,Relay.Bridge>, listener: Quic.MultipathListener, port: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  match bridge:
+    case Done{path}:
+      IO.pure(Result<&1,&1,U32 & String,RelayedListener & U32>,Done{(RelayListener{listener,path},port)})
+    case Fail{error}:
+      do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
+        Quic.close_multipath_listener(listener)
+        return Fail{error}
+
+def attach_listener(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, url: String, seed: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  match bound:
+    case Done{(listener,+port)}:
+      do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
+        bridge : Result<&1,&1,U32 & String,Relay.Bridge> <- Inbound.start_background(url,seed,port)
+        attached_listener(bridge,listener,port)
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,RelayedListener & U32>,Fail{error})
+
+# Both IP families and the relay feed a single Picoquic context. The
+# listener owns relay registration for the lifetime of its connections.
+def bind_direct_relay_identity(port: U32, url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
+    bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
+      Quic.bind_dual_multipath_identity("::",port,seed,alpns,early_data)
+    attach_listener(bound,url,seed)
+
+def listener_result(result: Quic.MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>,
+    bridge: Relay.Bridge) -> RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>:
+  (listener,accepted) = result
+  (RelayListener{listener,bridge},accepted)
+
+def accept_listener(owner: RelayedListener)
+    -> IO(RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>):
+  RelayListener{listener,bridge} = owner
+  do IO<RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>>:
+    result : Quic.MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>> <-
+      Quic.accept_multipath(listener)
+    return listener_result(result,bridge)
+
+def close_listener(owner: RelayedListener) -> IO(Result<&1,&1,U32 & String,Unit>):
+  RelayListener{listener,bridge} = owner
+  do IO<Result<&1,&1,U32 & String,Unit>>:
+    Quic.close_multipath_listener(listener)
+    Relay.stop(bridge)
 
 def dial(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
   Endpoint.IpAddress{host,port} = address
