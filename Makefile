@@ -321,8 +321,9 @@ $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend tests/quic_multipat
 	done
 	cd "$(BUILD)/endpoint-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/endpoint_multipath.bend -o "$(abspath $@)"
 
+# Build the endpoint integration fixture without compiler optimizations.
 $(BUILD)/iroh-bend-endpoint-multipath: $(BUILD)/endpoint-multipath.c
-	$(CLANG) -std=gnu11 -O2 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
+	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
 
