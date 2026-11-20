@@ -368,16 +368,22 @@ def connect_ticket(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeout
 def connect(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
   connect_routes(routes(records),identity,timeouts)
 
-def dns_routes(reply: Result<&1,&1,U32 & String,Dns.Reply>) -> Result<&1,&1,U32 & String,Routes>:
+def dns_records(reply: Result<&1,&1,U32 & String,Dns.Reply>) -> Result<&1,&1,U32 & String,List<&2,Dns.Attribute>>:
   match reply:
     case Done{Dns.Found{records}}:
-      Done{routes(records)}
+      Done{records}
     case Done{Dns.DnsError{code}}:
       Fail{(code,"endpoint DNS lookup returned an error")}
     case Done{_}:
       Fail{(1,"endpoint DNS lookup did not return usable records")}
     case Fail{error}:
       Fail{error}
+
+def planned_records(records: Result<&1,&1,U32 & String,List<&2,Dns.Attribute>>) -> Result<&1,&1,U32 & String,Routes>:
+  Result.map(&1,&1,U32 & String,List<&2,Dns.Attribute>,Routes,routes,records)
+
+def dns_routes(reply: Result<&1,&1,U32 & String,Dns.Reply>) -> Result<&1,&1,U32 & String,Routes>:
+  planned_records(dns_records(reply))
 
 def lookup_routes(identity: Identity, resolver: DnsSource) -> IO(Result<&1,&1,U32 & String,Routes>):
   PeerKeys{_,key,_} = identity
@@ -386,12 +392,15 @@ def lookup_routes(identity: Identity, resolver: DnsSource) -> IO(Result<&1,&1,U3
     reply : Result<&1,&1,U32 & String,Dns.Reply> <- Dns.lookup(key,origin,host,port,ms)
     return dns_routes(reply)
 
-def pkarr_routes(verified: Pkarr.Verification) -> Result<&1,&1,U32 & String,Routes>:
+def verified_records(verified: Pkarr.Verification) -> Result<&1,&1,U32 & String,List<&2,Dns.Attribute>>:
   match verified:
     case Pkarr.Verified{_,records}:
-      Done{routes(records)}
+      Done{records}
     case _:
       Fail{(1,"invalid signed Pkarr endpoint packet")}
+
+def pkarr_routes(verified: Pkarr.Verification) -> Result<&1,&1,U32 & String,Routes>:
+  planned_records(verified_records(verified))
 
 def verify_routes(identity: Identity, packet: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Routes>):
   PeerKeys{_,key,_} = identity
@@ -435,29 +444,62 @@ def resolve_source(source: AddressLookup, identity: Identity) -> IO(Result<&1,&1
         proof : Result<&1,&1,U32 & String,Pkarr.Verification> <- PkarrHttp.resolve(relay,key,ms)
         return pkarr_reply(proof)
 
-def LookupReply() -> Type:
-  Result<&1,&1,U32 & String,Routes>
+type LookupItem is Data:
+  LookupItem{endpoint_id: List<&2,U32>, source: AddressLookup, records: List<&2,Dns.Attribute>}
 
-def resolve_until(source: AddressLookup, +key: List<&2,U32>, +stop: Chan(Unit)) -> IO(LookupReply()):
+type LookupError is Data:
+  LookupError{source: AddressLookup, code: U32, message: String}
+
+type LookupAnswer is Data:
+  FoundItem{item: LookupItem}
+  SourceError{error: LookupError}
+
+type LookupEvent is Data:
+  ServiceResult{answer: LookupAnswer}
+  NoServiceConfigured{}
+  NoResults{errors: List<&2,LookupError>}
+  LookupEnd{}
+
+type LookupStream is Type:
+  NoServices{}
+  Resolving{remaining: Nat, replies: Chan(LookupAnswer), stop: Chan(Unit), yielded: Bool, errors: List<&2,LookupError>}
+  FinishedLookup{}
+
+def lookup_answer(reply: Result<&1,&1,U32 & String,List<&2,Dns.Attribute>>, source: AddressLookup, key: List<&2,U32>)
+    -> LookupAnswer:
+  match reply:
+    case Done{records}:
+      FoundItem{LookupItem{key,source,records}}
+    case Fail{(code,message)}:
+      SourceError{LookupError{source,code,message}}
+
+def pkarr_item(proof: PkarrHttp.Proof(), source: AddressLookup, key: List<&2,U32>) -> LookupAnswer:
+  match proof:
+    case Done{verified}:
+      lookup_answer(verified_records(verified),source,key)
+    case Fail{(code,message)}:
+      SourceError{LookupError{source,code,message}}
+
+def resolve_until(+source: AddressLookup, +key: List<&2,U32>, +stop: Chan(Unit)) -> IO(LookupAnswer):
   match source:
     case DnsLookup{DnsResolver{origin,host,port,ms}}:
-      do IO<LookupReply()>:
+      do IO<LookupAnswer>:
         id : Result<&1,&1,U32 & String,U32> <- IO.random_u32()
         reply : Result<&1,&1,U32 & String,Dns.Reply> <- Dns.lookup_using(id,key,origin,host,port,ms,
           Dns.StopOnClose{stop},name => p => timeout => LookupSocket.connect(stop,name,p,timeout))
-        return dns_routes(reply)
+        return lookup_answer(dns_records(reply),source,key)
     case PkarrLookup{url,ms}:
-      do IO<LookupReply()>:
+      do IO<LookupAnswer>:
         proof : PkarrHttp.Proof() <- PkarrHttp.resolve_until(url,key,ms,stop)
-        return pkarr_reply(proof)
+        return pkarr_item(proof,source,key)
 
-def publish_lookup(source: AddressLookup, key: List<&2,U32>, results: Chan(LookupReply()), stop: Chan(Unit)) -> IO(Unit):
+def publish_lookup(source: AddressLookup, key: List<&2,U32>, results: Chan(LookupAnswer), stop: Chan(Unit)) -> IO(Unit):
   do IO<Unit>:
-    reply : LookupReply() <- resolve_until(source,key,stop)
-    _ : Result<&1,&1,LookupReply(),Unit> <- Chan.send(LookupReply(),results,reply)
+    answer : LookupAnswer <- resolve_until(source,key,stop)
+    _ : Result<&1,&1,LookupAnswer,Unit> <- Chan.send(LookupAnswer,results,answer)
     return Unit{}
 
-def start_lookups(sources: List<&2,AddressLookup>, +key: List<&2,U32>, +results: Chan(LookupReply()),
+def spawn_lookups(sources: List<&2,AddressLookup>, +key: List<&2,U32>, +results: Chan(LookupAnswer),
     +stop: Chan(Unit)) -> IO(Unit):
   match sources:
     case Nil{}:
@@ -465,51 +507,126 @@ def start_lookups(sources: List<&2,AddressLookup>, +key: List<&2,U32>, +results:
     case Con{source,rest}:
       do IO<Unit>:
         IO.spawn(Unit,publish_lookup(source,key,results,stop))
-        start_lookups(rest,key,results,stop)
+        spawn_lookups(rest,key,results,stop)
 
-def drain_lookups(remaining: Nat, +results: Chan(LookupReply())) -> IO(Unit):
+def resolve_addresses(+sources: List<&2,AddressLookup>, key: List<&2,U32>) -> IO(LookupStream):
+  match sources:
+    case Nil{}:
+      IO.pure(LookupStream,NoServices{})
+    case Con{_,_}:
+      +count = List.length(&2,AddressLookup,sources)
+      do IO<LookupStream>:
+        +results : Chan(LookupAnswer) <- Chan.new(LookupAnswer,U32.from_nat(count))
+        +stop : Chan(Unit) <- Chan.new(Unit,0)
+        spawn_lookups(sources,key,results,stop)
+        return Resolving{count,results,stop,False{},[]}
+
+def drain_lookups(remaining: Nat, +results: Chan(LookupAnswer)) -> IO(Unit):
   match remaining:
     case 0n:
-      Chan.close(LookupReply(),results)
+      Chan.close(LookupAnswer,results)
     case 1n+k:
       do IO<Unit>:
-        _ : Maybe<&1,LookupReply()> <- Chan.recv(LookupReply(),results)
+        _ : Maybe<&1,LookupAnswer> <- Chan.recv(LookupAnswer,results)
         drain_lookups(k,results)
 
-def accept_lookup(event: Maybe<&1,LookupReply()>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
-  match event:
-    case Some{reply}:
-      dial_resolved(~Quic.DatagramConnection,~direct_quic,reply,identity,timeouts)
-    case None{}:
-      IO.pure(ConnectResult(),Fail{(1,"address lookup ended early")})
-
-def collect_lookups(+remaining: Nat, outcome: ConnectResult(), +results: Chan(LookupReply()),
-    +identity: Identity, +timeouts: Timeouts, +stop: Chan(Unit)) -> IO(ConnectResult()):
-  match remaining outcome:
-    case 1n+k Fail{_}:
-      do IO<ConnectResult()>:
-        event : Maybe<&1,LookupReply()> <- Chan.recv(LookupReply(),results)
-        next : ConnectResult() <- accept_lookup(event,identity,timeouts)
-        collect_lookups(k,next,results,identity,timeouts,stop)
-    case _ _:
-      do IO<ConnectResult()>:
+def close_lookup(stream: LookupStream) -> IO(Unit):
+  match stream:
+    case Resolving{count,results,stop,_,_}:
+      do IO<Unit>:
         Chan.close(Unit,stop)
-        drain_lookups(remaining,results)
-        return outcome
+        drain_lookups(count,results)
+    case _:
+      IO.pure(Unit,Unit{})
 
-def try_lookups(+sources: List<&2,AddressLookup>, outcome: ConnectResult(), +identity: Identity,
-    timeouts: Timeouts) -> IO(ConnectResult()):
-  match sources outcome:
-    case Con{_,_} Fail{_}:
-      PeerKeys{_,key,_} = identity
-      +count = List.length(&2,AddressLookup,sources)
+def terminal_lookup(yielded: Bool, errors: List<&2,LookupError>) -> LookupEvent:
+  match yielded:
+    case True{}:
+      LookupEnd{}
+    case False{}:
+      NoResults{List.reverse(&2,LookupError,errors)}
+
+def received_lookup(answer: Maybe<&1,LookupAnswer>, left: Nat, results: Chan(LookupAnswer), stop: Chan(Unit),
+    yielded: Bool, errors: List<&2,LookupError>) -> LookupStream & LookupEvent:
+  match answer:
+    case Some{FoundItem{item}}:
+      (Resolving{left,results,stop,True{},errors},ServiceResult{FoundItem{item}})
+    case Some{SourceError{+error}}:
+      (Resolving{left,results,stop,yielded,Con{error,errors}},ServiceResult{SourceError{error}})
+    case None{}:
+      (FinishedLookup{},terminal_lookup(yielded,errors))
+
+def next_lookup(stream: LookupStream) -> IO(LookupStream & LookupEvent):
+  match stream:
+    case NoServices{}:
+      IO.pure(LookupStream & LookupEvent,(FinishedLookup{},NoServiceConfigured{}))
+    case FinishedLookup{}:
+      IO.pure(LookupStream & LookupEvent,(FinishedLookup{},LookupEnd{}))
+    case Resolving{0n,results,stop,yielded,errors}:
+      do IO<LookupStream & LookupEvent>:
+        Chan.close(Unit,stop)
+        Chan.close(LookupAnswer,results)
+        return (FinishedLookup{},terminal_lookup(yielded,errors))
+    case Resolving{1n+k,+results,stop,yielded,errors}:
+      do IO<LookupStream & LookupEvent>:
+        answer : Maybe<&1,LookupAnswer> <- Chan.recv(LookupAnswer,results)
+        return received_lookup(answer,k,results,stop,yielded,errors)
+
+def error_messages(errors: List<&2,LookupError>) -> String:
+  match errors:
+    case Nil{}:
+      ""
+    case Con{LookupError{_,_,message},rest}:
+      " / " ++ (message ++ error_messages(rest))
+
+def lookup_failure(errors: List<&2,LookupError>, last: U32 & String) -> U32 & String:
+  match errors:
+    case Nil{}:
+      last
+    case Con{LookupError{_,code,message},rest}:
+      (code,message ++ error_messages(rest))
+
+def use_lookup_connection(outcome: ConnectResult(), stream: LookupStream,
+    again: LookupStream -> (U32 & String) -> IO(ConnectResult())) -> IO(ConnectResult()):
+  match outcome:
+    case Done{conn}:
       do IO<ConnectResult()>:
-        +results : Chan(LookupReply()) <- Chan.new(LookupReply(),U32.from_nat(count))
-        +stop : Chan(Unit) <- Chan.new(Unit,0)
-        start_lookups(sources,key,results,stop)
-        collect_lookups(count,outcome,results,identity,timeouts,stop)
-    case _ _:
-      IO.pure(ConnectResult(),outcome)
+        close_lookup(stream)
+        return Done{conn}
+    case Fail{error}:
+      again(stream,error)
+
+def dial_lookup_event(step: LookupStream & LookupEvent, last: U32 & String, identity: Identity, timeouts: Timeouts,
+    again: LookupStream -> (U32 & String) -> IO(ConnectResult())) -> IO(ConnectResult()):
+  match step:
+    case (stream,ServiceResult{FoundItem{LookupItem{_,_,records}}}):
+      do IO<ConnectResult()>:
+        outcome : ConnectResult() <- dial_validated_plan(~Quic.DatagramConnection,~direct_quic,~direct_quic,
+          routes(records),identity,timeouts)
+        use_lookup_connection(outcome,stream,again)
+    case (stream,ServiceResult{SourceError{_}}):
+      again(stream,last)
+    case (_,NoResults{errors}):
+      IO.pure(ConnectResult(),Fail{lookup_failure(errors,last)})
+    case _:
+      IO.pure(ConnectResult(),Fail{last})
+
+@unsafe def dial_lookup_stream(stream: LookupStream, last: U32 & String, +identity: Identity,
+    +timeouts: Timeouts) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    step : LookupStream & LookupEvent <- next_lookup(stream)
+    dial_lookup_event(step,last,identity,timeouts,next => reason => dial_lookup_stream(next,reason,identity,timeouts))
+
+def try_lookups(sources: List<&2,AddressLookup>, outcome: ConnectResult(), +identity: Identity,
+    timeouts: Timeouts) -> IO(ConnectResult()):
+  match outcome:
+    case Fail{error}:
+      PeerKeys{_,key,_} = identity
+      do IO<ConnectResult()>:
+        stream : LookupStream <- resolve_addresses(sources,key)
+        dial_lookup_stream(stream,error,identity,timeouts)
+    case Done{conn}:
+      IO.pure(ConnectResult(),Done{conn})
 
 def connect_with_lookup(plan: Routes, +identity: Identity, +timeouts: Timeouts, sources: List<&2,AddressLookup>)
     -> IO(ConnectResult()):

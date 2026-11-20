@@ -348,11 +348,20 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   `Endpoint.connect_ticket_with_lookup(text, seed, alpn, timeouts, sources)`
   tries the ticket's routes first. If they are absent or all fail, it starts all
   configured `DnsLookup{resolver}` and `PkarrLookup{relay, timeout_ms}` services
-  together and tries routes as results arrive. A successful handshake stops outstanding lookups and closes their sockets. Every attempt pins the same endpoint ID. A Pkarr response must
+  together and tries routes as results arrive. A successful handshake stops
+  outstanding lookups and closes their sockets. Every attempt pins the same endpoint ID. A Pkarr response must
   verify under that key. For a caller-supplied route list and identity, use
   `Endpoint.connect_with_lookup(plan, identity, timeouts, sources)`.
   `Endpoint.with_ticket` accepts a route dialer such as
   `EndpointMultipath.connect_routed` for callers that retain a routed connection.
+- `Endpoint.resolve_addresses(sources, endpoint_id)` starts DNS and signed Pkarr
+  lookups and returns a stream. `Endpoint.next_lookup(stream)` returns the stream
+  and its next event. Each `ServiceResult` carries an endpoint record or a
+  provider error. Records include the endpoint ID, provider and TXT attributes.
+  An empty configuration emits `NoServiceConfigured`. If every service fails,
+  `NoResults` contains the errors in arrival order. A stream that produced a
+  record ends with `LookupEnd`. Call `Endpoint.close_lookup(stream)` when
+  stopping early to cancel pending I/O.
 - [Relay codec](src/relay.bend) reads and writes v1/v2 WebSocket payloads.
   It handles frame direction, QUIC varint tags, wire size limits, v1 UTF-8
   health messages, and datagram ECN and segment size.
@@ -709,7 +718,7 @@ Full drop-in compatibility remains open. Known differences include the following
 | Iroh behavior | Evidence or remaining work |
 | --- | --- |
 | Endpoint tickets | Run `make check-endpoint-ticket` for the upstream wire vector. `make check-endpoint-ticket-dial UPSTREAM_ENDPOINT_TICKET=/path/to/listener` checks authenticated IPv4 and IPv6 stream and datagram exchanges and wrong-key rejection. Set `UPSTREAM_IROH_RELAY_URL` to a local Iroh relay's HTTP or HTTPS base URL to check direct preference, relay-only tickets, and fallback after a silent UDP address. `make check-endpoint-ticket-lookup` requires the local Iroh DNS and Pkarr server's `PKARR_URL` (including `/pkarr`) and `DISCOVERY_DNS_PORT`. Its `UPSTREAM_ENDPOINT_TICKET_LOOKUP` listener takes `listen` or `listen6` and a mode (`id-only`, `stale`, `direct` or `wrong-id`). It prints the ticket, the z-base-32 publication key, and the hex-encoded signed Pkarr relay payload on one line and serves the stream/datagram exchange. |
-| Concurrent address lookup | The ticket lookup test holds one configured resolver open while another returns a usable address. Before the application uses QUIC, it rebinds the losing UDP source port or observes the outstanding HTTP or DNS TCP socket close. It covers both provider orders and two providers of the same kind. [Upstream lookup behavior](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/address_lookup.rs#L509-L529) |
+| Concurrent address lookup | The ticket lookup test holds one configured resolver open while another returns a usable address. Before the application uses QUIC, it rebinds the losing UDP source port or observes the outstanding HTTP or DNS TCP socket close. It covers both provider orders, two providers of the same kind, and a failed DNS route followed by a usable signed Pkarr route. The stream gate checks individual errors, aggregate failure and completion after successes. [Upstream lookup behavior](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/address_lookup.rs#L509-L529) |
 | Local connect errors | Like Iroh's `Endpoint::connect_with_opts`, Bend rejects its own endpoint ID before checking for an empty ALPN. Both errors precede direct dialing, relay contact, and address lookup. Run `make check-endpoint-connect-options` and `make check-multipath-connect-options` to check the errors and observe that the local UDP and TCP ports receive no traffic. Set `UPSTREAM_CONNECT_OPTIONS` to compare the same cases with an Iroh 1.5.0 executable. [Upstream connect rules](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L1113-L1129) |
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. The endpoint ID codec matched Iroh 1.5.0 on 4,711 hexadecimal and base32 inputs, including malformed strings and invalid curve points. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |

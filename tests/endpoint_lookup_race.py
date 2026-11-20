@@ -8,7 +8,7 @@ from socketserver import BaseRequestHandler, TCPServer, UDPServer
 from threading import Event, Thread
 from urllib.request import urlopen
 
-from discovery_tcp import reply
+from discovery_tcp import record, reply
 
 
 @contextmanager
@@ -49,7 +49,7 @@ def resolver_reply(query, dns_port):
         return packet
 
 
-def dns_proxy(stack, dns_port, gate, tcp=False):
+def dns_proxy(stack, dns_port, gate, tcp=False, rcode=0, address=None):
     class TcpProxy(BaseRequestHandler):
         def handle(self):
             with self.request.makefile("rb") as stream:
@@ -65,7 +65,14 @@ def dns_proxy(stack, dns_port, gate, tcp=False):
             if tcp:
                 server.sendto(reply(query, 0x8380), self.client_address)
             elif gate(None, self.client_address):
-                server.sendto(resolver_reply(query, dns_port), self.client_address)
+                if address:
+                    txt = ("addr=" + address).encode("ascii")
+                    answer = reply(query, 0x8180, [record(16, bytes([len(txt)]) + txt)])
+                elif rcode:
+                    answer = reply(query, 0x8180 | rcode)
+                else:
+                    answer = resolver_reply(query, dns_port)
+                server.sendto(answer, self.client_address)
 
     port = int(stack.enter_context(serve(TCPServer(("127.0.0.1", 0), TcpProxy)))) if tcp else 0
     return "dns", stack.enter_context(serve(UDPServer(("127.0.0.1", port), UdpProxy)))
@@ -136,3 +143,22 @@ def check_race(client, ticket, peer, pkarr, dns_port, slow_kind, fast_kind):
                 if bend.poll() is None:
                     bend.kill()
                     bend.communicate()
+
+
+def check_stale_record(client, ticket, peer, pkarr, dns_port, family):
+    ipv6 = family == "listen6"
+    with socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_DGRAM) as stale, ExitStack() as stack:
+        stale.bind(("::1" if ipv6 else "127.0.0.1", 0))
+        stale.settimeout(5)
+        host, port, *_ = stale.getsockname()
+        address = f"[{host}]:{port}" if ipv6 else f"{host}:{port}"
+        bad = dns_proxy(stack, dns_port, lambda *_: True, address=address)
+        # Release the signed record only after QUIC has tried the address from DNS.
+        good = relay_proxy(stack, pkarr.rstrip("/"), lambda *_: bool(stale.recv(65535)))
+        result = subprocess.run((client, "lookup-ticket", ticket, *bad, *good),
+                                capture_output=True, timeout=10)
+        if result.returncode:
+            raise RuntimeError(f"Dial after stale record failed: {result.stderr!r}")
+        transcript, _ = peer.communicate(timeout=4)
+        if peer.returncode:
+            raise AssertionError(transcript)

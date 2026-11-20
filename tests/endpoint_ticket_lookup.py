@@ -7,7 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
 from urllib.request import Request, urlopen
 
-from endpoint_lookup_race import check_race, dns_proxy
+from endpoint_lookup_events import check_events
+from endpoint_lookup_race import check_race, check_stale_record, dns_proxy
 from endpoint_ticket_dial import read_ticket
 from quic_rebind import process
 
@@ -50,6 +51,10 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if response.status != 204:
                 raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
 
+        if source == "stale-record":
+            check_stale_record(client, ticket, peer, pkarr, dns_port, family)
+            print(f"PASS {family} failed resolved DNS address followed by authenticated Pkarr address", flush=True)
+            return
         if isinstance(source, tuple):
             check_race(client, ticket, peer, pkarr, dns_port, *source)
             print(f"PASS {family} authenticated {source[1]} exchange with {source[0]} pending", flush=True)
@@ -61,6 +66,9 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             invalid.sent.clear()
             invalid.packet = bytes([packet[0] ^ 1]) + packet[1:]
             base = f"http://127.0.0.1:{invalid.server_port}/pkarr"
+        if source == "stream":
+            check_events(client, ticket, pkarr, dns_port, base, family)
+            return
         if invalid and source == "pkarr-dns":
             _, dns_port = dns_proxy(stack, dns_port, lambda *_: invalid.sent.wait(4))
         args = {"dns": ("dns", dns_port), "pkarr": ("pkarr", base), "pkarr-dns": ("pkarr", base, "dns", dns_port)}
@@ -90,6 +98,8 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
 def main(client, fixture, pkarr, dns_port):
     with invalid_relay() as invalid:
         for family in ("listen", "listen6"):
+            check(client, fixture, family, "id-only", "stream", pkarr, dns_port, invalid)
+            check(client, fixture, family, "id-only", "stale-record", pkarr, dns_port)
             for source in ("dns", "pkarr"):
                 for mode in ("id-only", "stale"):
                     check(client, fixture, family, mode, source, pkarr, dns_port)

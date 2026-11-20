@@ -219,10 +219,10 @@ check-relay-quic-startup: $(BUILD)/iroh-bend-relay-quic
 	@test -x "$(UPSTREAM_RELAY_INBOUND)" || { echo 'Set UPSTREAM_RELAY_INBOUND to the Iroh dialer with relay-startup mode.' >&2; exit 2; }
 	python3 -B tests/relay_quic_inbound.py --relay-startup "$<" "$(UPSTREAM_RELAY_INBOUND)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
-$(BUILD)/relay-quic.c: tests/relay_quic.bend tests/endpoint_validation.bend tests/direct.bend tests/quic_streams.bend tests/quic_datagram.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
+$(BUILD)/relay-quic.c: tests/relay_quic.bend tests/endpoint_validation.bend tests/endpoint_lookup_stream.bend tests/direct.bend tests/quic_streams.bend tests/quic_datagram.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/relay-quic-stage/src" "$(BUILD)/relay-quic-stage/tests"
 	cp $(RELAY_QUIC_SOURCES) "$(BUILD)/relay-quic-stage/src/"
-	cp tests/relay_quic.bend tests/endpoint_validation.bend tests/direct.bend tests/quic_streams.bend tests/quic_datagram.bend "$(BUILD)/relay-quic-stage/tests/"
+	cp tests/relay_quic.bend tests/endpoint_validation.bend tests/endpoint_lookup_stream.bend tests/direct.bend tests/quic_streams.bend tests/quic_datagram.bend "$(BUILD)/relay-quic-stage/tests/"
 	for native in $(RELAY_QUIC_EFFECTS); do \
 		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
 			"$(abspath $(BUILD)/relay-quic-stage/src)/$$native.c" || exit; \

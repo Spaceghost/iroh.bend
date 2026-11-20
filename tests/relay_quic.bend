@@ -1,5 +1,6 @@
 import Base
 import ./endpoint_validation.bend as CheckOptions
+import ./endpoint_lookup_stream.bend as LookupStream
 import ../src/direct.bend as Direct
 import ../src/discovery.bend as Dns
 import ../src/endpoint.bend as Endpoint
@@ -683,6 +684,8 @@ def run(args: List<String>) -> IO(Unit):
       do IO<Unit>:
         id : Endpoint.Identity <- CheckOptions.identity(choice)
         check_options(mode,id,U32.read(port))
+    case Con{_,Con{"lookup-events",Con{ticket,sources}}}:
+      LookupStream.run(ticket,lookup_sources(sources))
     case Con{_,Con{"lookup-ticket",Con{ticket,sources}}}:
       lookup_args(ticket,lookup_sources(sources),None{})
     case Con{_,Con{"lookup-ticket-barrier",Con{port,Con{ticket,sources}}}}:
