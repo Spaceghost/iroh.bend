@@ -303,6 +303,117 @@ def advertise_candidate(conn: Quic.MultipathConnection, +candidate: NatState.Can
   confirmed_address_frame(conn,NatSend.add(state,candidate),first => next =>
     confirmed_address_frame(first,NatSend.remove(next,candidate),report_withdrawn))
 
+def automatic_probe(result: Probes.ListenerProgress(), retry: Probes.ListenerConnection() -> IO(Probes.ListenerConnection()))
+    -> IO(Probes.ListenerConnection()):
+  match result:
+    case (active,Done{Some{NatState.Socket{_,port}}}):
+      do IO<Probes.ListenerConnection()>:
+        IO.print(String.append("PASS Iroh returned an authenticated PATH_RESPONSE from port ",U32.show(port)))
+        return active
+    case (next,Done{None{}}):
+      do IO<Probes.ListenerConnection()>:
+        IO.sleep(1)
+        retry(next)
+    case ((conn,_),Fail{(code,message)}):
+      Fixture.reject(Probes.ListenerConnection(),conn,code,message)
+
+def wait_automatic(fuel: Nat, connection: Probes.ListenerConnection()) -> IO(Probes.ListenerConnection()):
+  match fuel:
+    case 0n:
+      (conn,_) = connection
+      Fixture.reject(Probes.ListenerConnection(),conn,1,"automatic listener did not verify a candidate")
+    case 1n+left:
+      do IO<Probes.ListenerConnection()>:
+        result : Probes.ListenerProgress() <- Probes.step_listener(connection)
+        automatic_probe(result,next => wait_automatic(left,next))
+
+def managed_update(pair: Probes.ListenerConnection() & Result<&1,&1,U32 & String,Unit>)
+    -> IO(Probes.ListenerConnection()):
+  match pair:
+    case (active,Done{_}):
+      IO.pure(Probes.ListenerConnection(),active)
+    case ((conn,_),Fail{(code,message)}):
+      Fixture.reject(Probes.ListenerConnection(),conn,code,message)
+
+def finish_managed_updates(conn: Quic.MultipathConnection, state: Probes.ListenerDriver,
+    retry: Probes.ListenerConnection() -> IO(Quic.MultipathConnection), pending: Bool) -> IO(Quic.MultipathConnection):
+  match pending:
+    case True{}:
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry((conn,state))
+    case False{}:
+      do IO<Quic.MultipathConnection>:
+        IO.print("PASS Iroh acknowledged the automatic listener's ADD_ADDRESS and REMOVE_ADDRESS")
+        return conn
+
+def managed_update_progress(connection: Probes.ListenerConnection(),
+    retry: Probes.ListenerConnection() -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  (conn,+state) = connection
+  finish_managed_updates(conn,state,retry,Probes.listener_updates_pending(state))
+
+def updates_completed(result: Probes.ListenerProgress(), retry: Probes.ListenerConnection() -> IO(Quic.MultipathConnection))
+    -> IO(Quic.MultipathConnection):
+  match result:
+    case (active,Done{_}):
+      managed_update_progress(active,retry)
+    case ((conn,_),Fail{(code,message)}):
+      Fixture.reject(Quic.MultipathConnection,conn,code,message)
+
+def wait_managed_updates(fuel: Nat, connection: Probes.ListenerConnection()) -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      (conn,_) = connection
+      Fixture.reject(Quic.MultipathConnection,conn,1,"automatic listener address update did not get acknowledged")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        result : Probes.ListenerProgress() <- Probes.step_listener(connection)
+        updates_completed(result,next => wait_managed_updates(left,next))
+
+def managed_accept_result(result: Probes.AcceptListenerResult(),
+    retry: Probes.NatListener() -> IO(Probes.NatListener() & Probes.ListenerConnection()))
+    -> IO(Probes.NatListener() & Probes.ListenerConnection()):
+  match result:
+    case (listener,Done{Some{conn}}):
+      IO.pure(Probes.NatListener() & Probes.ListenerConnection(),(listener,conn))
+    case (listener,Done{None{}}):
+      do IO<Probes.NatListener() & Probes.ListenerConnection()>:
+        IO.sleep(1)
+        retry(listener)
+    case (listener,Fail{(code,message)}):
+      do IO<Probes.NatListener() & Probes.ListenerConnection()>:
+        Probes.close_listener(listener)
+        IO.die(Probes.NatListener() & Probes.ListenerConnection(),code,message)
+
+def managed_accept(fuel: Nat, listener: Probes.NatListener())
+    -> IO(Probes.NatListener() & Probes.ListenerConnection()):
+  match fuel:
+    case 0n:
+      do IO<Probes.NatListener() & Probes.ListenerConnection()>:
+        Probes.close_listener(listener)
+        IO.die(Probes.NatListener() & Probes.ListenerConnection(),1,"automatic listener did not accept Iroh")
+    case 1n+left:
+      do IO<Probes.NatListener() & Probes.ListenerConnection()>:
+        result : Probes.AcceptListenerResult() <- Probes.accept_listener(listener)
+        managed_accept_result(result,next => managed_accept(left,next))
+
+def drive_automatic(second: Probes.NatListener() & Probes.ListenerConnection(),
+    first: Probes.ListenerConnection(), +address: NatState.Candidate) -> IO(Unit):
+  (listener,(right,_)) = second
+  do IO<Unit>:
+    Probes.close_listener(listener)
+    advertised : Probes.ListenerConnection() <- managed_update(Probes.advertise_listener(first,address))
+    verified : Probes.ListenerConnection() <- wait_automatic(6000n,advertised)
+    withdrawn : Probes.ListenerConnection() <- managed_update(Probes.withdraw_listener(verified,address))
+    ready : Quic.MultipathConnection <- wait_managed_updates(6000n,withdrawn)
+    exchange_both((ready,right))
+
+def serve_automatic(first: Probes.NatListener() & Probes.ListenerConnection(), address: NatState.Candidate) -> IO(Unit):
+  (listener,left) = first
+  do IO<Unit>:
+    second : Probes.NatListener() & Probes.ListenerConnection() <- managed_accept(16000n,listener)
+    drive_automatic(second,left,address)
+
 def exchange_nat(peers: Quic.MultipathConnection & Quic.MultipathConnection, mode: U32, local_address: NatState.Candidate) -> IO(Unit):
   match peers mode:
     case active 0:
@@ -427,6 +538,19 @@ def listen_nat_offer(+host: String, mode: U32) -> IO(Unit):
       Quic.bind_multipath_with_nat_limit(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1",64))
     announce(bound,mode,host)
 
+def announce_automatic(bound: Probes.NatListener() & U32, host: String) -> IO(Unit):
+  (listener,+port) = bound
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    first : Probes.NatListener() & Probes.ListenerConnection() <- managed_accept(16000n,listener)
+    serve_automatic(first,loopback(host,port))
+
+def listen_automatic(+host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Probes.NatListener() & U32 <- IO.try(Probes.NatListener() & U32,
+      Probes.bind_listener(host,0,List.replicate(U32,32n,42),fixture_peer(),[Fixture.text_alpn()],64))
+    announce_automatic(bound,host)
+
 def listen_binary(+host: String) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
@@ -473,6 +597,8 @@ def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
       listen_nat_offer(host,6)
     case Some{7}:
       listen_nat_offer(host,7)
+    case Some{8}:
+      listen_automatic(host)
     case Some{+number}:
       listen_mode(host,number,U32.is_ge(number,1024))
     case None{}:

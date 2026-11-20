@@ -52,12 +52,13 @@ def check_affinity(listener, dialer, host, mode="1", *args):
             raise SystemExit(f"bidirectional multipath failed on {host}")
 
 
-def check_off_path(listener, fixture, host, mode, drop_first=False):
+def check_off_path(listener, fixture, host, mode, drop_first=False, automatic=False):
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with ExitStack() as stack:
         gate = bind(stack, host, family) if drop_first else None
         gate_port = gate.getsockname()[1] if gate else None
-        bend = stack.enter_context(process(listener, host, str(gate_port) if gate else "6"))
+        listener_mode = "8" if automatic else str(gate_port) if gate else "6"
+        bend = stack.enter_context(process(listener, host, listener_mode))
         target = host, read_address(bend)
         iroh = stack.enter_context(process(fixture, mode))
         direct_port = read_address(iroh)
@@ -121,7 +122,8 @@ def check_off_path(listener, fixture, host, mode, drop_first=False):
                 raise RuntimeError(f"expected a delayed NAT probe retry on {host}")
             print(f"PASS Bend recovered after the first off-path probe was dropped on {host}", flush=True)
         else:
-            print(f"PASS Iroh validated the off-path UDP candidate on {host}", flush=True)
+            driver = "automatic listener" if automatic else "manual listener"
+            print(f"PASS {driver} validated Iroh’s off-path UDP candidate on {host}", flush=True)
 
 
 if __name__ == "__main__":
@@ -134,6 +136,7 @@ if __name__ == "__main__":
         check(listener, fixture, host, mode, "6")
         check_off_path(listener, fixture, host, mode)
         check_off_path(listener, fixture, host, mode, drop_first=True)
+        check_off_path(listener, fixture, host, mode, automatic=True)
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
             check(listener, fixture, host, mode, "2")
         if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":

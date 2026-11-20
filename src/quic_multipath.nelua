@@ -279,7 +279,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram', 'write_multipath_early_frame',
@@ -328,6 +328,7 @@ local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_nat_offer: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_alpns_nat_offer: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_nat_frame: uint32 <cimport,nodecl>
 local iroh_mp_send_multipath_nat_challenge: uint32 <cimport,nodecl>
 local iroh_mp_take_multipath_nat_response: uint32 <cimport,nodecl>
@@ -1951,6 +1952,10 @@ local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return bind_listener(e,args,2,false)
 end
 
+local function bind_nat_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return bind_listener(e,args,2,true)
+end
+
 local function used_alpns(listener: *Listener)
   local cnx = picoquic_get_first_cnx(listener.quic)
   while cnx ~= nilptr do
@@ -2802,6 +2807,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
+  if iroh_mp_bind_multipath_alpns_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns_nat_offer,bind_nat_alpns_run) end
   if iroh_mp_bind_multipath_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_nat_offer,bind_nat_offer_run) end
   if iroh_mp_read_multipath_nat_frame ~= 0xffffffff then io_eff(iroh_mp_read_multipath_nat_frame,read_nat_frame_run) end
   if iroh_mp_send_multipath_nat_challenge ~= 0xffffffff then io_eff(iroh_mp_send_multipath_nat_challenge,send_nat_challenge_run) end

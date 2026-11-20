@@ -509,3 +509,300 @@ def step(connection: Connection()) -> IO(Connection() & NewPathResult()):
   do IO<Connection() & NewPathResult()>:
     updated : Quic.MultipathConnection & DialerResult() <- step_dialer(conn,state)
     return driven(updated,state)
+
+
+type ListenerDriver is Data:
+  ListenerUnavailable{}
+  ListenerDriver{peer: State.PeerState, local: Send.LocalState, frames: List<&2,Wire.Frame>,
+    jobs: List<&2,CandidateProbe>}
+
+def ListenerConnection() -> Type:
+  Quic.MultipathConnection & ListenerDriver
+
+def ListenerResult() -> Type:
+  Result<&1,&1,U32 & String,ListenerConnection()>
+
+def ListenerProgress() -> Type:
+  ListenerConnection() & Result<&1,&1,U32 & String,Maybe<&1,State.Candidate>>
+
+def listener_change(peer: State.PeerState, frames: List<&2,Wire.Frame>, jobs: List<&2,CandidateProbe>,
+    change: Send.Change) -> ListenerDriver & Result<&1,&1,U32 & String,Unit>:
+  match change:
+    case Send.Changed{local,Send.Send{frame}}:
+      (ListenerDriver{peer,local,List.append(&2,Wire.Frame,frames,[frame]),jobs},Done{Unit{}})
+    case Send.Changed{local,Send.Unchanged{}}:
+      (ListenerDriver{peer,local,frames,jobs},Done{Unit{}})
+    case Send.Changed{local,Send.AddressLimit{}}:
+      (ListenerDriver{peer,local,frames,jobs},Fail{(28,"peer NAT candidate limit reached")})
+    case Send.Changed{local,_}:
+      (ListenerDriver{peer,local,frames,jobs},Fail{(22,"invalid NAT candidate")})
+
+# Allow one complete turnover of the maximum advertised candidate set.
+def listener_queue_room(frames: List<&2,Wire.Frame>) -> Bool:
+  Nat.is_lt(List.length(&2,Wire.Frame,frames),510n)
+
+def apply_listener_change(+peer: State.PeerState, +local: Send.LocalState, +frames: List<&2,Wire.Frame>,
+    +jobs: List<&2,CandidateProbe>, address: State.Candidate,
+    change: Send.LocalState -> State.Candidate -> Send.Change, room: Bool)
+    -> ListenerDriver & Result<&1,&1,U32 & String,Unit>:
+  match room:
+    case True{}:
+      listener_change(peer,frames,jobs,change(local,address))
+    case False{}:
+      (ListenerDriver{peer,local,frames,jobs},Fail{(105,"NAT candidate update queue is full")})
+
+def change_listener(state: ListenerDriver, address: State.Candidate,
+    change: Send.LocalState -> State.Candidate -> Send.Change)
+    -> ListenerDriver & Result<&1,&1,U32 & String,Unit>:
+  match state:
+    case ListenerDriver{peer,local,+frames,jobs}:
+      apply_listener_change(peer,local,frames,jobs,address,change,listener_queue_room(frames))
+    case ListenerUnavailable{}:
+      (ListenerUnavailable{},Fail{(95,"NAT traversal was not negotiated")})
+
+def keep_listener(conn: Quic.MultipathConnection, pair: ListenerDriver & Result<&1,&1,U32 & String,Unit>)
+    -> ListenerConnection() & Result<&1,&1,U32 & String,Unit>:
+  (state,result) = pair
+  ((conn,state),result)
+
+# Queue a reachable candidate on this listener socket.
+def advertise_listener(connection: ListenerConnection(), address: State.Candidate)
+    -> ListenerConnection() & Result<&1,&1,U32 & String,Unit>:
+  (conn,state) = connection
+  keep_listener(conn,change_listener(state,address,local => target => Send.add(local,target)))
+
+def withdraw_listener(connection: ListenerConnection(), address: State.Candidate)
+    -> ListenerConnection() & Result<&1,&1,U32 & String,Unit>:
+  (conn,state) = connection
+  keep_listener(conn,change_listener(state,address,Send.remove))
+
+def close_listener_connection(conn: Quic.MultipathConnection, error: U32 & String) -> IO(ListenerResult()):
+  do IO<ListenerResult()>:
+    Quic.close_multipath(conn)
+    return Fail{error}
+
+def listener_parameters(conn: Quic.MultipathConnection, +local: U32, remote: Wire.ParameterResult,
+    ipv6: Bool) -> IO(ListenerResult()):
+  match remote:
+    case Wire.ParameterLimit{+limit}:
+      IO.pure(ListenerResult(),Done{(conn,ListenerDriver{
+        State.start(State.Server{ipv6},True{},Some{local},Some{limit}),
+        Send.start(State.Server{False{}},True{},Some{local},Some{limit}),[],[]})})
+    case Wire.ParameterAbsent{}:
+      IO.pure(ListenerResult(),Done{(conn,ListenerUnavailable{})})
+    case Wire.ParameterMalformed{}:
+      close_listener_connection(conn,(22,"peer sent an invalid NAT traversal limit"))
+
+def listener_peer(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>,
+    limit: U32, ipv6: Bool) -> IO(ListenerResult()):
+  match pair:
+    case (conn,Done{bytes}):
+      listener_parameters(conn,limit,Wire.read_parameters(bytes),ipv6)
+    case (conn,Fail{error}):
+      close_listener_connection(conn,error)
+
+def listener_ready(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>,
+    limit: U32, ipv6: Bool) -> IO(ListenerResult()):
+  match pair:
+    case (conn,Done{2}):
+      do IO<ListenerResult()>:
+        params : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <- Quic.peer_multipath_parameters(conn)
+        listener_peer(params,limit,ipv6)
+    case (conn,Done{1}):
+      IO.pure(ListenerResult(),Done{(conn,ListenerUnavailable{})})
+    case (conn,Done{_}):
+      close_listener_connection(conn,(11,"QUIC handshake is incomplete"))
+    case (conn,Fail{error}):
+      close_listener_connection(conn,error)
+
+# Initialize an accepted connection with the receive limit from its TLS offer.
+# The caller supplies its reachable socket addresses through advertise_listener.
+def initialize_listener(conn: Quic.MultipathConnection, limit: U32, ipv6: Bool) -> IO(ListenerResult()):
+  do IO<ListenerResult()>:
+    ready : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
+    listener_ready(ready,limit,ipv6)
+
+def NatListener() -> Type:
+  Quic.MultipathListener & U32
+
+def BindListenerResult() -> Type:
+  Result<&1,&1,U32 & String,NatListener() & U32>
+
+def AcceptListenerResult() -> Type:
+  NatListener() & Result<&1,&1,U32 & String,Maybe<&1,ListenerConnection()>>
+
+def bound_listener(result: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, limit: U32)
+    -> BindListenerResult():
+  match result:
+    case Done{(listener,port)}:
+      Done{((listener,limit),port)}
+    case Fail{error}:
+      Fail{error}
+
+def bind_listener_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, limit: U32, parameter: Maybe<&2,List<&2,U32>>) -> IO(BindListenerResult()):
+  match parameter:
+    case Some{encoded}:
+      do IO<BindListenerResult()>:
+        result : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
+          Quic.bind_multipath_alpns_nat_offer(host,port,seed,peer,alpns,encoded)
+        return bound_listener(result,limit)
+    case None{}:
+      IO.pure(BindListenerResult(),Fail{(22,"invalid NAT traversal limit")})
+
+# List opaque ALPN byte strings in server preference order.
+def bind_listener(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, +limit: U32) -> IO(BindListenerResult()):
+  bind_listener_offer(host,port,seed,peer,alpns,limit,Wire.encode_limit(limit))
+
+def accept_listener_state(result: ListenerResult(), listener: NatListener()) -> AcceptListenerResult():
+  match result:
+    case Done{connection}:
+      (listener,Done{Some{connection}})
+    case Fail{error}:
+      (listener,Fail{error})
+
+def accept_listener_address(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>,
+    listener: Quic.MultipathListener, +limit: U32) -> IO(AcceptListenerResult()):
+  match pair:
+    case (conn,Done{address}):
+      do IO<AcceptListenerResult()>:
+        result : ListenerResult() <- initialize_listener(conn,limit,ipv6_socket(address))
+        return accept_listener_state(result,(listener,limit))
+    case (conn,Fail{error}):
+      do IO<AcceptListenerResult()>:
+        Quic.close_multipath(conn)
+        return ((listener,limit),Fail{error})
+
+def accept_listener_result(pair: Quic.MultipathListener &
+    Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>, limit: U32) -> IO(AcceptListenerResult()):
+  match pair:
+    case (listener,Done{Some{conn}}):
+      do IO<AcceptListenerResult()>:
+        address : Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate> <- local_candidate(conn)
+        accept_listener_address(address,listener,limit)
+    case (listener,Done{None{}}):
+      IO.pure(AcceptListenerResult(),((listener,limit),Done{None{}}))
+    case (listener,Fail{error}):
+      IO.pure(AcceptListenerResult(),((listener,limit),Fail{error}))
+
+def accept_listener(owner: NatListener()) -> IO(AcceptListenerResult()):
+  (listener,limit) = owner
+  do IO<AcceptListenerResult()>:
+    received : Quic.MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>> <-
+      Quic.accept_multipath(listener)
+    accept_listener_result(received,limit)
+
+def close_listener(owner: NatListener()) -> IO(Unit):
+  (listener,_) = owner
+  Quic.close_multipath_listener(listener)
+
+def listener_updates_pending(state: ListenerDriver) -> Bool:
+  match state:
+    case ListenerDriver{_,_,Con{_,_},_}:
+      True{}
+    case _:
+      False{}
+
+def listener_probe_result(pair: Quic.MultipathConnection & Progress, peer: State.PeerState, local: Send.LocalState,
+    frames: List<&2,Wire.Frame>, rest: List<&2,CandidateProbe>, target: State.Candidate) -> ListenerProgress():
+  match pair:
+    case (conn,Pending{job}):
+      ((conn,ListenerDriver{peer,local,frames,List.append(&2,CandidateProbe,rest,[Trying{target,job}])}),Done{None{}})
+    case (conn,Answered{_}):
+      ((conn,ListenerDriver{peer,local,frames,rest}),Done{Some{target}})
+    case (conn,_):
+      ((conn,ListenerDriver{peer,local,frames,rest}),Done{None{}})
+
+def listener_poll(conn: Quic.MultipathConnection, peer: State.PeerState, local: Send.LocalState,
+    frames: List<&2,Wire.Frame>, jobs: List<&2,CandidateProbe>, now: U32) -> IO(ListenerProgress()):
+  match jobs:
+    case Nil{}:
+      IO.pure(ListenerProgress(),((conn,ListenerDriver{peer,local,frames,[]}),Done{None{}}))
+    case Con{Trying{target,job},rest}:
+      do IO<ListenerProgress()>:
+        result : Quic.MultipathConnection & Progress <- poll_at(conn,job,now)
+        return listener_probe_result(result,peer,local,frames,rest,target)
+
+def listener_sent(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, peer: State.PeerState,
+    local: Send.LocalState, +frame: Wire.Frame, +rest: List<&2,Wire.Frame>, +jobs: List<&2,CandidateProbe>,
+    now: U32) -> IO(ListenerProgress()):
+  match pair:
+    case (conn,Done{1}):
+      listener_poll(conn,peer,local,rest,jobs,now)
+    case (conn,Done{_}):
+      listener_poll(conn,peer,local,Con{frame,rest},jobs,now)
+    case (conn,Fail{error}):
+      IO.pure(ListenerProgress(),((conn,ListenerDriver{peer,local,Con{frame,rest},jobs}),Fail{error}))
+
+def listener_advance(conn: Quic.MultipathConnection, state: ListenerDriver, now: U32) -> IO(ListenerProgress()):
+  match state:
+    case ListenerDriver{peer,local,Nil{},jobs}:
+      listener_poll(conn,peer,local,[],jobs,now)
+    case ListenerDriver{peer,local,Con{+frame,rest},jobs}:
+      do IO<ListenerProgress()>:
+        sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- send_address(conn,frame)
+        listener_sent(sent,peer,local,frame,rest,jobs,now)
+    case ListenerUnavailable{}:
+      IO.pure(ListenerProgress(),((conn,ListenerUnavailable{}),Done{None{}}))
+
+def add_listener_probe(target: State.Candidate, jobs: List<&2,CandidateProbe>, restart: Bool, now: U32)
+    -> List<&2,CandidateProbe>:
+  match restart:
+    case True{}:
+      begin_probes([target],now)
+    case False{}:
+      List.append(&2,CandidateProbe,jobs,begin_probes([target],now))
+
+def listener_update(conn: Quic.MultipathConnection, change: State.Transition, local: Send.LocalState,
+    frames: List<&2,Wire.Frame>, jobs: List<&2,CandidateProbe>, +now: U32) -> IO(ListenerProgress()):
+  match change:
+    case State.Received{peer,State.Probe{_,target,restart}}:
+      listener_advance(conn,ListenerDriver{peer,local,frames,add_listener_probe(target,jobs,restart,now)},now)
+    case State.Received{peer,State.Ignored{}}:
+      listener_advance(conn,ListenerDriver{peer,local,frames,jobs},now)
+    case State.Received{peer,_}:
+      IO.pure(ListenerProgress(),((conn,ListenerDriver{peer,local,frames,jobs}),
+        Fail{(22,"unexpected NAT traversal frame at the listener")}))
+
+def listener_decode(conn: Quic.MultipathConnection, decoded: Wire.DecodeResult, state: ListenerDriver,
+    now: U32) -> IO(ListenerProgress()):
+  match decoded state:
+    case Wire.Decoded{frame,Nil{}} ListenerDriver{peer,local,frames,jobs}:
+      listener_update(conn,State.receive(peer,frame),local,frames,jobs,now)
+    case _ current:
+      IO.pure(ListenerProgress(),((conn,current),Fail{(22,"invalid NAT traversal frame")}))
+
+def listener_frame(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>,
+    state: ListenerDriver, now: U32) -> IO(ListenerProgress()):
+  match pair:
+    case (conn,Done{Some{wire}}):
+      listener_decode(conn,Wire.decode(wire),state,now)
+    case (conn,Done{None{}}):
+      listener_advance(conn,state,now)
+    case (conn,Fail{error}):
+      IO.pure(ListenerProgress(),((conn,state),Fail{error}))
+
+def listener_step_ready(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>, state: ListenerDriver)
+    -> IO(ListenerProgress()):
+  match pair state:
+    case (conn,Done{_}) ListenerUnavailable{}:
+      IO.pure(ListenerProgress(),((conn,ListenerUnavailable{}),Done{None{}}))
+    case (conn,Done{2}) active:
+      do IO<ListenerProgress()>:
+        now : U32 <- Quic.multipath_micros()
+        incoming : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <-
+          Quic.read_multipath_nat_frame(conn)
+        listener_frame(incoming,active,now)
+    case (conn,Done{_}) current:
+      IO.pure(ListenerProgress(),((conn,current),Done{None{}}))
+    case (conn,Fail{error}) current:
+      IO.pure(ListenerProgress(),((conn,current),Fail{error}))
+
+# Poll one received frame, one outbound update and one retry. A reported
+# candidate answered an authenticated off-path challenge on this connection.
+def step_listener(connection: ListenerConnection()) -> IO(ListenerProgress()):
+  (conn,state) = connection
+  do IO<ListenerProgress()>:
+    ready : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Quic.step_multipath(conn)
+    listener_step_ready(ready,state)

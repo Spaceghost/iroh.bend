@@ -297,6 +297,11 @@ def bind_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List
     alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+def bind_multipath_alpns_nat_offer(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, parameter: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 # Replace the preference list for new handshakes. An empty list pauses admission.
 def set_multipath_alpns(listener: MultipathListener, alpns: List<&2,List<&2,U32>>)
     -> IO(MultipathListener & Result<&1,&1,U32 & String,Unit>):
