@@ -80,6 +80,8 @@ local function picoquic_create_client_cnx(quic:*quic_t, peer:pointer,time:uint64
 local function picoquic_enable_path_callbacks(cnx:*cnx_t, enabled:cint) <cimport,nodecl> end
 local function picoquic_enable_path_callbacks_default(quic:*quic_t, enabled:cint) <cimport,nodecl> end
 local function picoquic_probe_new_path(cnx:*cnx_t, peer:pointer, src:pointer,time:uint64):cint <cimport,nodecl> end
+local function picoquic_probe_new_tuple(cnx:*cnx_t, path:*path_t, peer:pointer, src:pointer,
+    iface:cint, time:uint64, preferred:cint):cint <cimport,nodecl> end
 local function picoquic_set_stream_path_affinity(cnx:*cnx_t,id:uint64,path:uint64):cint <cimport,nodecl> end
 local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <cimport,nodecl> end
 local function picoquic_add_to_stream(cnx:*cnx_t,id:uint64, data:pointer,count:csize,fin:cint):cint <cimport,nodecl> end
@@ -118,6 +120,9 @@ local function picoquic_compare_addr(expected: pointer, actual: pointer): cint <
 local function picoquic_set_app_stream_ctx(cnx: *cnx_t, id: uint64, ctx: pointer): cint <cimport,nodecl> end
 local function picoquic_find_stream(cnx: *cnx_t, id: uint64): *native_stream_t <cimport,nodecl> end
 local function picoquic_abandon_path(cnx: *cnx_t, id: uint64, reason: uint64, now: uint64): cint <cimport,nodecl> end
+local function picoquic_set_path_status(cnx: *cnx_t, id:uint64, status:cint): cint <cimport,nodecl> end
+local picoquic_path_status_available: cint <cimport,nodecl>
+local picoquic_path_status_backup: cint <cimport,nodecl>
 local function picoquic_reset_stream(cnx: *cnx_t, id: uint64, code: uint64): cint <cimport,nodecl> end
 local function picoquic_stop_sending(cnx: *cnx_t, id: uint64, code: uint64): cint <cimport,nodecl> end
 local function bind(fd: cint, address: pointer, size: cuint): cint <cimport,nodecl> end
@@ -173,6 +178,7 @@ local PTLS_ALERT_INTERNAL_ERROR: cint <cimport,nodecl>
 ##[[
 local names = {
   'start_multipath', 'step_multipath', 'probe_multipath', 'multipath_status',
+  'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
   'bind_multipath', 'accept_multipath', 'close_multipath_listener', 'accept_multipath_stream', 'next_multipath_path',
@@ -190,6 +196,10 @@ local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_step_multipath: uint32 <cimport,nodecl>
 local iroh_mp_probe_multipath: uint32 <cimport,nodecl>
 local iroh_mp_multipath_status: uint32 <cimport,nodecl>
+local iroh_mp_set_multipath_standby: uint32 <cimport,nodecl>
+local iroh_mp_retire_multipath_path: uint32 <cimport,nodecl>
+local iroh_mp_multipath_millis: uint32 <cimport,nodecl>
+local iroh_mp_probe_multipath_alternate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_assign_stream_path: uint32 <cimport,nodecl>
 local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
@@ -220,6 +230,7 @@ local IoWork <cimport,nodecl> = @record{}
 local Term = @uint64
 local Effect = @function(Env,*[0]Term,*IoWork): Term
 local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_tick(): uint64 <cimport,nodecl> end
 local function io_cstr(e: Env, term: Term, size: *uint64): cstring <cimport,nodecl> end
 local function io_nul(value: cstring, size: uint64): boolean <cimport,nodecl> end
 local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
@@ -602,6 +613,37 @@ local function remember_shared_path(conn: *Connection, id: uint64): *Path
   return path
 end
 
+local function update_path(conn: *Connection, id: uint64, kind: cint)
+  local path = find_path(conn,id)
+  if path == nilptr and conn.listener ~= nilptr and kind == picoquic_callback_path_available then
+    path = remember_shared_path(conn,id)
+  end
+  if path == nilptr then return end
+  if kind == picoquic_callback_path_available then
+    if conn.listener ~= nilptr then
+      path.status = 1
+      return
+    end
+    local local_addr: storage_t, peer: storage_t
+    if picoquic_get_path_addr(conn.cnx,id,1,&local_addr) ~= 0 or
+        picoquic_get_path_addr(conn.cnx,id,2,&peer) ~= 0 then return end
+    while path ~= nilptr do
+      if path.id == id then
+        path.status = picoquic_compare_addr(&path.local_addr,&local_addr) == 0 and
+          picoquic_compare_addr(&path.peer,&peer) == 0 and 1 or 3
+      end
+      path = (@*Path)(path.next)
+    end
+    return
+  end
+  while path ~= nilptr do
+    if path.id == id and path.status ~= 3 then
+      path.status = kind == picoquic_callback_path_deleted and 3 or 2
+    end
+    path = (@*Path)(path.next)
+  end
+end
+
 local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
     user: pointer, stream_user: pointer): cint
   local conn = (@*Connection)(user)
@@ -611,15 +653,7 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
     receive_datagram(conn,bytes,size)
   elseif kind == picoquic_callback_path_available or kind == picoquic_callback_path_suspended or
       kind == picoquic_callback_path_deleted then
-    local path = find_path(conn,id)
-    if path == nilptr and conn.listener ~= nilptr and kind == picoquic_callback_path_available then
-      path = remember_shared_path(conn,id)
-    end
-    if path ~= nilptr then
-      if kind == picoquic_callback_path_available then path.status = 1 end
-      if kind == picoquic_callback_path_suspended then path.status = 2 end
-      if kind == picoquic_callback_path_deleted then path.status = 3 end
-    end
+    update_path(conn,id,kind)
   elseif kind == picoquic_callback_stream_fin or kind == picoquic_callback_stream_data or
       kind == picoquic_callback_stream_reset or kind == picoquic_callback_stop_sending then
     local stream = find_stream(conn,id)
@@ -1042,12 +1076,19 @@ local function probe(e: Env, conn: *Connection, args: *[0]Term): Term
   if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
   if conn.path_count >= PATH_LIMIT then return io_fail(e,ENOBUFS,'too many active QUIC paths') end
   local source: storage_t, peer: storage_t
-  local source_size = numeric_argument(e,args[1],args[2],&source)
+  local bind_len: uint64
+  local bind_host = io_cstr(e,args[1],&bind_len)
+  defer C.free(bind_host) end
   local peer_size = numeric_argument(e,args[3],args[4],&peer)
-  if source_size == 0 or peer_size == 0 or args[4] == 0 or source.ss_family ~= peer.ss_family then
+  local source_size: cuint = 0
+  if bind_len ~= 0 and args[2] <= 65535 and not io_nul(bind_host,bind_len) then
+    source_size = address(bind_host,(@uint16)(args[2]),&source)
+  end
+  if peer_size == 0 or args[4] == 0 or (bind_len == 0 and args[2] ~= 0) or
+      (bind_len ~= 0 and (source_size == 0 or source.ss_family ~= peer.ss_family)) then
     return io_fail(e,EINVAL,'invalid local or remote QUIC path address')
   end
-  local path,error = open_path(&peer,peer_size,&source,source_size)
+  local path,error = open_path(&peer,peer_size,source_size ~= 0 and &source or nilptr,source_size)
   if path == nilptr then return io_fail(e,error,nilptr) end
   local previous = conn.cnx.nb_paths
   local status = picoquic_probe_new_path(conn.cnx,&path.peer,&path.local_addr,picoquic_current_time())
@@ -1089,6 +1130,68 @@ local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
     return io_tup(e,args[0],result)
   end
   return io_tup(e,args[0],io_done(e,path.status))
+end
+
+local function probe_alternate(e: Env, conn: *Connection, args: *[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  local current = find_path(conn,args[1])
+  if conn.listener ~= nilptr or current == nilptr or current.status ~= 0 or conn.path_count >= PATH_LIMIT then
+    return io_fail(e,EINVAL,'no unvalidated dialer path is available for another address')
+  end
+  local peer: storage_t
+  local peer_size = numeric_argument(e,args[2],args[3],&peer)
+  if peer_size == 0 or args[3] == 0 then return io_fail(e,EINVAL,'invalid alternate peer address') end
+  local paths = (@*[0]*path_t)(conn.cnx.path)
+  for i = 0,<conn.cnx.nb_paths do
+    if paths[i].unique_path_id == current.id then
+      local path,error = open_path(&peer,peer_size,nilptr,0)
+      if path == nilptr then return io_fail(e,error,nilptr) end
+      local status = picoquic_probe_new_tuple(conn.cnx,paths[i],&path.peer,&path.local_addr,0,picoquic_current_time(),0)
+      if status ~= 0 then
+        release_path(path)
+        return io_fail(e,EIO,picoquic_error_name((@uint64)(status)))
+      end
+      path.id = current.id
+      path.next = conn.paths
+      conn.paths = path
+      conn.path_count = conn.path_count + 1
+      return io_done(e,term_pak(iroh_mp_Unit,0))
+    end
+  end
+  return io_fail(e,EINVAL,'unknown QUIC path')
+end
+
+local function alternate_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],probe_alternate(e,find_connection(e,args[0]),args))
+end
+
+local function standby_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local path = find_path(conn,args[1])
+  if path == nilptr or path.status == 3 or args[2] > 1 or conn.cnx.is_multipath_enabled == 0 then
+    return io_tup(e,args[0],io_fail(e,EINVAL,'invalid QUIC standby path'))
+  end
+  local status = args[2] == 0 and picoquic_path_status_available or picoquic_path_status_backup
+  if picoquic_set_path_status(conn.cnx,args[1],status) ~= 0 then
+    return io_tup(e,args[0],io_fail(e,EIO,'could not update QUIC path preference'))
+  end
+  return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
+end
+
+local function retire_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local path = find_path(conn,args[1])
+  if path ~= nilptr and path.status ~= 3 and
+      picoquic_abandon_path(conn.cnx,args[1],0,picoquic_current_time()) ~= 0 then
+    return io_tup(e,args[0],io_fail(e,EIO,'could not retire QUIC path'))
+  end
+  return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))
+end
+
+local function millis_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return (@uint32)(io_tick() // 1000000)
 end
 
 local function next_path_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -1336,6 +1439,10 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_step_multipath ~= 0xffffffff then io_eff(iroh_mp_step_multipath,step_run) end
   if iroh_mp_probe_multipath ~= 0xffffffff then io_eff(iroh_mp_probe_multipath,probe_run) end
   if iroh_mp_multipath_status ~= 0xffffffff then io_eff(iroh_mp_multipath_status,status_run) end
+  if iroh_mp_set_multipath_standby ~= 0xffffffff then io_eff(iroh_mp_set_multipath_standby,standby_run) end
+  if iroh_mp_retire_multipath_path ~= 0xffffffff then io_eff(iroh_mp_retire_multipath_path,retire_run) end
+  if iroh_mp_multipath_millis ~= 0xffffffff then io_eff(iroh_mp_multipath_millis,millis_run) end
+  if iroh_mp_probe_multipath_alternate ~= 0xffffffff then io_eff(iroh_mp_probe_multipath_alternate,alternate_run) end
   if iroh_mp_open_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_stream,open_stream_run) end
   if iroh_mp_assign_stream_path ~= 0xffffffff then io_eff(iroh_mp_assign_stream_path,assign_run) end
   if iroh_mp_write_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_stream,write_run) end

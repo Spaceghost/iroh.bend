@@ -21,7 +21,9 @@ def step_multipath(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
   import "./quic_multipath.c"
 
-# On a dialed connection, port zero chooses a free local port. None means retry after stepping.
+# An empty bind host lets the OS select the local address and port.
+# For an explicit bind address, port zero chooses a free port.
+# None means retry after stepping.
 # A returned path ID can be used after its state becomes available.
 def probe_multipath(conn: MultipathConnection, bind_host: String, bind_port: U32, peer: String, peer_port: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,U32>>):
@@ -31,6 +33,23 @@ def probe_multipath(conn: MultipathConnection, bind_host: String, bind_port: U32
 # 2 suspended, and 3 retired.
 def multipath_status(conn: MultipathConnection, path: U32)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_multipath.c"
+
+# Try a second address on the same unvalidated path without consuming a path ID.
+def probe_multipath_alternate(conn: MultipathConnection, path: U32, peer: String, port: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+# Make a path a standby for regular traffic, or restore it with standby zero.
+def set_multipath_standby(conn: MultipathConnection, path: U32, standby: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+def retire_multipath_path(conn: MultipathConnection, path: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Unit>):
+  import "./quic_multipath.c"
+
+def multipath_millis() -> IO(U32):
   import "./quic_multipath.c"
 
 # Find the next available path after the given ID, including paths opened by the peer.

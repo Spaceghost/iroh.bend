@@ -125,8 +125,95 @@ def relayed(+host: String, direct_port: Maybe<&2,U32>, dropped_port: Maybe<&2,U3
     case _ _:
       IO.die(Unit,2,"expected both UDP ports")
 
+def routed_fail(-T: Type, owner: Multipath.RoutedConnection, code: U32, message: String) -> IO(T):
+  do IO<T>:
+    _ : Result<&1,&1,U32 & String,Unit> <- Multipath.close_routes(owner)
+    IO.die(T,code,message)
+
+def await_promotion(progress: Multipath.RoutedConnection & Multipath.PathResult(),
+    retry: Multipath.RoutedConnection -> IO(Multipath.RoutedConnection)) -> IO(Multipath.RoutedConnection):
+  match progress:
+    case (owner,Done{Multipath.PromotedPath{_}}):
+      IO.pure(Multipath.RoutedConnection,owner)
+    case (owner,Done{Multipath.InitialPath{}}):
+      do IO<Multipath.RoutedConnection>:
+        IO.sleep(1)
+        retry(owner)
+    case (owner,Fail{(code,message)}):
+      routed_fail(Multipath.RoutedConnection,owner,code,message)
+
+def wait_promotion(fuel: Nat, owner: Multipath.RoutedConnection) -> IO(Multipath.RoutedConnection):
+  match fuel:
+    case 0n:
+      routed_fail(Multipath.RoutedConnection,owner,1,"published direct path did not become preferred")
+    case 1n+left:
+      do IO<Multipath.RoutedConnection>:
+        progress : Multipath.RoutedConnection & Multipath.PathResult() <- Multipath.step_routes(owner)
+        await_promotion(progress,next => wait_promotion(left,next))
+
+def datagrams_on_relay(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection & Unit):
+  do IO<Quic.MultipathConnection & Unit>:
+    next : Quic.MultipathConnection <- Fixture.datagram_exchange(conn)
+    return (next,Unit{})
+
+def write_unpinned(opened: Quic.MultipathConnection & U32, byte: U32) -> IO(Quic.MultipathConnection & U32):
+  (conn,stream) = opened
+  Fixture.write_assigned((conn,Unit{}),stream,byte)
+
+def send_unpinned(conn: Quic.MultipathConnection, byte: U32) -> IO(Quic.MultipathConnection & U32):
+  do IO<Quic.MultipathConnection & U32>:
+    opened : Quic.MultipathConnection & U32 <- Fixture.open(conn)
+    write_unpinned(opened,byte)
+
+def read_routed(sent: Multipath.RoutedConnection & U32, first: U32) -> IO(Unit):
+  (owner,second) = sent
+  Multipath.Routed{(conn,bridge),_,_} = owner
+  do IO<Unit>:
+    read_a : Quic.MultipathConnection <- Fixture.receive(4000n,conn,first,11,False{})
+    read_b : Quic.MultipathConnection <- Fixture.receive(4000n,read_a,second,22,False{})
+    IO.try(Unit,Multipath.disconnect((read_b,bridge)))
+    IO.print("PASS routed endpoint promoted the direct path")
+
+def promote_routed(initial: Multipath.RoutedConnection & U32) -> IO(Unit):
+  (relay_sent,first) = initial
+  do IO<Unit>:
+    IO.print("ENABLE_DIRECT")
+    promoted : Multipath.RoutedConnection <- wait_promotion(5000n,relay_sent)
+    probed : Multipath.RoutedConnection & U32 <-
+      Multipath.use_routed_connection(U32,promoted,c => send_unpinned(c,22))
+    read_routed(probed,first)
+
+def send_first_routed(exchanged: Multipath.RoutedConnection & Unit) -> IO(Unit):
+  (relay_ready,_) = exchanged
+  do IO<Unit>:
+    initial : Multipath.RoutedConnection & U32 <-
+      Multipath.use_routed_connection(U32,relay_ready,c => send_unpinned(c,11))
+    promote_routed(initial)
+
+def exchange_routed(owner: Multipath.RoutedConnection) -> IO(Unit):
+  do IO<Unit>:
+    exchanged : Multipath.RoutedConnection & Unit <-
+      Multipath.use_routed_connection(Unit,owner,datagrams_on_relay)
+    send_first_routed(exchanged)
+
+def auto(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>, url: String) -> IO(Unit):
+  match blocked gated:
+    case Some{blackhole} Some{reachable}:
+      do IO<Unit>:
+        owner : Multipath.RoutedConnection <- IO.try(Multipath.RoutedConnection,
+          Multipath.connect_routed(Endpoint.DialRoutes{
+            [Endpoint.IpAddress{host,blackhole},Endpoint.IpAddress{host,reachable}],[url]},
+            Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),
+              [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]},
+            Endpoint.HandshakeTimeouts{150,6000}))
+        exchange_routed(owner)
+    case _ _:
+      IO.die(Unit,2,"expected both candidate ports")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,host,blackhole,gated,url,"auto"]:
+      auto(host,U32.read(blackhole),U32.read(gated),url)
     case Con{_,Con{host,Con{port,Nil{}}}}:
       direct(host,U32.read(port))
     case Con{_,Con{host,Con{port,Con{blackhole,Con{url,Nil{}}}}}}:
