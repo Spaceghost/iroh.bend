@@ -10,22 +10,22 @@ When the owner says `resume` or `continue`, pick up the first open item below. U
 
 ## Reproducing the first item
 
-On the maintainer's build host, the following runs the two address families against the pinned Iroh peer. The independent reference lives outside the product tree.
+The following runs the two address families on Fedora against the pinned Iroh peer. The independent reference lives outside the product tree.
 
 ```sh
 ssh fedora 'bash -s' <<'FEDORA'
 source ~/.local/bin/agent-storage-env iroh-idle-config
 set -eu
-cd "$TMPDIR/project"
+cd "$HOME/Projects/iroh.bend-listener-idle"
 export LD_LIBRARY_PATH="$TMPDIR/ngtcp2-1.26-prefix/lib:/home/linuxbrew/.linuxbrew/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 python3 -B tests/quic_idle_timeout.py "$TMPDIR/f126/iroh-bend-quic-datagram-idle-listeners" "$TMPDIR/iroh-idle-reference" --listeners
 FEDORA
 ```
 
-The working branch is `release/idle-config` in `/srv/ai/workspaces/iroh/idle-config` on Bak. Check `git status --short --branch` and the GitHub master tip before editing. Saved logs and the reference source are under `/srv/ai/artifacts/iroh/idle-config/` on Bak. The public [conformance scope](README.md#conformance-scope) tracks the broader implementation.
+The canonical clone on Fedora is `~/Projects/iroh.bend`. The active worktree is `~/Projects/iroh.bend-listener-idle`, on branch `conformance/fedora-listener-idle`. Check `git status --short --branch` and the GitHub master tip before editing. The prior checkpoint logs and reference source are in `~/workspaces/2026-11-20-iroh-conformance/artifacts/idle-config/` on Fedora. The public [conformance scope](README.md#conformance-scope) tracks the broader implementation.
 
 ## Working agreements
 
-- Compile on Fedora whenever it is reachable. Its Quadro P4000 and the Alienware RTX 3070 and RTX 4060 are available for GPU checks. Follow the owner's host storage rules for worktrees, builds and caches.
+- Keep source edits, builds, test runs, evidence, commits and GitHub pushes on Fedora. Use its Quadro P4000 for GPU checks. Start sizable jobs with `source ~/.local/bin/agent-storage-env iroh-idle-config` and use the resulting scratch and cache locations.
 - Write protocol logic in Bend and native bindings in Nelua. Use upstream Iroh as the independent test peer. Keep generated C and the external Rust reference in the build workspace.
 - Commit each verified change and push ordinary fast-forwards directly to GitHub `master`. Preserve existing worktrees and the parked change.
