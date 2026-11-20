@@ -26,7 +26,7 @@ async def check(native, reference, url, origin, address):
                     await proxy.expect_attempt(False)
                     iroh.stdin.write(b"RESUME\n")
                     await iroh.stdin.drain()
-                    await expect(server, b"PASS Bend finished the accepted stream after relay loss")
+                    await expect(server, b"PASS Bend finished the original accepted stream")
                     await expect(iroh, b"PASS Iroh finished the original stream over direct UDP")
                     iroh.stdin.write(b"FINISH\n")
                     await iroh.stdin.drain()

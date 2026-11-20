@@ -71,7 +71,7 @@ def close_exchange(connection: Quic.MultipathConnection, owner: Endpoint.NatRela
     ack : Quic.MultipathConnection <- Fixture.read_datagram(6000n,sent,[255])
     Quic.close_multipath(ack)
     IO.try(Unit,Endpoint.close_nat_listener(owner))
-    IO.print("PASS Bend finished the accepted stream after relay loss")
+    IO.print("PASS Bend finished the original accepted stream")
 
 def direct_byte(outcome: Quic.MultipathConnection & Quic.MultipathRead, driver: Nat.ListenerDriver,
     owner: Endpoint.NatRelayedListener(), stream: U32,
@@ -79,6 +79,10 @@ def direct_byte(outcome: Quic.MultipathConnection & Quic.MultipathRead, driver: 
   match outcome:
     case (conn,Quic.MultipathReadBytes{[99]}):
       close_exchange(conn,owner,stream)
+    case (conn,Quic.MultipathReadBytes{[109]}):
+      do IO<Unit>:
+        sent : Quic.MultipathConnection <- queue_reply(conn,stream,110,0)
+        retry((sent,driver),owner)
     case (conn,Quic.MultipathReadPending{}):
       do IO<Unit>:
         IO.sleep(1)
@@ -117,7 +121,8 @@ def advertised(result: Nat.ListenerConnection() & Result<&1,&1,U32 & String,Unit
     owner: Endpoint.NatRelayedListener(), stream: U32) -> IO(Unit):
   match result:
     case (connection,Done{_}):
-      drive(18000n,connection,owner,stream)
+      # Path setup and Iroh's 15-second direct-path idle timeout share this window.
+      drive(45000n,connection,owner,stream)
     case ((conn,_),Fail{(code,message)}):
       do IO<Unit>:
         _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.close_nat_listener(owner)

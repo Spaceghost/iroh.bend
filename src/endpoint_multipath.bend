@@ -103,13 +103,28 @@ def accepted_nat(outcome: Nat.ListenerResult(), owner: NatRelayedListener()) -> 
     case Fail{error}:
       (owner,Fail{error})
 
+def initialize_accepted_nat(keepalive: Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit>,
+    owner: RelayedListener, +limit: U32) -> IO(AcceptNatRelayed()):
+  match keepalive:
+    case (connection,Done{_}):
+      do IO<AcceptNatRelayed()>:
+        initialized : Nat.ListenerResult() <- Nat.initialize_listener(connection,limit,True{})
+        return accepted_nat(initialized,(owner,limit))
+    case (connection,Fail{error}):
+      do IO<AcceptNatRelayed()>:
+        Quic.close_multipath(connection)
+        return ((owner,limit),Fail{error})
+
 def accept_nat_result(result: RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Quic.MultipathConnection>>, +limit: U32)
     -> IO(AcceptNatRelayed()):
   match result:
     case (owner,Done{Some{connection}}):
       do IO<AcceptNatRelayed()>:
-        initialized : Nat.ListenerResult() <- Nat.initialize_listener(connection,limit,True{})
-        return accepted_nat(initialized,(owner,limit))
+        # Continue testing the active path even while the application waits
+        # for inbound data on an open stream.
+        kept : Quic.MultipathConnection & Result<&1,&1,U32 & String,Unit> <-
+          Quic.set_multipath_keepalive(connection,1000)
+        initialize_accepted_nat(kept,owner,limit)
     case (owner,Done{None{}}):
       IO.pure(AcceptNatRelayed(),((owner,limit),Done{None{}}))
     case (owner,Fail{error}):
