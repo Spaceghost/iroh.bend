@@ -28,15 +28,37 @@ def attached_listener(bridge: Result<&1,&1,U32 & String,Relay.Bridge>, listener:
         Quic.close_multipath_listener(listener)
         return Fail{error}
 
-def attach_listener(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, url: String, seed: List<&2,U32>)
+def attach_inbound(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, url: String, seed: List<&2,U32>,
+    start: String -> List<&2,U32> -> U32 -> IO(Result<&1,&1,U32 & String,Relay.Bridge>))
     -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   match bound:
     case Done{(listener,+port)}:
       do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
-        bridge : Result<&1,&1,U32 & String,Relay.Bridge> <- Inbound.start_background(url,seed,port)
+        bridge : Result<&1,&1,U32 & String,Relay.Bridge> <- start(url,seed,port)
         attached_listener(bridge,listener,port)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,RelayedListener & U32>,Fail{error})
+
+def attach_listener(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, url: String, seed: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  attach_inbound(bound,url,seed,address => secret => port => Inbound.start_background(address,secret,port))
+
+def relay_only(bound: Result<&1,&1,U32 & String,RelayedListener & U32>) -> Result<&1,&1,U32 & String,RelayedListener>:
+  match bound:
+    case Done{(listener,_)}:
+      Done{listener}
+    case Fail{why}:
+      Fail{why}
+
+# Register before returning the relay-only listener. The bridge owns the route
+# from this relay to the local QUIC socket for all accepted peer connections.
+def bind_relay_identity(url: String, +seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  do IO<Result<&1,&1,U32 & String,RelayedListener>>:
+    bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
+      Quic.bind_multipath_identity("127.0.0.1",0,seed,alpns,early_data)
+    attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_inbound(bound,url,seed,address => secret => port => Inbound.start(address,secret,port))
+    return relay_only(attached)
 
 # Both IP families and the relay feed a single Picoquic context. The
 # listener owns relay registration for the lifetime of its connections.
