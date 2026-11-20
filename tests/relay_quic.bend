@@ -489,18 +489,31 @@ def wait_inbound_pair(pair: Endpoint.RelayedListener & Endpoint.Connection()) ->
     second : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
     finish_inbound(second,first)
 
-def listen_inbound(url: String) -> IO(Unit):
+def inbound_scenario(reconnect: Bool, pair: Endpoint.RelayedListener & Endpoint.Connection()) -> IO(Unit):
+  match reconnect:
+    case False{}:
+      wait_inbound_pair(pair)
+    case True{}:
+      (listener,conn) = pair
+      do IO<Unit>:
+        _ : U32 <- serve_inbound_peer(conn)
+        IO.try(Unit,Endpoint.close_relay_identity(listener))
+        IO.print("PASS Bend served an established QUIC connection after relay reconnect")
+
+def listen_inbound(url: String, reconnect: Bool) -> IO(Unit):
   do IO<Unit>:
     listener : Endpoint.RelayedListener <- IO.try(Endpoint.RelayedListener,
       Endpoint.bind_relay_identity(url,List.replicate(U32,32n,42),Fixture.alpn(),0))
     IO.print("relay identity listener ready")
     inbound : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
-    wait_inbound_pair(inbound)
+    inbound_scenario(reconnect,inbound)
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_, "listen-relay-identity", url]:
-      listen_inbound(url)
+      listen_inbound(url,False{})
+    case [_, "listen-relay-reconnect", url]:
+      listen_inbound(url,True{})
     case Con{_,Con{"listen",Con{url,Nil{}}}}:
       listen(url)
     case Con{_,Con{"dial",Con{url,Nil{}}}}:

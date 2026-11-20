@@ -10,7 +10,7 @@ type Routes is Type:
 
 type State is Type:
   Online{relay: Client.Connection, routes: Routes}
-  Offline{error: U32 & String}
+  Offline{routes: Routes}
 
 def close_routes(routes: Routes) -> IO(Unit):
   match routes:
@@ -21,14 +21,12 @@ def close_routes(routes: Routes) -> IO(Unit):
         Socket.close(udp)
         close_routes(rest)
 
-def append_route(state: State, peer: List<&2,U32>, udp: Socket, activity: U32) -> IO(State):
+def append_route(state: State, peer: List<&2,U32>, udp: Socket, activity: U32) -> State:
   match state:
     case Online{relay,rest}:
-      IO.pure(State,Online{relay,Route{peer,udp,activity,rest}})
-    case Offline{error}:
-      do IO<State>:
-        Socket.close(udp)
-        return Offline{error}
+      Online{relay,Route{peer,udp,activity,rest}}
+    case Offline{rest}:
+      Offline{Route{peer,udp,activity,rest}}
 
 def forwarded(result: Socket & Result<&1,&1,U32 & String,Unit>, peer: List<&2,U32>,
     rest: Routes, now: U32) -> Routes:
@@ -78,10 +76,8 @@ def after_relay(sent: Result<&1,&1,U32 & String,Client.Connection>, rest: Routes
   match sent:
     case Done{relay}:
       next(relay,rest)
-    case Fail{error}:
-      do IO<State>:
-        close_routes(rest)
-        return Offline{error}
+    case Fail{_}:
+      IO.pure(State,Offline{rest})
 
 def outbound(matches: Bool, udp: Socket, relay: Client.Connection, +peer: List<&2,U32>, rest: Routes,
     activity: U32, now: U32, bytes: List<&2,U32>, next: Client.Connection -> Routes -> IO(State)) -> IO(State):
@@ -89,12 +85,12 @@ def outbound(matches: Bool, udp: Socket, relay: Client.Connection, +peer: List<&
     case False{}:
       do IO<State>:
         swept : State <- next(relay,rest)
-        append_route(swept,peer,udp,activity)
+        return append_route(swept,peer,udp,activity)
     case True{}:
       do IO<State>:
         sent : Result<&1,&1,U32 & String,Client.Connection> <- Client.send_datagram(relay,peer,0,0,bytes)
         swept : State <- after_relay(sent,rest,next)
-        append_route(swept,peer,udp,now)
+        return append_route(swept,peer,udp,now)
 
 def local_input(result: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
     relay: Client.Connection, peer: List<&2,U32>, rest: Routes, activity: U32, port: U32, now: U32,
@@ -103,7 +99,7 @@ def local_input(result: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U
     case (udp,Wait{_}):
       do IO<State>:
         swept : State <- next(relay,rest)
-        append_route(swept,peer,udp,activity)
+        return append_route(swept,peer,udp,activity)
     case (udp,Ready{Fail{_}}):
       do IO<State>:
         Socket.close(udp)
@@ -152,57 +148,79 @@ def relay_result(result: Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,
       receive_packet(Wire.packet(frame),relay,routes,port,now)
     case Done{(relay,None{})}:
       IO.pure(State,Online{relay,routes})
-    case Fail{error}:
-      do IO<State>:
-        close_routes(routes)
-        return Offline{error}
-
-def tick(state: State, port: U32, now: U32) -> IO(State):
-  match state:
-    case Offline{error}:
-      IO.pure(State,Offline{error})
-    case Online{relay,routes}:
-      do IO<State>:
-        received : Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>> <- Client.try_receive(relay,2)
-        relay_result(received,routes,port,now)
+    case Fail{_}:
+      IO.pure(State,Offline{routes})
 
 def finish(state: State) -> IO(Result<&1,&1,U32 & String,Unit>):
   match state:
-    case Offline{error}:
-      IO.pure(Result<&1,&1,U32 & String,Unit>,Fail{error})
+    case Offline{routes}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        close_routes(routes)
+        return Done{Unit{}}
     case Online{relay,routes}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
         close_routes(routes)
         Client.close(relay)
         return Done{Unit{}}
 
+def receive(state: State, port: U32, now: U32) -> IO(State):
+  match state:
+    case Offline{routes}:
+      IO.pure(State,Offline{routes})
+    case Online{relay,routes}:
+      do IO<State>:
+        received : Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>> <- Client.try_receive(relay,2)
+        relay_result(received,routes,port,now)
+
 def advance(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, state: State, port: U32, now: U32,
-    next: State -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+    next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
   match stop:
     case Ready{_}:
       finish(state)
     case Wait{_}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
-        updated : State <- tick(state,port,now)
-        next(updated)
+        updated : State <- receive(state,port,now)
+        next(updated,100)
 
 def cycle(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, relay: Client.Connection, routes: Routes, +port: U32,
-    next: State -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+    next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
   do IO<Result<&1,&1,U32 & String,Unit>>:
     +now : U32 <- Relay.relay_millis()
     swept : State <- sweep(64n,routes,relay,port,now)
     advance(stop,swept,port,now,next)
 
-@unsafe def run(state: State, +port: U32, +shutdown: Chan(Unit)) -> IO(Result<&1,&1,U32 & String,Unit>):
+def reconnected(result: Result<&1,&1,U32 & String,Client.Connection>, routes: Routes, delay: U32,
+    next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match result:
+    case Done{relay}:
+      next(Online{relay,routes},100)
+    case Fail{_}:
+      next(Offline{routes},U32.min(U32.mul(delay,2),5000))
+
+def reconnect(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, routes: Routes, delay: U32, url: String, seed: List<&2,U32>,
+    next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match stop:
+    case Ready{_}:
+      finish(Offline{routes})
+    case Wait{_}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        result : Result<&1,&1,U32 & String,Client.Connection> <- Client.connect(url,seed)
+        reconnected(result,routes,delay,next)
+
+# Retain route sockets across an outage so QUIC still sees the same source tuple.
+@unsafe def run(state: State, +delay: U32, +url: String, +seed: List<&2,U32>, +port: U32, +shutdown: Chan(Unit))
+    -> IO(Result<&1,&1,U32 & String,Unit>):
   match state:
-    case Offline{error}:
-      IO.pure(Result<&1,&1,U32 & String,Unit>,Fail{error})
+    case Offline{routes}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        stop : Poll<&1,&1,Maybe<&1,Unit>,Unit> <- Chan.try_recv(Unit,shutdown,delay)
+        reconnect(stop,routes,delay,url,seed,updated => ms => run(updated,ms,url,seed,port,shutdown))
     case Online{relay,routes}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
         stop : Poll<&1,&1,Maybe<&1,Unit>,Unit> <- Chan.try_recv(Unit,shutdown,0)
-        cycle(stop,relay,routes,port,next => run(next,port,shutdown))
+        cycle(stop,relay,routes,port,updated => ms => run(updated,ms,url,seed,port,shutdown))
 
-def start_connected(result: Result<&1,&1,U32 & String,Client.Connection>, port: U32, url: String)
+def start_connected(result: Result<&1,&1,U32 & String,Client.Connection>, port: U32, +url: String, seed: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   match result:
     case Fail{error}:
@@ -211,17 +229,17 @@ def start_connected(result: Result<&1,&1,U32 & String,Client.Connection>, port: 
       do IO<Result<&1,&1,U32 & String,Relay.Bridge>>:
         +shutdown : Chan(Unit) <- Chan.new(Unit,0)
         finished : Chan(Result<&1,&1,U32 & String,Unit>) <- IO.fork(Result<&1,&1,U32 & String,Unit>,
-          run(Online{relay,Empty{}},port,shutdown))
+          run(Online{relay,Empty{}},100,url,seed,port,shutdown))
         return Done{Relay.RelayPath{shutdown,finished,url}}
 
-def start_valid(valid: Bool, +url: String, seed: List<&2,U32>, port: U32) -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
+def start_valid(valid: Bool, +url: String, +seed: List<&2,U32>, port: U32) -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   match valid:
     case False{}:
       IO.pure(Result<&1,&1,U32 & String,Relay.Bridge>,Fail{(1,"inbound relay requires a bound loopback port")})
     case True{}:
       do IO<Result<&1,&1,U32 & String,Relay.Bridge>>:
         relay : Result<&1,&1,U32 & String,Client.Connection> <- Client.connect(url,seed)
-        start_connected(relay,port,url)
+        start_connected(relay,port,url,seed)
 
 def start(url: String, seed: List<&2,U32>, +local_port: U32) -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   start_valid(U32.is_gt(local_port,0) && U32.is_le(local_port,65535),url,seed,local_port)
