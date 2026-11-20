@@ -460,7 +460,7 @@ QAD_TEST_CA_BUNDLE ?=
 PICOQUIC_FLAGS = -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include"
 PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--wrap=ptls_get_cipher -Wl,--wrap=ptls_get_read_epoch \
 	-Wl,--wrap=ptls_handshake_is_complete -Wl,--wrap=ptls_is_psk_handshake -Wl,--wrap=ptls_free \
-	-Wl,--wrap=picoquic_decode_frames -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
+	-Wl,--wrap=picoquic_decode_frames -Wl,--wrap=picoquic_format_application_close_frame -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
 	"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
 	"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group
 MULTIPATH_CURL_CFLAGS ?= $$($(PKG_CONFIG) --cflags libcurl)
@@ -693,19 +693,24 @@ check-quic-stream-reset-ack-return-control:
 	@test -x "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" || { echo 'Set UPSTREAM_QUIC_STREAM_RESET_ACK to the Iroh reset acknowledgement fixture.' >&2; exit 2; }
 	sh tests/quic_stream_finish_control.sh "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" reset-ack-return
 
-.PHONY: check-quic-datagram-close check-quic-close-control
+.PHONY: check-quic-close check-quic-datagram-close check-quic-multipath-close check-quic-close-control
+check-quic-close: check-quic-datagram-close check-quic-multipath-close
 UPSTREAM_QUIC_CLOSE ?=
 
 check-quic-datagram-close: $(BUILD)/iroh-bend-quic-datagram-cancel
 	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_connection_close.py "$<" "$(UPSTREAM_QUIC_CLOSE)" --examples 0 1 2
 
+check-quic-multipath-close: $(BUILD)/iroh-bend-quic-multipath-cancel
+	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
+	python3 -B tests/quic_connection_close.py "$<" "$(UPSTREAM_QUIC_CLOSE)"
+
 check-quic-close-control:
 	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_connection_close.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
-$(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
+$(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_connection_close.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend src/quic_stream.bend src/quic_close.bend src/quic_nat.bend tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"

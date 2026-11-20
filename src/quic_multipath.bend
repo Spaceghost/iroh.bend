@@ -1,5 +1,6 @@
 import Base
 import ./quic_stream.bend as Stream
+import ./quic_close.bend as Close
 import ./quic_nat.bend as NatWire
 
 type MultipathConnection is Type:
@@ -562,3 +563,17 @@ def step_qad_server(server: QadServer) -> IO(QadServer & Result<&1,&1,U32 & Stri
 
 def close_qad_server(server: QadServer) -> IO(Unit):
   import "./quic_multipath.c"
+
+def send_multipath_application_close(conn: MultipathConnection, high: U32, low: U32, reason: List<&2,U32>)
+    -> IO(MultipathConnection & Close.WriteResult()):
+  import "./quic_multipath.c"
+
+def read_multipath_application_close(conn: MultipathConnection) -> IO(MultipathConnection & Close.NativeResult()):
+  import "./quic_multipath.c"
+
+def close_multipath_connection(conn: MultipathConnection, code: NatWire.VarInt, reason: List<&2,U32>)
+    -> IO(MultipathConnection & Close.WriteResult()):
+  Close.close(MultipathConnection,conn,code,reason,send_multipath_application_close)
+
+def multipath_close_reason(conn: MultipathConnection) -> IO(MultipathConnection & Close.ReadResult()):
+  Close.observe(MultipathConnection,conn,read_multipath_application_close)

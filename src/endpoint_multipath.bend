@@ -3,6 +3,7 @@ import ./endpoint.bend as Endpoint
 import ./endpoint_ticket.bend as Tickets
 import ./quic_handshake_routes.bend as Race
 import ./quic_multipath.bend as Quic
+import ./quic_close.bend as Close
 import ./quic_multipath_nat.bend as Nat
 import ./quic_nat.bend as NatWire
 import ./relay_quic.bend as Relay
@@ -329,6 +330,13 @@ def stop_bridge(bridge: Maybe<&1,Relay.Bridge>) -> IO(Result<&1,&1,U32 & String,
       Relay.stop(relay)
     case None{}:
       IO.pure(Result<&1,&1,U32 & String,Unit>,Done{Unit{}})
+
+def close_with(connection: Connection(), code: NatWire.VarInt, reason: List<&2,U32>)
+    -> IO(Connection() & Close.WriteResult()):
+  use_connection(Close.WriteResult(),connection,c => Quic.close_multipath_connection(c,code,reason))
+
+def close_reason(connection: Connection()) -> IO(Connection() & Close.ReadResult()):
+  use_connection(Close.ReadResult(),connection,Quic.multipath_close_reason)
 
 def disconnect(connection: Connection()) -> IO(Result<&1,&1,U32 & String,Unit>):
   (conn,bridge) = connection

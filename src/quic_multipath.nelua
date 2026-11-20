@@ -148,6 +148,11 @@ local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <c
 local function picoquic_add_to_stream_with_ctx(cnx:*cnx_t,id:uint64,data:pointer,count:csize,fin:cint,ctx:pointer):cint <cimport,nodecl> end
 local receive_node_t <cimport,nodecl,codename 'picoquic_stream_data_node_t'> = @record{}
 local cid_t <cimport,nodecl,codename 'picoquic_local_cnxid_t'> = @record{}
+local function picoquic_varint_encode(bytes:*uint8, length:csize, value:uint64):csize <cimport,nodecl> end
+local picoquic_frame_type_application_close: uint8 <cimport,nodecl>
+local function real_format_application_close(cnx:*cnx_t, bytes:*uint8, limit:*uint8, more:*cint, pure_ack:*cint):*uint8
+    <cimport,codename '__real_picoquic_format_application_close_frame'> end
+local function picoquic_get_application_error(cnx:*cnx_t):uint64 <cimport,nodecl> end
 local function picoquic_varint_decode(bytes:*uint8, length:csize, value:*uint64):csize <cimport,nodecl> end
 local function picoquic_skip_frame(bytes:*uint8, length:csize, consumed:*csize, pure_ack:*cint):cint <cimport,nodecl> end
 local function picoquic_connection_error(cnx:*cnx_t, code:uint64, kind:uint64):cint <cimport,nodecl> end
@@ -303,7 +308,7 @@ local names = {
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'multipath_micros', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
-  'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_close_acked', 'drop_multipath_stream', 'close_multipath',
+  'send_multipath_application_close', 'read_multipath_application_close', 'read_multipath_stream', 'cancel_multipath_stream_half', 'peer_multipath_stream_code', 'multipath_stream_close_acked', 'drop_multipath_stream', 'close_multipath',
   'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
@@ -362,6 +367,8 @@ local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_cancel_multipath_stream_half: uint32 <cimport,nodecl>
 local iroh_mp_multipath_stream_close_acked: uint32 <cimport,nodecl>
+local iroh_mp_send_multipath_application_close: uint32 <cimport,nodecl>
+local iroh_mp_read_multipath_application_close: uint32 <cimport,nodecl>
 local iroh_mp_peer_multipath_stream_code: uint32 <cimport,nodecl>
 local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
@@ -593,6 +600,8 @@ local Connection = @record{
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, output_source:storage_t, output_iface:cint, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
+  close_bytes: *uint8, close_size: csize, close_code: uint64, locally_closed: boolean, peer_closed: boolean, close_error: uint32,
+  decoding: *uint8, decoding_size: csize,
   selected_alpn: *Alpn, peer_parameters: PeerParameters, detached: boolean, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
@@ -1520,6 +1529,7 @@ local function destroy(conn: *Connection)
   while conn.datagram_first ~= nilptr do pop_datagram(conn) end
   free_session(conn.ticket)
   free_session(conn.resume)
+  C.free(conn.close_bytes)
   C.free(conn.peer_parameters.bytes)
   C.free(conn.nat_inbox)
   if conn.nat_source ~= nilptr then release_path(conn.nat_source) end
@@ -1708,6 +1718,40 @@ local function authenticated_peer_key(conn:*Connection):*evp_t
   return SSL_get0_peer_rpk(state.ssl)
 end
 
+-- Picoquic's close event exposes the code and a C string without its wire length.
+-- Only walk the authenticated frame buffer while delivering the event. Skip other
+-- frames with Picoquic's decoder so bytes inside stream data cannot be mistaken for a close.
+local function receive_application_close(conn:*Connection, cnx:*cnx_t)
+  local input = (@*[0]uint8)(conn.decoding)
+  local at:csize = 0
+  while at < conn.decoding_size do
+    local remaining = conn.decoding_size - at
+    if input[at] == picoquic_frame_type_application_close then
+      local code:uint64, length:uint64
+      local head = picoquic_varint_decode(&input[at+1],remaining-1,&code)
+      if head == 0 then break end
+      at = at + 1 + head
+      head = picoquic_varint_decode(&input[at],conn.decoding_size-at,&length)
+      if head == 0 then break end
+      at = at + head
+      if length > conn.decoding_size-at or code ~= picoquic_get_application_error(cnx) then break end
+      if length > 0 then
+        conn.close_bytes = (@*uint8)(C.malloc(length))
+        if conn.close_bytes == nilptr then conn.close_error = ENOMEM; return end
+        C.memcpy(conn.close_bytes,&input[at],length)
+      end
+      conn.close_size = length
+      conn.close_code = code
+      conn.peer_closed = true
+      return
+    end
+    local used:csize, pure:cint
+    if picoquic_skip_frame(&input[at],remaining,&used,&pure) ~= 0 or used == 0 or used > remaining then break end
+    at = at + used
+  end
+  conn.close_error = EIO
+end
+
 local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
     user: pointer, stream_user: pointer): cint
   local conn = (@*Connection)(user)
@@ -1787,6 +1831,7 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
     end
   elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
       kind == picoquic_callback_stateless_reset then
+    if kind == picoquic_callback_application_close and not conn.closed then receive_application_close(conn,cnx) end
     conn.closed = true
   end
   return 0
@@ -1904,6 +1949,33 @@ local function nat_body_size(kind:uint64, server:boolean): isize
   return -1
 end
 
+-- Keep the engine's close scheduling and packet protection. Supply the binary
+-- reason at the point where the pinned Picoquic formatter expects a C string.
+local function format_application_close(cnx:*cnx_t, begin:*uint8, limit:*uint8, more:*cint, pure_ack:*cint):*uint8
+    <cexport,codename '__wrap_picoquic_format_application_close_frame'>
+  if (@pointer)(picoquic_get_callback_function(cnx)) ~= (@pointer)(on_event) then
+    return real_format_application_close(cnx,begin,limit,more,pure_ack)
+  end
+  local conn = (@*Connection)(picoquic_get_callback_context(cnx))
+  if conn == nilptr or not conn.locally_closed then return real_format_application_close(cnx,begin,limit,more,pure_ack) end
+  local dst = (@*[0]uint8)(begin)
+  local capacity = (@usize)(limit) - (@usize)(begin)
+  if capacity < 3 then $more = 1; return begin end
+  dst[0] = picoquic_frame_type_application_close
+  local code_width = picoquic_varint_encode(&dst[1],capacity-1,conn.close_code)
+  if code_width == 0 or capacity <= 1+code_width then $more = 1; return begin end
+  local left = capacity-1-code_width
+  local count = conn.close_size
+  if count >= left then count = left-1 end
+  if count >= 64 and count+2 > left then count = left-2 end
+  local width = picoquic_varint_encode(&dst[1+code_width],left,count)
+  if width == 0 then $more = 1; return begin end
+  local offset = 1+code_width+width
+  if count > 0 then C.memcpy(&dst[offset],conn.close_bytes,count) end
+  $pure_ack = 0
+  return &dst[offset+count]
+end
+
 local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize, node:*receive_node_t,
     epoch:cint, src:pointer, dst:pointer, pn:uint64, unallocated:cint, cid:*cid_t, now:uint64):cint
     <cexport,codename '__wrap_picoquic_decode_frames'>
@@ -1911,7 +1983,11 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
     return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
   end
   local conn = (@*Connection)(picoquic_get_callback_context(cnx))
-  if conn == nilptr or not conn.ready or conn.nat_inbox == nilptr then
+  if conn == nilptr then return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now) end
+  conn.decoding = bytes
+  conn.decoding_size = size
+  defer conn.decoding = nilptr; conn.decoding_size = 0 end
+  if not conn.ready or conn.nat_inbox == nilptr then
     return real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
   end
   local inbox = conn.nat_inbox
@@ -1971,6 +2047,7 @@ local function decode_frames(cnx:*cnx_t, path:*path_t, bytes:*uint8, size:csize,
   -- The temporary packet cannot back an out-of-order data node.
   local result: cint
   if patch ~= nilptr then
+    conn.decoding = &patch[0]
     result = real_decode_frames(cnx,path,&patch[0],size,nilptr,epoch,src,dst,pn,unallocated,cid,now)
   else
     result = real_decode_frames(cnx,path,bytes,size,node,epoch,src,dst,pn,unallocated,cid,now)
@@ -4246,10 +4323,68 @@ local function drop_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
   return io_tup(e,args[0],drop_stream(e,find_connection(e,args[0]),args[1]))
 end
 
+local function send_application_close(e:Env, conn:*Connection, high:Term, low:Term, reason:Term):Term
+  local bytes:[IO_CAPACITY]uint8
+  local size = bytes_from_list(e,reason,&bytes[0],#bytes)
+  if size < 0 or high > 0x3fffffff then return io_fail(e,EINVAL,'invalid QUIC application close') end
+  if conn == nilptr then return closed_error(e,conn) end
+  if conn.closed then
+    if conn.locally_closed and conn.output_size ~= 0 then
+      local status = flush_output(conn)
+      if status ~= 0 then return io_fail(e,status,nilptr) end
+    end
+    conn.locally_closed = true
+    return io_done(e,term_pak(iroh_mp_Unit,0))
+  end
+  if conn.detached or not conn.ready then return io_fail(e,EAGAIN,'QUIC handshake is incomplete') end
+  local owned:*uint8
+  if size > 0 then
+    owned = (@*uint8)(C.malloc((@csize)(size)))
+    if owned == nilptr then return io_fail(e,ENOMEM,nilptr) end
+    C.memcpy(owned,&bytes[0],(@csize)(size))
+  end
+  local code = (high << 32) | low
+  if picoquic_close(conn.cnx,code) ~= 0 then C.free(owned); return io_fail(e,EIO,'QUIC application close failed') end
+  conn.close_bytes = owned
+  conn.close_size = (@csize)(size)
+  conn.close_code = code
+  conn.locally_closed = true
+  conn.closed = true
+  conn.output_size = 0
+  local status = write_packet(conn,picoquic_current_time())
+  if status ~= 0 then return io_fail(e,status,nilptr) end
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function application_close_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  return io_tup(e,args[0],send_application_close(e,find_connection(e,args[0]),args[1],args[2],args[3]))
+end
+
+local function application_close_reason(e:Env, conn:*Connection):Term
+  if conn == nilptr then return closed_error(e,conn) end
+  local none_value = term_pak(iroh_mp_None,0)
+  if not conn.closed then return io_done(e,none_value) end
+  if conn.locally_closed then return io_done(e,io_box(e,iroh_mp_Some,none_value)) end
+  if conn.close_error ~= 0 then return io_fail(e,conn.close_error,'could not read QUIC application close reason') end
+  if not conn.peer_closed then return closed_error(e,conn) end
+  local code = io_tup(e,conn.close_code >> 32,(@uint32)(conn.close_code))
+  local bytes = io_list(e,(@cstring)(conn.close_bytes),conn.close_size)
+  local received = io_box(e,iroh_mp_Some,io_tup(e,code,bytes))
+  return io_done(e,io_box(e,iroh_mp_Some,received))
+end
+
+local function application_close_reason_run(e:Env, args:*[0]Term, work:*IoWork):Term
+  return io_tup(e,args[0],application_close_reason(e,find_connection(e,args[0])))
+end
+
 local function close_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn ~= nilptr then
-    if not conn.detached and not conn.closed and picoquic_close(conn.cnx,0) == 0 then write_packet(conn,picoquic_current_time()) end
+    if conn.locally_closed and conn.output_size ~= 0 then
+      flush_output(conn)
+    elseif not conn.detached and not conn.closed and picoquic_close(conn.cnx,0) == 0 then
+      write_packet(conn,picoquic_current_time())
+    end
     remove_connection(conn)
   end
   return term_pak(iroh_mp_Unit,0)
@@ -4296,6 +4431,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_multipath_stream_close_acked ~= 0xffffffff then io_eff(iroh_mp_multipath_stream_close_acked,close_acked_run) end
   if iroh_mp_peer_multipath_stream_code ~= 0xffffffff then io_eff(iroh_mp_peer_multipath_stream_code,peer_code_run) end
   if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
+  if iroh_mp_send_multipath_application_close ~= 0xffffffff then io_eff(iroh_mp_send_multipath_application_close,application_close_run) end
+  if iroh_mp_read_multipath_application_close ~= 0xffffffff then io_eff(iroh_mp_read_multipath_application_close,application_close_reason_run) end
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
   if iroh_mp_bind_multipath_alpns_nat_offer ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns_nat_offer,bind_nat_alpns_run) end
