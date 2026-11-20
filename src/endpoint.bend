@@ -806,10 +806,20 @@ def verify_and_dial(+identity: Identity, packet: List<&2,U32>, timeouts: Timeout
   resolve_and_connect(~Direct.QuicConnection,~direct_stream,identity,timeouts,key => verify_routes(key,packet))
 
 def lookup_and_connect(+identity: Identity, resolver: DnsSource, timeouts: Timeouts) -> IO(ConnectResult()):
-  resolve_and_connect(~Quic.DatagramConnection,~direct_quic,identity,timeouts,key => lookup_routes(key,resolver))
+  connect_with_lookup(DialRoutes{[],[]},identity,timeouts,[DnsLookup{resolver}])
+
+def dial_verified(result: Result<&1,&1,U32 & String,Routes>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
+  match result:
+    case Fail{error}:
+      IO.pure(ConnectResult(),Fail{error})
+    case Done{plan}:
+      start_lookup_dial(plan,identity,timeouts,[])
 
 def verify_and_connect(+identity: Identity, packet: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
-  resolve_and_connect(~Quic.DatagramConnection,~direct_quic,identity,timeouts,key => verify_routes(key,packet))
+  before_connect(Connection(),identity,u =>
+    do IO<ConnectResult()>:
+      result : Result<&1,&1,U32 & String,Routes> <- verify_routes(identity,packet)
+      dial_verified(result,identity,timeouts))
 
 def keep_path(-R: Type, outcome: Quic.DatagramConnection & R, path: Maybe<&1,Path.Bridge>) -> Connection() & R:
   (conn,value) = outcome

@@ -52,8 +52,10 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
             if response.status != 204:
                 raise RuntimeError(f"Pkarr publication failed with HTTP {response.status}")
 
-        if source in ("discovered-dns", "discovered-pkarr"):
-            check_discovered_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("discovered-"))
+        if isinstance(source, str) and source.startswith(("discovered-", "cross-", "migrate-")):
+            variant, kind = source.split("-", 1)
+            check_discovered_route(client, ticket, peer, pkarr, dns_port, family, kind,
+                                   cross_family=variant != "discovered", migrate=variant == "migrate")
             return
         if source in ("supplied-dns", "supplied-pkarr"):
             check_supplied_route(client, ticket, peer, pkarr, dns_port, family, source.removeprefix("supplied-"))
@@ -113,7 +115,8 @@ def main(client, fixture, pkarr, dns_port):
                     check(client, fixture, family, mode, source, pkarr, dns_port)
                 check(client, fixture, family, "wrong-id", source, pkarr, dns_port,
                       expected_error=b"peer endpoint key mismatch")
-            for kind in ("supplied-dns", "supplied-pkarr", "discovered-dns", "discovered-pkarr"):
+            for kind in ("supplied-dns", "supplied-pkarr", "discovered-dns", "discovered-pkarr",
+                         "cross-dns", "cross-pkarr", "migrate-pkarr"):
                 check(client, fixture, family, "direct", kind, pkarr, dns_port)
             check(client, fixture, family, "direct", "pkarr", pkarr, dns_port, invalid)
             check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,

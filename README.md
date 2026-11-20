@@ -719,8 +719,11 @@ Ticket lookup passes two complementary tests against Iroh 1.5.0 on IPv4 and
 IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.
 The other keeps that route silent and releases the working address through DNS
 or signed Pkarr after the first QUIC Initial. The DNS fixture captures both
-paths and checks their Initial destination and source connection IDs. Both
-fixtures exchange streams and application datagrams with Iroh. The ordinary
+paths and checks their Initial destination and source connection IDs. The tests
+also reuse the losing UDP port while the winning connection is still open,
+cross from IPv4 to IPv6 and back, and perform a validated local port migration
+after signed Pkarr discovery. Each connection exchanges streams and application
+datagrams with Iroh. The ordinary
 ticket dial also checks both Initial connection IDs across two supplied addresses.
 The relay ticket suite holds a WebSocket upgrade open until discovery yields a
 working direct path, and holds a direct path silent until discovery yields a
