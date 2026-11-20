@@ -82,6 +82,16 @@ client requires a libcurl build with WebSocket support.
    expects rejection and retries with `12 00 ff` and `10 00 ff`.
    It expects stream reply `13 00 ff` and datagram reply `14 00 ff`,
    then sends datagram `15` to confirm delivery.
+   Run `make check-quic-rebind UPSTREAM_QUIC_REBIND=/path/to/peer` for
+   IPv4 and IPv6 UDP source-port changes on established connections.
+   The Iroh 1.5.0 fixture accepts `dial-rebind ADDRESS` and opens the
+   same two connections and uses the same payloads as the shared dial
+   fixture. It skips the key and ALPN rejection probes. After reading
+   the datagram reply for label `29`, it prints `REBIND` to stdout
+   and waits for `READY` on stdin before continuing. The proxy switches
+   its source port before replying. After both connections close
+   successfully, the fixture prints
+   `PASS Iroh streams and datagrams survived UDP rebinding`.
 4. Run `make check-relay-live RELAY_URL=ws://127.0.0.1:3340/relay` against
    an upstream `iroh-relay` in development mode on the loopback interface.
    Both relay protocol versions are exercised. For a local TLS relay, use a
@@ -253,4 +263,4 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits throttle each connection at the relay message layer, support live updates, and send v2 notices. Full values for repeated custom headers and transport-byte accounting are pending. |
 | Public endpoint lifecycle and QUIC features | Bend and Iroh exchange RFC 9221 application datagrams alongside bidirectional and unidirectional streams on the same authenticated connection in both dialing directions over IPv4 and IPv6. The endpoint API exposes this connection for direct dialing, listening, and relay dialing. A Bend listener accepted two overlapping Iroh connections and kept both usable after it stopped accepting new connections. The direct Bend client resumed a pinned session with Iroh and sent 0-RTT streams and datagrams on both address families. A new Iroh listener rejected the prior ticket and the client retried after a pinned full handshake. An opted-in Bend listener accepted Iroh 0-RTT streams and datagrams on IPv4 and IPv6. A fresh Bend listener using the same identity rejected the prior ticket and accepted the 1-RTT retries. Multipath and stream affinity are pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
-| Connectivity | The endpoint exchanged streams and datagrams with Iroh 1.5.0 over the upstream WS and WSS relay using timed direct fallback, verified Pkarr records, and an upstream Iroh DNS resolver. Bend and Iroh QUIC engines also exchanged streams in both directions using the relay bridge. NAT traversal, adaptive path selection, and path migration are pending. |
+| Connectivity | The endpoint exchanged streams and datagrams with Iroh 1.5.0 over the upstream WS and WSS relay using timed direct fallback, verified Pkarr records, and an upstream Iroh DNS resolver. Bend and Iroh QUIC engines also exchanged streams in both directions using the relay bridge. An established direct connection accepted by Bend survives Iroh UDP source-port changes on IPv4 and IPv6. Active migration, adaptive path selection, and NAT traversal are pending. |

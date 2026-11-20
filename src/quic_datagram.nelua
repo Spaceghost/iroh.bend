@@ -77,7 +77,9 @@ local ngtcp2_cid <cimport,nodecl> = @record{datalen: csize, data: [20]cuchar}
 local ngtcp2_stateless_reset_token <cimport,nodecl> = @record{data: [16]cuchar}
 local ngtcp2_addr <cimport,nodecl> = @record{addr: pointer, addrlen: cuint}
 ## cdefine 'iroh_datagram_local_path local'
-local ngtcp2_path <cimport,nodecl> = @record{iroh_datagram_local_path: ngtcp2_addr, remote: ngtcp2_addr}
+local ngtcp2_path <cimport,nodecl> = @record{
+  iroh_datagram_local_path: ngtcp2_addr, remote: ngtcp2_addr, user_data: pointer
+}
 local ngtcp2_settings <cimport,nodecl> = @record{initial_ts: uint64}
 local ngtcp2_pkt_hd <cimport,nodecl> = @record{dcid: ngtcp2_cid, scid: ngtcp2_cid, version: uint32}
 local ngtcp2_version_cid <cimport,nodecl> = @record{version: uint32, dcid: *cuchar, dcidlen: csize}
@@ -351,6 +353,9 @@ local Connection = @record{
   remote_size: cuint,
   local_size: cuint,
   output: [PACKET_CAPACITY]cuchar,
+  output_path: ngtcp2_path,
+  output_local_addr: iroh_datagram_address,
+  output_remote_addr: iroh_datagram_address,
   output_size: csize,
   output_early: boolean,
   inbox_first: *Datagram,
@@ -586,6 +591,15 @@ local function connection_path(conn: *Connection): ngtcp2_path
     iroh_datagram_local_path = {addr = &conn.local_addr, addrlen = conn.local_size},
     remote = {addr = &conn.remote_addr, addrlen = conn.remote_size}
   }
+end
+
+local function packet_path(conn: *Connection): *ngtcp2_path
+  if conn.listener == nilptr then return nilptr end
+  conn.output_path = {
+    iroh_datagram_local_path = {addr = &conn.output_local_addr},
+    remote = {addr = &conn.output_remote_addr}
+  }
+  return &conn.output_path
 end
 
 local function numeric_address(host: cstring, port: cushort, out: *iroh_datagram_address): cuint
@@ -1040,7 +1054,8 @@ end
 
 local function send_packet(conn: *Connection, size: csize): isize
   if conn.listener == nilptr then return send(conn.fd,&conn.output[0],size,0) end
-  return sendto(conn.fd,&conn.output[0],size,0,&conn.remote_addr,conn.remote_size)
+  local remote = conn.output_path.remote
+  return sendto(conn.fd,&conn.output[0],size,0,remote.addr,remote.addrlen)
 end
 
 local function close_transport(conn: *Connection, error: cint)
@@ -1052,15 +1067,14 @@ local function close_transport(conn: *Connection, error: cint)
   elseif error < 0 then
     ngtcp2_ccerr_set_liberr(&err,error,nilptr,0)
   end
-  local size = ngtcp2_conn_write_connection_close(conn.engine,nilptr,nilptr,&conn.output[0],
+  local size = ngtcp2_conn_write_connection_close(conn.engine,packet_path(conn),nilptr,&conn.output[0],
     PACKET_CAPACITY,&err,io_tick())
   if size > 0 then send_packet(conn,(@csize)(size)) end
 end
 
-local function ingest(conn: *Connection, packet: *cuchar, size: csize, now: uint64)
-  local path = connection_path(conn)
+local function ingest(conn: *Connection, path: *ngtcp2_path, packet: *cuchar, size: csize, now: uint64)
   local info: ngtcp2_pkt_info = {}
-  local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,packet,size,now)
+  local status = ngtcp2_conn_read_pkt(conn.engine,path,&info,packet,size,now)
   if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then
     close_transport(conn,status)
     conn.read_failure = status
@@ -1096,9 +1110,9 @@ local function matches_cid(id: *ngtcp2_cid, packet: *ngtcp2_version_cid): boolea
   return id.datalen == packet.dcidlen and C.memcmp(&id.data[0],packet.dcid,packet.dcidlen) == 0
 end
 
-local function owns_cid(conn: *Connection, packet: *ngtcp2_version_cid): boolean
+local function owns_cid(conn: *Connection, packet: *ngtcp2_version_cid, original_address: boolean): boolean
   -- The original destination ID routes retransmitted Initial packets.
-  if packet.version ~= 0 and matches_cid(&conn.original_id,packet) then return true end
+  if original_address and packet.version ~= 0 and matches_cid(&conn.original_id,packet) then return true end
   local count = ngtcp2_conn_get_scid2(conn.engine,nilptr)
   if count == 0 then return false end
   local part: [16]ngtcp2_cid
@@ -1113,6 +1127,13 @@ local function owns_cid(conn: *Connection, packet: *ngtcp2_version_cid): boolean
     if matches_cid(&ids[i],packet) then return true end
   end
   return false
+end
+
+local function ingest_from(conn: *Connection, address: *iroh_datagram_address,
+    address_size: cuint, bytes: *cuchar, size: csize, now: uint64)
+  local path = connection_path(conn)
+  path.remote = {addr = address, addrlen = address_size}
+  ingest(conn,&path,bytes,size,now)
 end
 
 local function dispatch(listener: *Listener, now: uint64): cint
@@ -1130,14 +1151,19 @@ local function dispatch(listener: *Listener, now: uint64): cint
   if ngtcp2_pkt_decode_version_cid(&packet,&bytes[0],size,CID_SIZE) ~= 0 or packet.dcidlen == 0 then return 0 end
   local conn = connections
   while conn ~= nilptr do
-    if conn.listener == listener and same_address(&conn.remote_addr,&address) and owns_cid(conn,&packet) then
-      if not conn.failed then ingest(conn,&bytes[0],size,now) end
-      return 0
+    if conn.listener == listener then
+      local original_address = same_address(&conn.remote_addr,&address)
+      -- ngtcp2 authenticates short-header packets and validates the new path.
+      local can_rebind = packet.version == 0 and authenticated(conn)
+      if (original_address or can_rebind) and owns_cid(conn,&packet,original_address) then
+        if not conn.failed then ingest_from(conn,&address,address_size,&bytes[0],size,now) end
+        return 0
+      end
     end
     conn = (@*Connection)(conn.next)
   end
   conn = server_connection(listener,&address,address_size,&bytes[0],size,now)
-  if conn ~= nilptr then ingest(conn,&bytes[0],size,now) end
+  if conn ~= nilptr then ingest_from(conn,&address,address_size,&bytes[0],size,now) end
   return 0
 end
 
@@ -1177,7 +1203,7 @@ local function advance(conn: *Connection, now: uint64): cint
     local status = ngtcp2_conn_handle_expiry(conn.engine,now)
     if status < 0 then return status end
   end
-  local size = ngtcp2_conn_write_pkt(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,now)
+  local size = ngtcp2_conn_write_pkt(conn.engine,packet_path(conn),nilptr,&conn.output[0],PACKET_CAPACITY,now)
   if size < 0 then return (@cint)(size) end
   conn.output_size = (@csize)(size)
   return send_pending(conn,now)
@@ -1193,7 +1219,8 @@ local function step(e: Env, conn: *Connection): Term
     local incoming: [65536]cuchar
     local size = recv(conn.fd,&incoming[0],#incoming,0)
     if size > 0 then
-      ingest(conn,&incoming[0],(@csize)(size),now)
+      local path = connection_path(conn)
+      ingest(conn,&path,&incoming[0],(@csize)(size),now)
     elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR then
       return socket_error(e,conn,errno)
     end
@@ -1242,7 +1269,7 @@ local function write(e: Env, conn: *Connection, payload: Term, early: boolean): 
   if conn.output_size ~= 0 then return io_done(e,0) end
   local vec: ngtcp2_vec = {base = &bytes[0], len = (@csize)(size)}
   local accepted: cint = 0
-  local written = ngtcp2_conn_writev_datagram(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,
+  local written = ngtcp2_conn_writev_datagram(conn.engine,packet_path(conn),nilptr,&conn.output[0],PACKET_CAPACITY,
     &accepted,0,conn.datagram_id,&vec,1,now)
   if written == NGTCP2_ERR_INVALID_ARGUMENT then return io_fail(e,EMSGSIZE,'QUIC datagram exceeds negotiated size') end
   if written < 0 then return engine_error(e,conn,(@cint)(written)) end
@@ -1414,7 +1441,7 @@ local function flush_stream(e: Env, conn: *Connection, handle: Term): Term
   local vec: ngtcp2_vec = {base = &stream.tx[stream.tx_sent], len = stream.tx_size - stream.tx_sent}
   local flags = stream.tx_fin and NGTCP2_WRITE_STREAM_FLAG_FIN or 0
   local consumed: isize = -1
-  local written = ngtcp2_conn_writev_stream(conn.engine,nilptr,nilptr,&conn.output[0],PACKET_CAPACITY,
+  local written = ngtcp2_conn_writev_stream(conn.engine,packet_path(conn),nilptr,&conn.output[0],PACKET_CAPACITY,
     &consumed,flags,stream.id,&vec,1,now)
   if written == NGTCP2_ERR_STREAM_DATA_BLOCKED then return io_done(e,0) end
   if written == NGTCP2_ERR_STREAM_SHUT_WR or written == NGTCP2_ERR_STREAM_NOT_FOUND then

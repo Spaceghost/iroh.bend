@@ -233,7 +233,7 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libwebsockets) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
-.PHONY: check-quic-datagram
+.PHONY: check-quic-datagram check-quic-rebind
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -241,6 +241,7 @@ UPSTREAM_QUIC_SHARED ?=
 UPSTREAM_QUIC_SHARED_DIAL ?=
 UPSTREAM_QUIC_EARLY ?=
 UPSTREAM_QUIC_EARLY_DIAL ?=
+UPSTREAM_QUIC_REBIND ?=
 DATAGRAM_LIBS = libngtcp2_crypto_ossl libngtcp2 openssl
 QUIC_EARLY_LISTENER = $(if $(strip $(UPSTREAM_QUIC_EARLY_DIAL)),$(BUILD)/iroh-bend-quic-early-listener)
 
@@ -248,6 +249,10 @@ check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram $(QUIC_EARLY_LISTENER)
 	sh tests/quic_datagram.sh "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_DATAGRAM_V4)" \
 		"$(UPSTREAM_DATAGRAM_V6)" "$(UPSTREAM_DATAGRAM_ECHO)" "$(UPSTREAM_QUIC_SHARED)" \
 		"$(UPSTREAM_QUIC_SHARED_DIAL)" "$(UPSTREAM_QUIC_EARLY)" "$(UPSTREAM_QUIC_EARLY_DIAL)" "$(QUIC_EARLY_LISTENER)"
+
+check-quic-rebind: $(BUILD)/iroh-bend-quic-datagram
+	@test -x "$(UPSTREAM_QUIC_REBIND)" || { echo 'Set UPSTREAM_QUIC_REBIND to the executable Iroh dial-rebind fixture.' >&2; exit 2; }
+	python3 tests/quic_rebind.py "$(BUILD)/iroh-bend-quic-datagram" "$(UPSTREAM_QUIC_REBIND)"
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-datagram-stage/src" "$(BUILD)/quic-datagram-stage/tests"
