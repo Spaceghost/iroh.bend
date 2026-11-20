@@ -268,11 +268,31 @@ def dial_ticket(ticket: String, relayed: Bool) -> IO(Unit):
       Fixture.alpn(),Endpoint.HandshakeTimeouts{900,6000})
     check_endpoint(outcome,relayed)
 
-def lookup_ticket(ticket: String, sources: List<&2,Endpoint.AddressLookup>) -> IO(Unit):
+def barrier_ack(pair: Socket & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>>) -> IO(Unit):
+  match pair:
+    case (socket,Done{Some{[49]}}):
+      Socket.close(socket)
+    case (socket,_):
+      do IO<Unit>:
+        Socket.close(socket)
+        IO.die(Unit,1,"lookup barrier closed early")
+
+def release_lookup(gate: Maybe<&2,U32>, outcome: Endpoint.ConnectResult()) -> IO(Unit):
+  match gate:
+    case None{}:
+      check_endpoint(outcome,False{})
+    case Some{port}:
+      do IO<Unit>:
+        socket : Socket <- IO.try(Socket,TCP.connect("127.0.0.1",port))
+        pair : Socket & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32>>> <- TCP.recv_bytes(socket,1)
+        barrier_ack(pair)
+        check_endpoint(outcome,False{})
+
+def lookup_ticket(ticket: String, sources: List<&2,Endpoint.AddressLookup>, gate: Maybe<&2,U32>) -> IO(Unit):
   do IO<Unit>:
     outcome : Endpoint.ConnectResult() <- Endpoint.connect_ticket_with_lookup(ticket,List.replicate(U32,32n,73),
       Fixture.alpn(),Endpoint.HandshakeTimeouts{700,6000},sources)
-    check_endpoint(outcome,False{})
+    release_lookup(gate,outcome)
 
 def prepend_lookup(source: Maybe<&2,Endpoint.AddressLookup>, tail: Maybe<&2,List<&2,Endpoint.AddressLookup>>)
     -> Maybe<&2,List<&2,Endpoint.AddressLookup>>:
@@ -300,10 +320,10 @@ def lookup_sources(args: List<&1,String>) -> Maybe<&2,List<&2,Endpoint.AddressLo
     case _:
       None{}
 
-def lookup_args(ticket: String, sources: Maybe<&2,List<&2,Endpoint.AddressLookup>>) -> IO(Unit):
+def lookup_args(ticket: String, sources: Maybe<&2,List<&2,Endpoint.AddressLookup>>, gate: Maybe<&2,U32>) -> IO(Unit):
   match sources:
     case Some{configured}:
-      lookup_ticket(ticket,configured)
+      lookup_ticket(ticket,configured,gate)
     case None{}:
       IO.die(Unit,2,"expected DNS ports or Pkarr relay URLs")
 
@@ -664,7 +684,9 @@ def run(args: List<String>) -> IO(Unit):
         id : Endpoint.Identity <- CheckOptions.identity(choice)
         check_options(mode,id,U32.read(port))
     case Con{_,Con{"lookup-ticket",Con{ticket,sources}}}:
-      lookup_args(ticket,lookup_sources(sources))
+      lookup_args(ticket,lookup_sources(sources),None{})
+    case Con{_,Con{"lookup-ticket-barrier",Con{port,Con{ticket,sources}}}}:
+      lookup_args(ticket,lookup_sources(sources),U32.read(port))
     case [_, "dial-ticket", ticket, "direct"]:
       dial_ticket(ticket,False{})
     case [_, "dial-ticket", ticket, "relay"]:

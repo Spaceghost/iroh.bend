@@ -1,0 +1,91 @@
+-- Return ownership of a nonblocking TCP connect, including while it is pending.
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<arpa/inet.h>'
+## cinclude '<errno.h>'
+## cinclude '<poll.h>'
+## cinclude '<sys/socket.h>'
+## cinclude '<unistd.h>'
+require 'C.stdlib'
+##[[
+for _, name in ipairs{'lookup_tcp_start','lookup_tcp_ready','True','False'} do
+  cinclude(string.format('#ifdef CID(%s)\n#define iroh_lu_%s CID(%s)\n#else\n#define iroh_lu_%s UINT32_MAX\n#endif',name,name,name,name))
+end
+]]
+local iroh_lu_lookup_tcp_start: uint32 <cimport,nodecl>
+local iroh_lu_lookup_tcp_ready: uint32 <cimport,nodecl>
+local iroh_lu_True: uint32 <cimport,nodecl>
+local iroh_lu_False: uint32 <cimport,nodecl>
+local Env <cimport,nodecl> = @record{}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_hand(fd: uint64): Term <cimport,nodecl> end
+local function io_hand_v(handle: Term): uint64 <cimport,nodecl> end
+local function io_tup(e: Env, left: Term, right: Term): Term <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, message: cstring): Term <cimport,nodecl> end
+local function io_cstr(e: Env, t: Term, n: *uint64): cstring <cimport,nodecl> end
+local function io_nul(s: cstring, n: uint64): boolean <cimport,nodecl> end
+local function term_pak(tag: uint64, n: uint64): Term <cimport,nodecl> end
+## cdefine 'iroh_lookup_addr struct sockaddr_in'
+## cdefine 'iroh_lookup_poll struct pollfd'
+## cdefine 'iroh_lookup_addr_size sizeof(struct sockaddr_in)'
+local iroh_lookup_addr_size: cuint <cimport,nodecl>
+local Address <cimport,nodecl,codename 'iroh_lookup_addr'> = @record{}
+local PollFd <cimport,nodecl,codename 'iroh_lookup_poll'> = @record{fd: cint, events: cshort, revents: cshort}
+local function io_sys_addr(text: cstring, port: uint32, addr: *Address): cint <cimport,nodecl> end
+local function socket(domain: cint, kind: cint, proto: cint): cint <cimport,nodecl> end
+local function connect(fd: cint, addr: pointer, size: cuint): cint <cimport,nodecl> end
+local function close(fd: cint): cint <cimport,nodecl> end
+local function poll(fds: *PollFd, count: culong, ms: cint): cint <cimport,nodecl> end
+local function getsockopt(fd: cint, level: cint, key: cint, value: pointer, size: *cuint): cint <cimport,nodecl> end
+local AF_INET: cint <cimport,nodecl>
+local SOCK_STREAM: cint <cimport,nodecl>
+local SOCK_NONBLOCK: cint <cimport,nodecl>
+local SOCK_CLOEXEC: cint <cimport,nodecl>
+local SOL_SOCKET: cint <cimport,nodecl>
+local SO_ERROR: cint <cimport,nodecl>
+local POLLOUT: cshort <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local EINPROGRESS: cint <cimport,nodecl>
+local EINTR: cint <cimport,nodecl>
+local errno: cint <cimport,nodecl>
+
+local function start(e: Env, f: *[0]Term, w: *IoWork): Term
+  local len: uint64
+  local text = io_cstr(e,f[0],&len)
+  defer C.free(text) end
+  local addr: Address
+  if io_nul(text,len) or io_sys_addr(text,(@uint32)(f[1]),&addr) ~= 0 then
+    return io_fail(e,EINVAL,'invalid DNS TCP resolver address')
+  end
+  local fd = socket(AF_INET,SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  if fd < 0 then return io_fail(e,(@uint32)(errno),nilptr) end
+  if connect(fd,&addr,iroh_lookup_addr_size) < 0 and errno ~= EINPROGRESS and errno ~= EINTR then
+    local code = (@uint32)(errno)
+    close(fd)
+    return io_fail(e,code,nilptr)
+  end
+  return io_done(e,io_hand((@uint64)(fd)))
+end
+
+local function ready(e: Env, f: *[0]Term, w: *IoWork): Term
+  local item: PollFd
+  item.fd, item.events = (@cint)(io_hand_v(f[0])), POLLOUT
+  local n = poll(&item,1,0)
+  local code: cint = 0
+  if n < 0 and errno ~= EINTR then code = errno end
+  if n > 0 then
+    local size: cuint = #cint
+    if getsockopt(item.fd,SOL_SOCKET,SO_ERROR,&code,&size) ~= 0 then code = errno end
+  end
+  if code ~= 0 then return io_tup(e,f[0],io_fail(e,(@uint32)(code),nilptr)) end
+  return io_tup(e,f[0],io_done(e,term_pak(n > 0 and iroh_lu_True or iroh_lu_False,0)))
+end
+
+local function register() <cexport,codename 'iroh_register_lookup_socket',cattribute 'constructor'>
+  if iroh_lu_lookup_tcp_start ~= 0xffffffff then io_eff(iroh_lu_lookup_tcp_start,start) end
+  if iroh_lu_lookup_tcp_ready ~= 0xffffffff then io_eff(iroh_lu_lookup_tcp_ready,ready) end
+end

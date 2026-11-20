@@ -174,8 +174,8 @@ UPSTREAM_RELAY_QUIC ?=
 UPSTREAM_QUIC_ROUTE_MIGRATION ?=
 UPSTREAM_IROH_RELAY_URL ?=
 DISCOVERY_DNS_PORT ?=
-RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/endpoint_ticket.bend src/endpoint_id.bend src/ip.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
-RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_http pkarr_publisher
+RELAY_QUIC_SOURCES = $(RELAY_SOURCES) src/direct.bend src/quic_datagram.bend src/relay_quic.bend src/relay_quic_inbound.bend src/endpoint.bend src/lookup_socket.bend src/endpoint_ticket.bend src/endpoint_id.bend src/ip.bend src/discovery.bend src/pkarr.bend src/pkarr_http.bend src/pkarr_publisher.bend src/bencode.bend
+RELAY_QUIC_EFFECTS = ed25519 relay_socket direct quic_datagram relay_quic pkarr_http pkarr_publisher lookup_socket
 
 check-relay-quic: $(BUILD)/iroh-bend-relay-quic
 	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)" \

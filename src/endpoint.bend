@@ -4,6 +4,7 @@ import ./ip.bend as Ip
 import ./ed25519.bend as Ed
 import ./direct.bend as Direct
 import ./discovery.bend as Dns
+import ./lookup_socket.bend as LookupSocket
 import ./pkarr.bend as Pkarr
 import ./pkarr_http.bend as PkarrHttp
 import ./relay_quic.bend as Path
@@ -437,20 +438,43 @@ def resolve_source(source: AddressLookup, identity: Identity) -> IO(Result<&1,&1
 def LookupReply() -> Type:
   Result<&1,&1,U32 & String,Routes>
 
-def publish_lookup(source: AddressLookup, identity: Identity, results: Chan(LookupReply())) -> IO(Unit):
+def resolve_until(source: AddressLookup, +key: List<&2,U32>, +stop: Chan(Unit)) -> IO(LookupReply()):
+  match source:
+    case DnsLookup{DnsResolver{origin,host,port,ms}}:
+      do IO<LookupReply()>:
+        id : Result<&1,&1,U32 & String,U32> <- IO.random_u32()
+        reply : Result<&1,&1,U32 & String,Dns.Reply> <- Dns.lookup_using(id,key,origin,host,port,ms,
+          Dns.StopOnClose{stop},name => p => timeout => LookupSocket.connect(stop,name,p,timeout))
+        return dns_routes(reply)
+    case PkarrLookup{url,ms}:
+      do IO<LookupReply()>:
+        proof : PkarrHttp.Proof() <- PkarrHttp.resolve_until(url,key,ms,stop)
+        return pkarr_reply(proof)
+
+def publish_lookup(source: AddressLookup, key: List<&2,U32>, results: Chan(LookupReply()), stop: Chan(Unit)) -> IO(Unit):
   do IO<Unit>:
-    reply : LookupReply() <- resolve_source(source,identity)
+    reply : LookupReply() <- resolve_until(source,key,stop)
     _ : Result<&1,&1,LookupReply(),Unit> <- Chan.send(LookupReply(),results,reply)
     return Unit{}
 
-def start_lookups(sources: List<&2,AddressLookup>, +identity: Identity, +results: Chan(LookupReply())) -> IO(Unit):
+def start_lookups(sources: List<&2,AddressLookup>, +key: List<&2,U32>, +results: Chan(LookupReply()),
+    +stop: Chan(Unit)) -> IO(Unit):
   match sources:
     case Nil{}:
       IO.pure(Unit,Unit{})
     case Con{source,rest}:
       do IO<Unit>:
-        IO.spawn(Unit,publish_lookup(source,identity,results))
-        start_lookups(rest,identity,results)
+        IO.spawn(Unit,publish_lookup(source,key,results,stop))
+        start_lookups(rest,key,results,stop)
+
+def drain_lookups(remaining: Nat, +results: Chan(LookupReply())) -> IO(Unit):
+  match remaining:
+    case 0n:
+      Chan.close(LookupReply(),results)
+    case 1n+k:
+      do IO<Unit>:
+        _ : Maybe<&1,LookupReply()> <- Chan.recv(LookupReply(),results)
+        drain_lookups(k,results)
 
 def accept_lookup(event: Maybe<&1,LookupReply()>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
   match event:
@@ -459,28 +483,31 @@ def accept_lookup(event: Maybe<&1,LookupReply()>, identity: Identity, timeouts: 
     case None{}:
       IO.pure(ConnectResult(),Fail{(1,"address lookup ended early")})
 
-def collect_lookups(remaining: Nat, outcome: ConnectResult(), +results: Chan(LookupReply()),
-    +identity: Identity, +timeouts: Timeouts) -> IO(ConnectResult()):
+def collect_lookups(+remaining: Nat, outcome: ConnectResult(), +results: Chan(LookupReply()),
+    +identity: Identity, +timeouts: Timeouts, +stop: Chan(Unit)) -> IO(ConnectResult()):
   match remaining outcome:
     case 1n+k Fail{_}:
       do IO<ConnectResult()>:
         event : Maybe<&1,LookupReply()> <- Chan.recv(LookupReply(),results)
         next : ConnectResult() <- accept_lookup(event,identity,timeouts)
-        collect_lookups(k,next,results,identity,timeouts)
+        collect_lookups(k,next,results,identity,timeouts,stop)
     case _ _:
       do IO<ConnectResult()>:
-        Chan.close(LookupReply(),results)
+        Chan.close(Unit,stop)
+        drain_lookups(remaining,results)
         return outcome
 
 def try_lookups(+sources: List<&2,AddressLookup>, outcome: ConnectResult(), +identity: Identity,
     timeouts: Timeouts) -> IO(ConnectResult()):
   match sources outcome:
     case Con{_,_} Fail{_}:
+      PeerKeys{_,key,_} = identity
       +count = List.length(&2,AddressLookup,sources)
       do IO<ConnectResult()>:
         +results : Chan(LookupReply()) <- Chan.new(LookupReply(),U32.from_nat(count))
-        start_lookups(sources,identity,results)
-        collect_lookups(count,outcome,results,identity,timeouts)
+        +stop : Chan(Unit) <- Chan.new(Unit,0)
+        start_lookups(sources,key,results,stop)
+        collect_lookups(count,outcome,results,identity,timeouts,stop)
     case _ _:
       IO.pure(ConnectResult(),outcome)
 

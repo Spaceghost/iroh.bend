@@ -2,12 +2,12 @@
 
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from threading import Event, Thread
 from urllib.request import Request, urlopen
 
-from endpoint_lookup_race import check_race
+from endpoint_lookup_race import check_race, dns_proxy
 from endpoint_ticket_dial import read_ticket
 from quic_rebind import process
 
@@ -20,6 +20,7 @@ class InvalidSignature(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(packet)))
         self.end_headers()
         self.wfile.write(packet)
+        self.server.sent.set()
 
     def log_message(self, *_):
         pass
@@ -29,6 +30,7 @@ class InvalidSignature(BaseHTTPRequestHandler):
 def invalid_relay():
     with HTTPServer(("127.0.0.1", 0), InvalidSignature) as server:
         server.requests = []
+        server.sent = Event()
         thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()
         try:
@@ -39,7 +41,7 @@ def invalid_relay():
 
 
 def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, expected_error=None):
-    with process(fixture, family, mode) as peer:
+    with process(fixture, family, mode) as peer, ExitStack() as stack:
         ticket, label, payload = read_ticket(peer).split()
         packet = bytes.fromhex(payload)
         request = Request(f"{pkarr.rstrip('/')}/{label}", data=packet, method="PUT",
@@ -56,8 +58,11 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
         base = pkarr
         if invalid:
             invalid.requests.clear()
+            invalid.sent.clear()
             invalid.packet = bytes([packet[0] ^ 1]) + packet[1:]
             base = f"http://127.0.0.1:{invalid.server_port}/pkarr"
+        if invalid and source == "pkarr-dns":
+            _, dns_port = dns_proxy(stack, dns_port, lambda *_: invalid.sent.wait(4))
         args = {"dns": ("dns", dns_port), "pkarr": ("pkarr", base), "pkarr-dns": ("pkarr", base, "dns", dns_port)}
         result = subprocess.run((client, "lookup-ticket", ticket, *args[source]),
                                 capture_output=True, timeout=15)
@@ -94,7 +99,8 @@ def main(client, fixture, pkarr, dns_port):
             check(client, fixture, family, "id-only", "pkarr", pkarr, dns_port, invalid,
                   expected_error=b"invalid signed Pkarr endpoint packet")
             check(client, fixture, family, "id-only", "pkarr-dns", pkarr, dns_port, invalid)
-            for slow, fast in (("dns", "pkarr"), ("pkarr", "dns"), ("dns", "dns"), ("pkarr", "pkarr")):
+            for slow, fast in (("dns", "pkarr"), ("pkarr", "dns"), ("dns", "dns"), ("pkarr", "pkarr"),
+                               ("dns-tcp", "pkarr"), ("pkarr", "dns-tcp")):
                 check(client, fixture, family, "id-only", (slow, fast), pkarr, dns_port)
 
 

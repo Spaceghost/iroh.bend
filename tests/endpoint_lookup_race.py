@@ -1,12 +1,14 @@
-"""Hold one address provider open until an independent Iroh peer confirms the exchange."""
+"""Hold a resolver open through an authenticated exchange and observe its cancellation."""
 
 import socket
 import subprocess
 from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import BaseRequestHandler, UDPServer
+from socketserver import BaseRequestHandler, TCPServer, UDPServer
 from threading import Event, Thread
 from urllib.request import urlopen
+
+from discovery_tcp import reply
 
 
 @contextmanager
@@ -24,7 +26,7 @@ def serve(server):
 def relay_proxy(stack, pkarr, gate):
     class Proxy(BaseHTTPRequestHandler):
         def do_GET(self):
-            if gate():
+            if gate(self.connection, self.client_address):
                 with urlopen(pkarr + self.path, timeout=4) as response:
                     packet = response.read()
                 self.send_response(200)
@@ -39,51 +41,98 @@ def relay_proxy(stack, pkarr, gate):
     return "pkarr", f"http://127.0.0.1:{port}"
 
 
-def dns_proxy(stack, dns_port, gate):
-    class Proxy(BaseRequestHandler):
-        def handle(self):
-            packet, server = self.request
-            if gate():
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(4)
-                    sock.sendto(packet, ("127.0.0.1", int(dns_port)))
-                    reply, _ = sock.recvfrom(65535)
-                server.sendto(reply, self.client_address)
+def resolver_reply(query, dns_port):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(4)
+        sock.sendto(query, ("127.0.0.1", int(dns_port)))
+        packet, _ = sock.recvfrom(65535)
+        return packet
 
-    return "dns", stack.enter_context(serve(UDPServer(("127.0.0.1", 0), Proxy)))
+
+def dns_proxy(stack, dns_port, gate, tcp=False):
+    class TcpProxy(BaseRequestHandler):
+        def handle(self):
+            with self.request.makefile("rb") as stream:
+                prefix = stream.read(2)
+                query = stream.read(int.from_bytes(prefix, "big"))
+                if len(prefix) == 2 and gate(self.request, self.client_address):
+                    packet = resolver_reply(query, dns_port)
+                    self.request.sendall(len(packet).to_bytes(2, "big") + packet)
+
+    class UdpProxy(BaseRequestHandler):
+        def handle(self):
+            query, server = self.request
+            if tcp:
+                server.sendto(reply(query, 0x8380), self.client_address)
+            elif gate(None, self.client_address):
+                server.sendto(resolver_reply(query, dns_port), self.client_address)
+
+    port = int(stack.enter_context(serve(TCPServer(("127.0.0.1", 0), TcpProxy)))) if tcp else 0
+    return "dns", stack.enter_context(serve(UDPServer(("127.0.0.1", port), UdpProxy)))
 
 
 def check_race(client, ticket, peer, pkarr, dns_port, slow_kind, fast_kind):
-    started, released = Event(), Event()
+    started, released, closed = Event(), Event(), Event()
 
-    def slow():
+    query_source = []
+
+    def slow(connection, address):
+        query_source.append(address)
         started.set()
-        return released.wait(12)
+        if connection is None:
+            released.wait(12)
+        else:
+            connection.settimeout(0.1)
+            while not released.is_set():
+                try:
+                    if not connection.recv(1):
+                        closed.set()
+                        break
+                except TimeoutError:
+                    continue
+                except ConnectionResetError:
+                    closed.set()
+                    break
+        return False
 
-    def fast():
+    def fast(*_):
         return started.wait(5)
 
     with ExitStack() as stack:
         def provider(kind, gate):
             if kind == "pkarr":
                 return relay_proxy(stack, pkarr.rstrip("/"), gate)
-            return dns_proxy(stack, dns_port, gate)
+            return dns_proxy(stack, dns_port, gate, tcp=kind == "dns-tcp")
 
         first = provider(slow_kind, slow)
         second = provider(fast_kind, fast)
-        with subprocess.Popen((client, "lookup-ticket", ticket, *first, *second),
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as bend:
+        gate = stack.enter_context(socket.socket())
+        gate.bind(("127.0.0.1", 0))
+        gate.listen()
+        gate.settimeout(8)
+        command = (client, "lookup-ticket-barrier", str(gate.getsockname()[1]), ticket, *first, *second)
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as bend:
             try:
-                transcript, _ = peer.communicate(timeout=9)
-                if peer.returncode or not started.is_set():
+                # Each service has a 20-second deadline. Bend connects to this
+                # barrier immediately after its public dial returns and holds the
+                # QUIC session open while we examine the losing provider.
+                with gate.accept()[0] as barrier:
+                    if not started.is_set():
+                        raise AssertionError(f"The {slow_kind} request never arrived")
+                    if slow_kind == "dns":
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reopened:
+                            reopened.bind(query_source[0])
+                    elif not closed.wait(1):
+                        raise AssertionError(f"The outstanding {slow_kind} connection stayed open")
+                    barrier.sendall(b"1")
+                _, errors = bend.communicate(timeout=7)
+                if bend.returncode:
+                    raise RuntimeError(f"Bend lookup failed: {errors!r}")
+                transcript, _ = peer.communicate(timeout=4)
+                if peer.returncode:
                     raise AssertionError(f"Missing authenticated exchange: {transcript!r}")
             finally:
                 released.set()
-                try:
-                    _, errors = bend.communicate(timeout=4)
-                except subprocess.TimeoutExpired:
+                if bend.poll() is None:
                     bend.kill()
                     bend.communicate()
-                    raise
-            if bend.returncode:
-                raise RuntimeError(f"Bend lookup failed: {errors!r}")
