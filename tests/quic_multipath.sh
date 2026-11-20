@@ -25,7 +25,7 @@ trap 'exit 1' HUP INT TERM
 
 start() {
     : > "$work/listener"
-    timeout 15s "$peer" "$1" >"$work/listener" 2>"$work/errors" &
+    IROH_MULTIPATH_MULTIPLE_ALPNS="${2:-0}" timeout 15s "$peer" "$1" >"$work/listener" 2>"$work/errors" &
     pid=$!
     tries=0
     while ! IFS= read -r address <"$work/listener"; do
@@ -62,5 +62,19 @@ check_family() {
     tail -n +2 "$work/listener"
 }
 
+check_multiple() {
+    start "$1" 1
+    if ! timeout 10s "$client" "$2" "${address##*:}" multiple || ! wait "$pid"; then
+        cat "$work/errors" >&2
+        exit 1
+    fi
+    pid=
+    tail -n +2 "$work/listener"
+}
+
 check_family listen 127.0.0.1
 check_family listen6 ::1
+if [ "${CHECK_MULTIPLE_ALPNS:-0}" = 1 ]; then
+    check_multiple listen 127.0.0.1
+    check_multiple listen6 ::1
+fi

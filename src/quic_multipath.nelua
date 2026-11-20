@@ -12,7 +12,7 @@
 ## cinclude '<stdlib.h>'
 require 'C.stdlib'
 require 'C.string'
-local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer}
+local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer, cnx_in_progress:pointer}
 local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64,send_mtu:csize}
 local transport_t <cimport,nodecl,codename 'picoquic_tp_t'> = @record{max_datagram_frame_size:uint32}
 local frame_t <cimport,nodecl,codename 'picoquic_misc_frame_header_t'> = @record{next_misc_frame:pointer}
@@ -68,6 +68,7 @@ local stateless_t <cimport,nodecl,codename 'picoquic_stateless_packet_t'> = @rec
 
 local function ptls_get_context(tls:*tls_t):*context_t <cimport,nodecl> end
 local function ptls_is_server(tls:*tls_t):cint <cimport,nodecl> end
+local function ptls_get_data_ptr(tls:*tls_t):*pointer <cimport,nodecl> end
 local function ptls_set_negotiated_protocol(tls:*tls_t, value:cstring, size:csize):cint <cimport,nodecl> end
 local function real_tls(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer, len:csize,
     props:*props_t):cint <cimport,codename '__real_ptls_handle_message'> end
@@ -142,6 +143,10 @@ local function recvfrom(fd: cint, data: pointer, size: csize, flags: cint, addr:
 local function ntohs(port: uint16): uint16 <cimport,nodecl> end
 local function picoquic_set_callback(cnx: *cnx_t, callback: pointer, ctx: pointer) <cimport,nodecl> end
 local function picoquic_get_callback_context(cnx: *cnx_t): pointer <cimport,nodecl> end
+local function picoquic_get_default_callback_context(quic: *quic_t): pointer <cimport,nodecl> end
+local function picoquic_get_quic_ctx(cnx: *cnx_t): *quic_t <cimport,nodecl> end
+local QuicCallback = @function(*cnx_t,uint64,*uint8,csize,cint,pointer,pointer): cint
+local function picoquic_get_callback_function(cnx: *cnx_t): QuicCallback <cimport,nodecl> end
 local function picoquic_get_first_cnx(quic: *quic_t): *cnx_t <cimport,nodecl> end
 local function picoquic_get_next_cnx(cnx: *cnx_t): *cnx_t <cimport,nodecl> end
 local function picoquic_delete_cnx(cnx: *cnx_t) <cimport,nodecl> end
@@ -191,11 +196,12 @@ local ALPN_EXTENSION: uint16 <comptime> = 16
 
 ##[[
 local names = {
-  'start_multipath', 'start_multipath_bytes', 'step_multipath', 'probe_multipath', 'multipath_status',
+  'start_multipath', 'start_multipath_bytes', 'start_multipath_alpns', 'negotiated_multipath_alpn',
+  'step_multipath', 'probe_multipath', 'multipath_status',
   'set_multipath_standby', 'retire_multipath_path', 'multipath_millis', 'probe_multipath_alternate',
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'bind_multipath', 'bind_multipath_bytes', 'accept_multipath', 'close_multipath_listener',
+  'bind_multipath', 'bind_multipath_bytes', 'bind_multipath_alpns', 'accept_multipath', 'close_multipath_listener',
   'accept_multipath_stream', 'next_multipath_path',
   'multipath_datagram_limit', 'write_multipath_datagram', 'read_multipath_datagram',
   'MultipathConnection', 'MultipathListener', 'MultipathReadPending', 'MultipathReadFin', 'MultipathReadBytes',
@@ -209,6 +215,8 @@ end
 ]]
 local iroh_mp_start_multipath: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_bytes: uint32 <cimport,nodecl>
+local iroh_mp_start_multipath_alpns: uint32 <cimport,nodecl>
+local iroh_mp_negotiated_multipath_alpn: uint32 <cimport,nodecl>
 local iroh_mp_step_multipath: uint32 <cimport,nodecl>
 local iroh_mp_probe_multipath: uint32 <cimport,nodecl>
 local iroh_mp_multipath_status: uint32 <cimport,nodecl>
@@ -224,6 +232,7 @@ local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath: uint32 <cimport,nodecl>
 local iroh_mp_bind_multipath_bytes: uint32 <cimport,nodecl>
+local iroh_mp_bind_multipath_alpns: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath: uint32 <cimport,nodecl>
 local iroh_mp_close_multipath_listener: uint32 <cimport,nodecl>
 local iroh_mp_accept_multipath_stream: uint32 <cimport,nodecl>
@@ -288,13 +297,14 @@ local Stream = @record{
   incoming: boolean, accepted: boolean, fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean
 }
 local Datagram = @record{next:pointer,size:csize}
+local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
-  ready: boolean, closed: boolean, buffer_error: boolean
+  selected_alpn: *Alpn, ready: boolean, closed: boolean, buffer_error: boolean
 }
 local connections: *Connection
 local next_connection: uint32 = 1
@@ -329,10 +339,59 @@ local function read_alpn(e: Env, term: Term, binary: boolean, out: *uint8): isiz
   return (@isize)(size)
 end
 
+local function free_alpns(first: *Alpn)
+  while first ~= nilptr do
+    local next = (@*Alpn)(first.next)
+    C.free(first)
+    first = next
+  end
+end
+
+local function make_alpn(e: Env, term: Term, binary: boolean): *Alpn
+  local name: [255]uint8
+  local len = read_alpn(e,term,binary,&name[0])
+  if len <= 0 then return nilptr end
+  local alpn = (@*Alpn)(C.calloc(1,#Alpn))
+  if alpn == nilptr then return nilptr end
+  alpn.size = (@csize)(len)
+  -- RFC 7301 wraps one selected name in a two-byte list length and a one-byte name length.
+  alpn.wire[0] = (@uint8)((len + 1) >> 8)
+  alpn.wire[1] = (@uint8)(len + 1)
+  alpn.wire[2] = (@uint8)(len)
+  C.memcpy(&alpn.wire[3],&name[0],alpn.size)
+  alpn.has_nul = C.memchr(&name[0],0,alpn.size) ~= nilptr
+  return alpn
+end
+
+local function read_alpns(e: Env, term: Term, mode: uint32): *Alpn
+  if mode ~= 2 then return make_alpn(e,term,mode == 1) end
+  local first: *Alpn
+  local tail: *Alpn
+  local total: csize = 0
+  while term_tag(term) == TAG_CTR and term_aux(term) == iroh_mp_Con do
+    local cells: [2]Term
+    local location = ctr_take(e,term,2,&cells[0])
+    if location ~= 0 then spare_free(e,cls_fit(2),location) end
+    local next = make_alpn(e,cells[0],true)
+    if next == nilptr or total + next.size + 1 > 65533 then
+      free_alpns(next)
+      free_alpns(first)
+      return nilptr
+    end
+    total = total + next.size + 1
+    if tail == nilptr then first = next else tail.next = next end
+    tail = next
+    term = cells[1]
+  end
+  if term_aux(term) == iroh_mp_Nil then return first end
+  free_alpns(first)
+  return nilptr
+end
+
 local VerifyCallback = @function(*verify_t,*tls_t,cstring,pointer,pointer,*iov_t,csize): cint
 local PinnedKey = @record{
   backend: pin_t, original: VerifyCallback, response: [4]ext_t, raw_type: uint8,
-  alpn: [258]uint8, alpn_size: csize, alpn_has_nul: boolean, alpn_seen: boolean, check_alpn: extension_cb_t
+  alpns: *Alpn, selected: *Alpn, check_alpn: extension_cb_t
 }
 
 local function pinned(quic: *quic_t): *PinnedKey
@@ -341,9 +400,19 @@ end
 
 local function select_alpn(quic: *quic_t, offers: *iov_t, count: csize): csize
   local pin = pinned(quic)
+  local cnx = (@*cnx_t)(quic.cnx_in_progress)
+  if cnx == nilptr then return count end
   local list = (@*[0]iov_t)(offers)
-  for i = 0,<count do
-    if list[i].len == pin.alpn_size and C.memcmp(list[i].base,&pin.alpn[3],pin.alpn_size) == 0 then return i end
+  local name = pin.alpns
+  while name ~= nilptr do
+    for i = 0,<count do
+      if list[i].len == name.size and C.memcmp(list[i].base,&name.wire[3],name.size) == 0 then
+        -- Keep the selected entry on the pending handshake until its connection is authenticated.
+        picoquic_set_callback(cnx,(@pointer)(picoquic_get_callback_function(cnx)),name)
+        return i
+      end
+    end
+    name = (@*Alpn)(name.next)
   end
   return count
 end
@@ -351,11 +420,15 @@ end
 local function check_alpn(cb: *extension_self, tls: *tls_t, message: uint8, kind: uint16, data: iov_t): cint
   if message ~= PTLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS or kind ~= ALPN_EXTENSION then return 0 end
   local pin = (@*PinnedKey)(ptls_get_context(tls).verify_certificate)
-  if data.len ~= pin.alpn_size + 3 or C.memcmp(data.base,&pin.alpn[0],data.len) ~= 0 then
-    return PTLS_ALERT_NO_APPLICATION_PROTOCOL
+  local name = pin.alpns
+  while name ~= nilptr do
+    if data.len == name.size + 3 and C.memcmp(data.base,&name.wire[0],data.len) == 0 then
+      pin.selected = name
+      return 0
+    end
+    name = (@*Alpn)(name.next)
   end
-  pin.alpn_seen = true
-  return 0
+  return PTLS_ALERT_NO_APPLICATION_PROTOCOL
 end
 
 local function verify_raw(self: *verify_t, tls: *tls_t, server: cstring,
@@ -368,10 +441,11 @@ end
 local function free_pin(verify: *verify_t)
   local pin = (@*PinnedKey)(verify)
   ptls_openssl_raw_pubkey_dispose_verify_certificate(&pin.backend)
+  free_alpns(pin.alpns)
   C.free(pin)
 end
 
-local function install_identity(quic: *quic_t, seed: *uint8, peer: *uint8, alpn: *uint8, size: csize): boolean
+local function install_identity(quic: *quic_t, seed: *uint8, peer: *uint8, alpns: **Alpn): boolean
   local private = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,seed,32)
   if private == nilptr then return false end
   defer EVP_PKEY_free(private) end
@@ -409,13 +483,8 @@ local function install_identity(quic: *quic_t, seed: *uint8, peer: *uint8, alpn:
   end
   pin.original = (@VerifyCallback)(pin.backend.super.cb)
   pin.backend.super.cb = (@pointer)(verify_raw)
-  pin.alpn_size = size
-  -- RFC 7301 wraps the selected name in the two-byte list length and a one-byte name length.
-  pin.alpn[0] = (@uint8)((size + 1) >> 8)
-  pin.alpn[1] = (@uint8)(size + 1)
-  pin.alpn[2] = (@uint8)(size)
-  C.memcpy(&pin.alpn[3],alpn,size)
-  pin.alpn_has_nul = C.memchr(alpn,0,size) ~= nilptr
+  pin.alpns = $alpns
+  $alpns = nilptr
   pin.check_alpn.cb = check_alpn
   ctx.on_extension = &pin.check_alpn
   picoquic_set_verify_certificate_callback(quic,&pin.backend.super,(@pointer)(free_pin))
@@ -460,11 +529,19 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
   pin.response[0] = ((@*[0]ext_t)(props.additional_extensions))[0]
   pin.response[1] = {type=19,data={base=&pin.raw_type,len=1}}
   pin.response[2] = {type=65535}
-  if pin.alpn_has_nul then
+  local data = ptls_get_data_ptr(tls)
+  local cnx = (@*cnx_t)($data)
+  if cnx == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
+  local chosen = picoquic_get_callback_context(cnx)
+  if chosen == nilptr or chosen == picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)) then
+    return PTLS_ALERT_NO_APPLICATION_PROTOCOL
+  end
+  local name = (@*Alpn)(chosen)
+  if name.has_nul then
     -- picotls serializes its built-in ALPN with strlen. Supply the selected bytes as an extension.
     local status = ptls_set_negotiated_protocol(tls,nilptr,0)
     if status ~= 0 then return status end
-    pin.response[2] = {type=ALPN_EXTENSION,data={base=&pin.alpn[0],len=pin.alpn_size + 3}}
+    pin.response[2] = {type=ALPN_EXTENSION,data={base=&name.wire[0],len=name.size + 3}}
     pin.response[3] = {type=65535}
   end
   props.additional_extensions = &pin.response[0]
@@ -716,12 +793,17 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
   local conn = (@*Connection)(user)
   if kind == picoquic_callback_request_alpn_list then
     local tls = (@*client_tls_t)(bytes)
-    if tls.alpn_vec_size == 0 then return -1 end
     local pin = pinned(conn.quic)
-    tls.alpn_vec[0] = {base=&pin.alpn[3],len=pin.alpn_size}
-    tls.alpn_count = 1
+    local name = pin.alpns
+    while name ~= nilptr do
+      if tls.alpn_count >= tls.alpn_vec_size then return -1 end
+      tls.alpn_vec[tls.alpn_count] = {base=&name.wire[3],len=name.size}
+      tls.alpn_count = tls.alpn_count + 1
+      name = (@*Alpn)(name.next)
+    end
   elseif kind == picoquic_callback_ready then
-    if conn.listener == nilptr and not pinned(conn.quic).alpn_seen then
+    if conn.listener == nilptr then conn.selected_alpn = pinned(conn.quic).selected end
+    if conn.selected_alpn == nilptr then
       conn.closed = true
       return -1
     end
@@ -761,13 +843,15 @@ end
 local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
     user: pointer, stream_user: pointer): cint
   if kind ~= picoquic_callback_ready and kind ~= picoquic_callback_almost_ready then return 0 end
-  local listener = (@*Listener)(user)
+  local listener = (@*Listener)(picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
   if listener.stopped or next_connection == 0 or listener.refs > LISTENER_LIMIT then return -1 end
+  if user == nilptr or user == listener then return -1 end
   local conn = (@*Connection)(C.calloc(1,#Connection))
   if conn == nilptr then return -1 end
   conn.quic = listener.quic
   conn.cnx = cnx
   conn.listener = listener
+  conn.selected_alpn = (@*Alpn)(user)
   if remember_shared_path(conn,0) == nilptr then
     C.free(conn)
     return -1
@@ -808,17 +892,17 @@ local function closed_error(e: Env, conn: *Connection): Term
   return io_fail(e,ECONNRESET,'multipath connection closed')
 end
 
-local function start_client(e: Env, args: *[0]Term, binary: boolean): Term
+local function start_client(e: Env, args: *[0]Term, mode: uint32): Term
   local host_size: uint64
   local host = io_cstr(e,args[0],&host_size)
   defer C.free(host) end
-  local alpn: [255]uint8
-  local alpn_size = read_alpn(e,args[4],binary,&alpn[0])
+  local alpns = read_alpns(e,args[4],mode)
+  defer free_alpns(alpns) end
   local seed: [32]uint8
   local key: [32]uint8
   local seed_size = bytes_from_list(e,args[2],&seed[0],32)
   local key_size = bytes_from_list(e,args[3],&key[0],32)
-  if seed_size ~= 32 or key_size ~= 32 or args[1] == 0 or args[1] > 65535 or alpn_size <= 0 or
+  if seed_size ~= 32 or key_size ~= 32 or args[1] == 0 or args[1] > 65535 or alpns == nilptr or
       io_nul(host,host_size) then
     return io_fail(e,EINVAL,'invalid numeric address, Ed25519 key, or ALPN')
   end
@@ -838,7 +922,7 @@ local function start_client(e: Env, args: *[0]Term, binary: boolean): Term
   initial.status = 1
   local now = picoquic_current_time()
   conn.quic = picoquic_create(1,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if conn.quic == nilptr or not install_identity(conn.quic,&seed[0],&key[0],&alpn[0],(@csize)(alpn_size)) or
+  if conn.quic == nilptr or not install_identity(conn.quic,&seed[0],&key[0],&alpns) or
       picoquic_set_default_tp_value(conn.quic,picoquic_tp_max_datagram_frame_size,IO_CAPACITY) ~= 0 then
     destroy(conn)
     return io_fail(e,EIO,'could not configure pinned QUIC raw public keys')
@@ -855,11 +939,25 @@ local function start_client(e: Env, args: *[0]Term, binary: boolean): Term
 end
 
 local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,false)
+  return start_client(e,args,0)
 end
 
 local function start_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return start_client(e,args,true)
+  return start_client(e,args,1)
+end
+
+local function start_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return start_client(e,args,2)
+end
+
+local function negotiated_alpn_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local name = conn.selected_alpn
+  if not conn.ready or name == nilptr then
+    return io_tup(e,args[0],io_fail(e,EAGAIN,'QUIC handshake is incomplete'))
+  end
+  return io_tup(e,args[0],io_done(e,io_list(e,(@cstring)(&name.wire[3]),name.size)))
 end
 
 local function socket_unreachable(code: cint): boolean
@@ -998,7 +1096,7 @@ local function pump_listener(listener: *Listener, now: uint64): uint32
     local next = picoquic_get_next_cnx(cnx)
     local ctx = picoquic_get_callback_context(cnx)
     local expired = now - picoquic_get_cnx_start_time(cnx) > HANDSHAKE_LIMIT
-    if ctx == listener then
+    if (@pointer)(picoquic_get_callback_function(cnx)) == (@pointer)(server_event) then
       if expired or listener.stopped or picoquic_get_cnx_state(cnx) == picoquic_state_disconnected then
         picoquic_delete_cnx(cnx)
       else
@@ -1053,16 +1151,16 @@ local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t)
   return address(host,(@uint16)(port),out)
 end
 
-local function bind_listener(e: Env, args: *[0]Term, binary: boolean): Term
+local function bind_listener(e: Env, args: *[0]Term, mode: uint32): Term
   local local_addr: storage_t
   local size = numeric_argument(e,args[0],args[1],&local_addr)
-  local alpn: [255]uint8
-  local alpn_size = read_alpn(e,args[4],binary,&alpn[0])
+  local alpns = read_alpns(e,args[4],mode)
+  defer free_alpns(alpns) end
   local seed: [32]uint8
   local key: [32]uint8
   local seed_size = bytes_from_list(e,args[2],&seed[0],32)
   local key_size = bytes_from_list(e,args[3],&key[0],32)
-  if size == 0 or seed_size ~= 32 or key_size ~= 32 or alpn_size <= 0 then
+  if size == 0 or seed_size ~= 32 or key_size ~= 32 or alpns == nilptr then
     return io_fail(e,EINVAL,'invalid numeric listen address, Ed25519 key, or ALPN')
   end
   local v4 = (@*addr_t)(&local_addr)
@@ -1087,7 +1185,7 @@ local function bind_listener(e: Env, args: *[0]Term, binary: boolean): Term
   local now = picoquic_current_time()
   listener.quic = picoquic_create(LISTENER_LIMIT,nilptr,nilptr,nilptr,nilptr,(@pointer)(server_event),listener,
     nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],&key[0],&alpn[0],(@csize)(alpn_size)) or
+  if listener.quic == nilptr or not install_identity(listener.quic,&seed[0],&key[0],&alpns) or
       picoquic_set_default_tp_value(listener.quic,picoquic_tp_max_datagram_frame_size,IO_CAPACITY) ~= 0 then
     release_listener(listener)
     return io_fail(e,EIO,'could not configure pinned QUIC listener')
@@ -1127,11 +1225,15 @@ local function accept_connection(e: Env, listener: *Listener): Term
 end
 
 local function bind_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,false)
+  return bind_listener(e,args,0)
 end
 
 local function bind_bytes_run(e: Env, args: *[0]Term, work: *IoWork): Term
-  return bind_listener(e,args,true)
+  return bind_listener(e,args,1)
+end
+
+local function bind_alpns_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return bind_listener(e,args,2)
 end
 
 local function accept_run(e: Env, args: *[0]Term, work: *IoWork): Term
@@ -1528,6 +1630,8 @@ end
 local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
   if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
   if iroh_mp_start_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_start_multipath_bytes,start_bytes_run) end
+  if iroh_mp_start_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_start_multipath_alpns,start_alpns_run) end
+  if iroh_mp_negotiated_multipath_alpn ~= 0xffffffff then io_eff(iroh_mp_negotiated_multipath_alpn,negotiated_alpn_run) end
   if iroh_mp_step_multipath ~= 0xffffffff then io_eff(iroh_mp_step_multipath,step_run) end
   if iroh_mp_probe_multipath ~= 0xffffffff then io_eff(iroh_mp_probe_multipath,probe_run) end
   if iroh_mp_multipath_status ~= 0xffffffff then io_eff(iroh_mp_multipath_status,status_run) end
@@ -1543,6 +1647,7 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
   if iroh_mp_bind_multipath ~= 0xffffffff then io_eff(iroh_mp_bind_multipath,bind_run) end
   if iroh_mp_bind_multipath_bytes ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_bytes,bind_bytes_run) end
+  if iroh_mp_bind_multipath_alpns ~= 0xffffffff then io_eff(iroh_mp_bind_multipath_alpns,bind_alpns_run) end
   if iroh_mp_accept_multipath ~= 0xffffffff then io_eff(iroh_mp_accept_multipath,accept_run) end
   if iroh_mp_close_multipath_listener ~= 0xffffffff then io_eff(iroh_mp_close_multipath_listener,close_listener_run) end
   if iroh_mp_accept_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_accept_multipath_stream,accept_stream_run) end

@@ -20,6 +20,15 @@ def start_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: Lis
     -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
 
+def start_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
+# Return the exact protocol bytes once the connection is ready.
+def negotiated_multipath_alpn(conn: MultipathConnection)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
+  import "./quic_multipath.c"
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)
@@ -119,6 +128,11 @@ def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+# List protocols in server preference order.
+def bind_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>) -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 # Drive the listener and poll for an authenticated connection.
 def accept_multipath(listener: MultipathListener)
     -> IO(MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,MultipathConnection>>):
@@ -189,4 +203,10 @@ def connect_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: L
     alpn: List<&2,U32>, timeout_ms: Nat) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
     started : ConnectResult() <- start_multipath_bytes(host,port,seed,peer,alpn)
+    finish_connect(started,timeout_ms)
+
+def connect_multipath_alpns(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpns: List<&2,List<&2,U32>>, timeout_ms: Nat) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    started : ConnectResult() <- start_multipath_alpns(host,port,seed,peer,alpns)
     finish_connect(started,timeout_ms)

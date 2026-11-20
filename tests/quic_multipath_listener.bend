@@ -131,24 +131,37 @@ def serve_affinity(first: Quic.MultipathListener & Quic.MultipathConnection) -> 
     candidate : Quic.MultipathConnection & U32 <- wait_path(5000n,conn)
     echo_affine(candidate)
 
-def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection) -> IO(Unit):
+def check_selection(conn: Quic.MultipathConnection, expected: List<&2,U32>, mode: U32)
+    -> IO(Quic.MultipathConnection):
+  match mode:
+    case 3:
+      Fixture.require_alpn(conn,expected)
+    case _:
+      IO.pure(Quic.MultipathConnection,conn)
+
+def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection,
+    +mode: U32) -> IO(Unit):
   (listener,conn) = second
   do IO<Unit>:
     Quic.close_multipath_listener(listener)
-    exchange(first,55,11,22)
-    exchange(conn,66,33,44)
+    preferred : Quic.MultipathConnection <- check_selection(first,Fixture.binary_alpn(),mode)
+    fallback : Quic.MultipathConnection <- check_selection(conn,Fixture.text_alpn(),mode)
+    exchange(preferred,55,11,22)
+    exchange(fallback,66,33,44)
     IO.print("PASS Bend served both connections after closing the multipath listener")
 
-def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection) -> IO(Unit):
+def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
   (listener,conn) = first
   do IO<Unit>:
     second : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,listener)
-    serve_two(second,conn)
+    serve_two(second,conn,mode)
 
 def serve(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
   match mode:
     case 0:
-      serve_two_connections(first)
+      serve_two_connections(first,0)
+    case 3:
+      serve_two_connections(first,3)
     case _:
       serve_affinity(first)
 
@@ -175,10 +188,19 @@ def listen_binary(host: String) -> IO(Unit):
       Quic.bind_multipath_bytes(host,0,List.replicate(U32,32n,42),fixture_peer(),Fixture.binary_alpn()))
     announce(bound,0)
 
+def listen_multiple(host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_multipath_alpns(host,0,List.replicate(U32,32n,42),fixture_peer(),
+        [Fixture.binary_alpn(),Fixture.text_alpn()]))
+    announce(bound,3)
+
 def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
   match mode:
     case Some{2}:
       listen_binary(host)
+    case Some{3}:
+      listen_multiple(host)
     case Some{number}:
       listen_text(host,number)
     case None{}:

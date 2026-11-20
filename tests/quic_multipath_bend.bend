@@ -4,6 +4,9 @@ import ../src/quic_multipath.bend as Quic
 def binary_alpn() -> List<&2,U32>:
   Con{0,Con{255,Con{10,List.replicate(U32,252n,128)}}}
 
+def text_alpn() -> List<&2,U32>:
+  [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]
+
 def reject(-T: Type, conn: Quic.MultipathConnection, +code: U32, message: String) -> IO(T):
   do IO<T>:
     Quic.close_multipath(conn)
@@ -298,6 +301,50 @@ def run_probe(conn: Quic.MultipathConnection, host: String, port: U32) -> IO(Uni
     candidate : Quic.MultipathConnection & U32 <- probe(3000n,conn,host,port)
     run_paths(candidate)
 
+def same_alpn(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
+  match a b:
+    case Nil{} Nil{}:
+      True{}
+    case Con{x,rest} Con{y,tail}:
+      U32.is_eq(x,y) && same_alpn(rest,tail)
+    case _ _:
+      False{}
+
+def checked_alpn(conn: Quic.MultipathConnection, equal: Bool) -> IO(Quic.MultipathConnection):
+  match equal:
+    case True{}:
+      IO.pure(Quic.MultipathConnection,conn)
+    case False{}:
+      reject(Quic.MultipathConnection,conn,1,"negotiated the wrong ALPN")
+
+def compare_alpn(selected: Quic.MultipathConnection & List<&2,U32>, expected: List<&2,U32>)
+    -> IO(Quic.MultipathConnection):
+  (conn,actual) = selected
+  checked_alpn(conn,same_alpn(actual,expected))
+
+def require_alpn(conn: Quic.MultipathConnection, expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <-
+      Quic.negotiated_multipath_alpn(conn)
+    selected : Quic.MultipathConnection & List<&2,U32> <- ok(List<&2,U32>,result)
+    compare_alpn(selected,expected)
+
+def dial_multiple(+host: String, +port: U32) -> IO(Unit):
+  do IO<Unit>:
+    conn : Quic.MultipathConnection <- IO.try(Quic.MultipathConnection,
+      Quic.connect_multipath_alpns(host,port,List.replicate(U32,32n,73),fixture_key(0),
+        [text_alpn(),binary_alpn()],3000n))
+    selected : Quic.MultipathConnection <- require_alpn(conn,binary_alpn())
+    IO.print("PASS Bend read Iroh's preferred binary ALPN")
+    run_probe(selected,host,port)
+
+def parse_multiple(host: String, port: Maybe<&2,U32>) -> IO(Unit):
+  match port:
+    case Some{number}:
+      dial_multiple(host,number)
+    case None{}:
+      IO.die(Unit,2,"expected a numeric port")
+
 def dial_result(result: Quic.ConnectResult(), wrong: U32, host: String, port: U32) -> IO(Unit):
   match result wrong:
     case Done{conn} 0:
@@ -324,6 +371,8 @@ def parse(host: String, port: Maybe<&2,U32>, wrong: U32) -> IO(Unit):
 
 def run(args: List<String>) -> IO(Unit):
   match args:
+    case [_,host,port,"multiple"]:
+      parse_multiple(host,U32.read(port))
     case Con{_,Con{host,Con{port,Nil{}}}}:
       parse(host,U32.read(port),0)
     case Con{_,Con{host,Con{port,Con{_,Nil{}}}}}:

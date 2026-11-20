@@ -5,13 +5,15 @@ import sys
 from quic_rebind import process, read_address
 
 
-def check(listener, fixture, host, mode, binary=False):
+def check(listener, fixture, host, mode, listener_mode="0"):
     command = (fixture, mode)
-    if binary:
+    if listener_mode == "2":
         command = ("env", "IROH_MULTIPATH_BINARY_ALPN=1", *command)
+    if listener_mode == "3":
+        command = ("env", "IROH_MULTIPATH_MULTIPLE_ALPNS=1", *command)
     with process(*command) as iroh:
         read_address(iroh)
-        with process(listener, host, "2" if binary else "0") as bend:
+        with process(listener, host, listener_mode) as bend:
             port = read_address(bend)
             address = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
             iroh.stdin.write(f"{address}\n".encode())
@@ -21,8 +23,10 @@ def check(listener, fixture, host, mode, binary=False):
             print(report.decode(), end="", flush=True)
             if bend.returncode or iroh.returncode:
                 raise SystemExit(f"multipath listener interop failed on {host}")
-            if binary:
+            if listener_mode == "2":
                 print(f"PASS Bend accepted Iroh with a 255-byte binary ALPN on {host}", flush=True)
+            if listener_mode == "3":
+                print(f"PASS Bend selected its preferred ALPN and the text fallback on {host}", flush=True)
 
 
 def check_affinity(listener, dialer, host):
@@ -41,4 +45,6 @@ if __name__ == "__main__":
         check(listener, fixture, host, mode)
         check_affinity(listener, dialer, host)
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
-            check(listener, fixture, host, mode, binary=True)
+            check(listener, fixture, host, mode, "2")
+        if os.environ.get("CHECK_MULTIPLE_ALPNS") == "1":
+            check(listener, fixture, host, mode, "3")
