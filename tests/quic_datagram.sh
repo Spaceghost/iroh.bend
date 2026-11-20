@@ -7,6 +7,7 @@ ipv6=$3
 echo_peer=${4:-}
 shared_peer=${5:-}
 dial_peer=${6:-}
+early_peer=${7:-}
 if [ ! -x "$ipv4" ] || [ ! -x "$ipv6" ]; then
     printf '%s\n' 'Set UPSTREAM_DATAGRAM_V4 and UPSTREAM_DATAGRAM_V6 to the Iroh 1.5.0 listen fixtures.' >&2
     exit 2
@@ -21,6 +22,10 @@ if [ -n "$shared_peer" ] && [ ! -x "$shared_peer" ]; then
 fi
 if [ -n "$dial_peer" ] && [ ! -x "$dial_peer" ]; then
     printf '%s\n' 'UPSTREAM_QUIC_SHARED_DIAL must name an executable Iroh fixture.' >&2
+    exit 2
+fi
+if [ -n "$early_peer" ] && [ ! -x "$early_peer" ]; then
+    printf '%s\n' 'UPSTREAM_QUIC_EARLY must name an executable Iroh fixture.' >&2
     exit 2
 fi
 work=$(mktemp -d)
@@ -91,6 +96,16 @@ check_listener() {
     tail -n +2 "$work/address"
 }
 
+check_early() {
+    start_listener "$early_peer" "$1"
+    IFS=' ' read -r warm resumed < "$work/address"
+    if ! timeout 12s "$client" "$2" "${warm##*:}" "${resumed##*:}" "$3"; then
+        cat "$work/error" >&2
+        exit 1
+    fi
+    finish_listener
+}
+
 for mode in valid wrong-key; do
     check_peer "$ipv4" 127.0.0.1 "$mode" listen
     check_peer "$ipv6" ::1 "$mode" listen
@@ -106,4 +121,13 @@ fi
 if [ -n "$dial_peer" ]; then
     check_listener listen
     check_listener listen6
+fi
+if [ -n "$early_peer" ]; then
+    check_early listen 127.0.0.1 early
+    check_early listen6 ::1 early
+    check_early listen-rotated 127.0.0.1 early-rejected
+    check_early listen6-rotated ::1 early-rejected
+    check_early listen-mismatch 127.0.0.1 ticket-mismatch
+    check_early listen-mismatch 127.0.0.1 ticket-peer-mismatch
+    check_early listen-mismatch 127.0.0.1 ticket-alpn-mismatch
 fi

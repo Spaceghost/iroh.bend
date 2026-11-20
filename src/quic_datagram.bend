@@ -143,3 +143,39 @@ def try_accept_shared_quic(listener: QuicDatagramListener)
 # Stop accepting connections. Existing connections keep their UDP socket.
 def close_shared_quic(listener: QuicDatagramListener) -> IO(Unit):
   import "./quic_datagram.c"
+
+type QuicSession is Type:
+  QuicSession{id: U32}
+
+# Ticket availability is driven by connection steps after handshake completion.
+def take_quic_session(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,QuicSession>>):
+  import "./quic_datagram.c"
+
+# Consumes a ticket. Its local key, peer key, and ALPN must match.
+# Pass 1 to allow early data or 0 for handshake-only resumption.
+def start_quic_resume(host: String, port: U32, secret: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, session: QuicSession, early: U32)
+    -> IO(Result<&1,&1,U32 & String,DatagramConnection>):
+  import "./quic_datagram.c"
+
+def drop_quic_session(session: QuicSession) -> IO(Unit):
+  import "./quic_datagram.c"
+
+# Send only data the application can safely receive more than once.
+# 1 means the stack accepted the datagram for transmission.
+def write_early_datagram(conn: DatagramConnection, payload: List<&2,U32>)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"
+
+# After authentication the result is (TLS resumed, early-data status).
+# Early-data status is 0 when unused, 1 when accepted, and 2 when rejected.
+def quic_resumption_status(conn: DatagramConnection)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>>):
+  import "./quic_datagram.c"
+
+# Opens a replayable stream before the handshake. Use the normal queue and
+# flush calls. If early data is rejected, release the handle and open a new stream.
+def open_early_quic_stream(conn: DatagramConnection, direction: U32)
+    -> IO(DatagramConnection & Result<&1,&1,U32 & String,U32>):
+  import "./quic_datagram.c"

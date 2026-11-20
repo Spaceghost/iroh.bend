@@ -509,12 +509,225 @@ def choose_listener(v4: Bool, v6: Bool) -> IO(Unit):
     case _ _:
       usage()
 
+type RttMode is Data:
+  AcceptEarly{}
+  RejectEarly{}
+  RejectIdentity{}
+  RejectPeer{}
+  RejectAlpn{}
+
+def session_result(
+    outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.QuicSession>>,
+    retry: Quic.DatagramConnection -> IO(Quic.QuicSession)) -> IO(Quic.QuicSession):
+  match outcome:
+    case (conn,Done{Some{ticket}}):
+      do IO<Quic.QuicSession>:
+        Quic.drop_quic_datagram(conn)
+        IO.pure(Quic.QuicSession,ticket)
+    case (conn,Done{None{}}):
+      do IO<Quic.QuicSession>:
+        IO.sleep(2)
+        retry(conn)
+    case (conn,Fail{(code,message)}):
+      do IO<Quic.QuicSession>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.QuicSession,code,message)
+
+def wait_session(fuel: Nat, conn: Quic.DatagramConnection) -> IO(Quic.QuicSession):
+  match fuel:
+    case 0n:
+      do IO<Quic.QuicSession>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Quic.QuicSession,1,"upstream Iroh session ticket timed out")
+    case 1n+left:
+      do IO<Quic.QuicSession>:
+        ready : Quic.DatagramConnection <- step(conn)
+        next : Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.QuicSession>> <-
+          Quic.take_quic_session(ready)
+        session_result(next,waiting => wait_session(left,waiting))
+
+def use_early_result(packet: Quic.DatagramConnection & U32,
+    retry: Quic.DatagramConnection -> IO(Quic.DatagramConnection)) -> IO(Quic.DatagramConnection):
+  match packet:
+    case (conn,1):
+      IO.pure(Quic.DatagramConnection,conn)
+    case (conn,_):
+      do IO<Quic.DatagramConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def send_early(fuel: Nat, conn: Quic.DatagramConnection) -> IO(Quic.DatagramConnection):
+  match fuel:
+    case 0n:
+      incomplete_stream(conn,"QUIC early datagram never entered a packet")
+    case 1n+left:
+      do IO<Quic.DatagramConnection>:
+        result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.write_early_datagram(conn,[4,0,255])
+        next : Quic.DatagramConnection & U32 <- check_progress(result)
+        use_early_result(next,waiting => send_early(left,waiting))
+
+def flush_early_stream(fuel: Nat, conn: Quic.DatagramConnection, +stream: U32) -> IO(Quic.DatagramConnection):
+  match fuel:
+    case 0n:
+      incomplete_stream(conn,"QUIC early stream never entered a packet")
+    case 1n+left:
+      do IO<Quic.DatagramConnection>:
+        result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.flush_quic_stream(conn,stream)
+        next : Quic.DatagramConnection & U32 <- check_progress(result)
+        use_early_result(next,waiting => flush_early_stream(left,waiting,stream))
+
+def queue_early_stream(opened: Quic.DatagramConnection & U32) -> IO(Quic.DatagramConnection & U32):
+  (conn,+stream) = opened
+  do IO<Quic.DatagramConnection & U32>:
+    result : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <-
+      Quic.queue_quic_stream(conn,stream,[7,0,255],1)
+    checked : Quic.DatagramConnection & U32 <- check_progress(result)
+    queued : Quic.DatagramConnection <- next_connection(checked)
+    flushed : Quic.DatagramConnection <- flush_early_stream(100n,queued,stream)
+    return (flushed,stream)
+
+def verify_inactive_stream(outcome: Quic.DatagramConnection & Result<&1,&1,U32 & String,Quic.QuicStreamRead>)
+    -> IO(Quic.DatagramConnection):
+  match outcome:
+    case (conn,Fail{(104,_)}):
+      IO.pure(Quic.DatagramConnection,conn)
+    case (conn,_):
+      incomplete_stream(conn,"the rejected early stream remained active")
+
+def early_reply(conn: Quic.DatagramConnection, +stream: U32) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    read : Quic.DatagramConnection <- receive_stream(2500n,conn,stream,[9,0,255])
+    finished : Quic.DatagramConnection <- release_stream(read,stream)
+    receive_reply(1500n,finished,[5,0,255])
+
+def retry_stream(opened: Quic.DatagramConnection & U32) -> IO(Quic.DatagramConnection):
+  (conn,+stream) = opened
+  do IO<Quic.DatagramConnection>:
+    queued : Quic.DatagramConnection <- stream_submit(conn,QueueStream{stream,[8,0,255],1})
+    flushed : Quic.DatagramConnection <- stream_submit(queued,FlushStream{stream})
+    early_reply(flushed,stream)
+
+def retry_early(conn: Quic.DatagramConnection, +stream: U32) -> IO(Quic.DatagramConnection):
+  do IO<Quic.DatagramConnection>:
+    original : Quic.DatagramConnection & Result<&1,&1,U32 & String,Quic.QuicStreamRead> <-
+      Quic.read_quic_stream(conn,stream,64)
+    inactive : Quic.DatagramConnection <- verify_inactive_stream(original)
+    dropped : Quic.DatagramConnection <- release_stream(inactive,stream)
+    retried : Quic.DatagramConnection <- send_datagram(1500n,dropped,[6,0,255])
+    opened : Quic.DatagramConnection & U32 <- poll_stream(2500n,retried,OpenStream{0})
+    retry_stream(opened)
+
+def verify_early_status(status: Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>>,
+    mode: RttMode, stream: U32) -> IO(Unit):
+  match status mode:
+    case (conn,Done{Some{(1,1)}}) AcceptEarly{}:
+      do IO<Unit>:
+        replied : Quic.DatagramConnection <- early_reply(conn,stream)
+        Quic.drop_quic_datagram(replied)
+        IO.print("PASS upstream Iroh accepted and read a 0-RTT stream and datagram")
+    case (conn,Done{Some{(0,2)}}) RejectEarly{}:
+      do IO<Unit>:
+        replied : Quic.DatagramConnection <- retry_early(conn,stream)
+        Quic.drop_quic_datagram(replied)
+        IO.print("PASS upstream Iroh rejected early data and the pinned full handshake carried the explicit retries")
+    case (conn,_) _:
+      do IO<Unit>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Unit,1,"TLS resumption or early-data status differed")
+
+def await_resumed(early: Quic.DatagramConnection & U32, mode: RttMode) -> IO(Unit):
+  (conn,stream) = early
+  do IO<Unit>:
+    now : Nat <- IO.now()
+    active : Quic.DatagramConnection <- IO.try(Quic.DatagramConnection,Quic.handshake(5000n,conn,Nat.add(now,5000n)))
+    status : Quic.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>> <-
+      Quic.quic_resumption_status(active)
+    verify_early_status(status,mode,stream)
+
+def check_resumed(outcome: Result<&1,&1,U32 & String,Quic.DatagramConnection>, mode: RttMode, mismatch: Bool)
+    -> IO(Unit):
+  match outcome mismatch:
+    case Fail{(13,_)} True{}:
+      IO.print("PASS QUIC session rejected a mismatched identity or ALPN")
+    case Fail{(code,message)} _:
+      IO.die(Unit,code,message)
+    case Done{conn} True{}:
+      do IO<Unit>:
+        Quic.drop_quic_datagram(conn)
+        IO.die(Unit,1,"session for a mismatched key or ALPN was accepted")
+    case Done{conn} _:
+      do IO<Unit>:
+        sent : Quic.DatagramConnection <- send_early(100n,conn)
+        opened : Quic.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Quic.open_early_quic_stream(sent,0)
+        checked : Quic.DatagramConnection & U32 <- check_progress(opened)
+        written : Quic.DatagramConnection & U32 <- queue_early_stream(checked)
+        await_resumed(written,mode)
+
+def early_seed(mode: RttMode) -> U32:
+  match mode:
+    case RejectIdentity{}:
+      74
+    case _:
+      73
+
+def fixture_alpn() -> List<&2,U32>:
+  [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]
+
+def ticket_peer(mode: RttMode) -> List<&2,U32>:
+  match mode:
+    case RejectPeer{}:
+      public_key(True{})
+    case _:
+      public_key(False{})
+
+def ticket_alpn(mode: RttMode) -> List<&2,U32>:
+  match mode:
+    case RejectAlpn{}:
+      [1]
+    case _:
+      fixture_alpn()
+
+def ticket_mismatch(mode: RttMode) -> Bool:
+  match mode:
+    case AcceptEarly{}:
+      False{}
+    case RejectEarly{}:
+      False{}
+    case _:
+      True{}
+
+def test_resumption(+host: String, warm: U32, resume: U32, +mode: RttMode) -> IO(Unit):
+  do IO<Unit>:
+    initial : Quic.DatagramConnection <- IO.try(Quic.DatagramConnection,Quic.connect(
+      host,warm,List.replicate(U32,32n,73),public_key(False{}),fixture_alpn(),5000n))
+    ticket : Quic.QuicSession <- wait_session(1500n,initial)
+    candidate : Result<&1,&1,U32 & String,Quic.DatagramConnection> <- Quic.start_quic_resume(
+      host,resume,List.replicate(U32,32n,early_seed(mode)),ticket_peer(mode),ticket_alpn(mode),ticket,1)
+    check_resumed(candidate,mode,ticket_mismatch(mode))
+
+def test_resumption_ports(host: String, warm: Maybe<&2,U32>, resume: Maybe<&2,U32>, mode: RttMode) -> IO(Unit):
+  match warm resume:
+    case Some{a} Some{b}:
+      test_resumption(host,a,b,mode)
+    case _ _:
+      IO.die(Unit,2,"expected warm and resumed UDP ports")
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{+mode,Nil{}}}:
       choose_listener(String.eq(mode,"listen"),String.eq(mode,"listen6"))
     case Con{_,Con{host,Con{port,Con{+mode,Nil{}}}}}:
       choose(host,U32.read(port),String.eq(mode,"valid"),String.eq(mode,"echo"),String.eq(mode,"shared"),String.eq(mode,"wrong-key"))
+    case Con{_,Con{host,Con{warm,Con{resume,Con{"early",Nil{}}}}}}:
+      test_resumption_ports(host,U32.read(warm),U32.read(resume),AcceptEarly{})
+    case Con{_,Con{host,Con{warm,Con{resume,Con{"early-rejected",Nil{}}}}}}:
+      test_resumption_ports(host,U32.read(warm),U32.read(resume),RejectEarly{})
+    case Con{_,Con{host,Con{warm,Con{resume,Con{"ticket-mismatch",Nil{}}}}}}:
+      test_resumption_ports(host,U32.read(warm),U32.read(resume),RejectIdentity{})
+    case Con{_,Con{host,Con{warm,Con{resume,Con{"ticket-peer-mismatch",Nil{}}}}}}:
+      test_resumption_ports(host,U32.read(warm),U32.read(resume),RejectPeer{})
+    case Con{_,Con{host,Con{warm,Con{resume,Con{"ticket-alpn-mismatch",Nil{}}}}}}:
+      test_resumption_ports(host,U32.read(warm),U32.read(resume),RejectAlpn{})
     case _:
       usage()
 
