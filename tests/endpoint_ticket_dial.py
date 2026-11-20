@@ -80,9 +80,11 @@ def main(client, fixture, relay_url):
     for family in ("listen", "listen6"):
         check(client, fixture, family, "wrong-id", error=b"peer endpoint key mismatch")
         check(client, fixture, family, "direct")
-        for race in (check_supplied_addresses, check_pending_relay):
+        for both_live in (False, True):
             with process(fixture, family, "direct") as peer:
-                race(client, read_ticket(peer), family, peer)
+                check_supplied_addresses(client, read_ticket(peer), family, peer, both_live)
+        with process(fixture, family, "direct") as peer:
+            check_pending_relay(client, read_ticket(peer), family, peer)
         check(client, fixture, family, "custom-direct")
         if relay_url:
             with process(fixture, family, "relay", relay_url) as peer:

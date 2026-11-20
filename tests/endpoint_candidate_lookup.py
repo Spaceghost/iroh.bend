@@ -192,19 +192,31 @@ def require_exchange(peer):
         raise AssertionError(f"Iroh rejected the ticket exchange: {transcript!r}")
 
 
-def check_supplied_addresses(client, ticket, family, peer):
-    release, observed = Event(), []
+def check_supplied_addresses(client, ticket, family, peer, both_live=False):
+    release = Event()
     with ExitStack() as stack:
-        stale = silent_socket(stack, family)
-        forwarded, _ = stack.enter_context(supplied_route(ticket, family, release, observed))
-        _, (_, good_port) = direct_ticket(forwarded, family, 1)
-        changed = ip_ticket(ticket, family, [good_port, stale.getsockname()[1]])
+        first_packets, second_packets = [], []
+        if both_live:
+            first_ticket, first = stack.enter_context(supplied_route(ticket, family, release, first_packets))
+            _, (_, first_port) = direct_ticket(first_ticket, family, 1)
+        else:
+            stale = silent_socket(stack, family)
+            first_port = stale.getsockname()[1]
+        second_ticket, second = stack.enter_context(supplied_route(ticket, family, release, second_packets))
+        _, (_, second_port) = direct_ticket(second_ticket, family, 1)
+        changed = ip_ticket(ticket, family, [first_port, second_port])
         with subprocess.Popen([client, "dial-ticket", changed, "direct"], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as bend:
             try:
-                initial = initial_ids(stale.recv(65535))
+                if both_live:
+                    if not first.wait(1):
+                        raise AssertionError("No QUIC Initial on the first supplied route")
+                else:
+                    first_packets.append(stale.recv(65535))
+                if not second.wait(1):
+                    raise AssertionError("No QUIC Initial on the second supplied route")
                 release.set()
                 _, error = bend.communicate(timeout=5)
-                if bend.returncode or not observed or initial != initial_ids(observed[0]):
+                if bend.returncode or initial_ids(first_packets[0]) != initial_ids(second_packets[0]):
                     raise AssertionError(f"Supplied addresses did not share one handshake: {error!r}")
                 require_exchange(peer)
             finally:
@@ -212,7 +224,8 @@ def check_supplied_addresses(client, ticket, family, peer):
                 if bend.poll() is None:
                     bend.kill()
                     bend.communicate()
-    print(f"PASS {family} two supplied addresses share one QUIC handshake", flush=True)
+    condition = "two working routes" if both_live else "one silent route"
+    print(f"PASS {family} two supplied addresses share one QUIC handshake ({condition})", flush=True)
 
 
 def check_discovered_relay(client, ticket, family, peer, relay_url):

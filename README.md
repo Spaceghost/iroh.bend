@@ -715,6 +715,10 @@ Full drop-in compatibility remains open. Known differences include the following
 - A listener can advertise its initial observed UDP address. Refreshing that
   advertisement after a live listener's NAT mapping changes is parked. The
   outbound routed connection has a separate passing address-refresh test below.
+- The shared-stream/datagram endpoint races initial paths. The separate
+  Picoquic multipath endpoint still tries its supplied bootstrap paths in
+  sequence. Its established-connection path promotion and recovery tests are
+  listed below.
 
 Ticket lookup passes two complementary tests against Iroh 1.5.0 on IPv4 and
 IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.
@@ -725,7 +729,8 @@ also reuse the losing UDP port while the winning connection is still open,
 cross from IPv4 to IPv6 and back, and perform a validated local port migration
 after signed Pkarr discovery. Each connection exchanges streams and application
 datagrams with Iroh. The ordinary
-ticket dial also checks both Initial connection IDs across two supplied addresses.
+ticket dial also checks both Initial connection IDs across two supplied addresses,
+including when both carry packets to the same Iroh listener.
 The relay ticket suite holds a WebSocket upgrade open until discovery yields a
 working direct path, and holds a direct path silent until discovery yields a
 working relay.
