@@ -34,6 +34,18 @@ def perform(conn: Q.DatagramConnection, id: U32, action: Test.Action) -> Test.Re
       do IO<Q.DatagramConnection & Test.State>:
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.queue_quic_stream(conn,id,[byte],fin)
         Test.answer(Q.DatagramConnection,U32,raw,Test.queued)
+    case Test.EmptyFin{}:
+      do IO<Q.DatagramConnection & Test.State>:
+        raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.queue_quic_stream(conn,id,[],1)
+        Test.answer(Q.DatagramConnection,U32,raw,Test.queued)
+    case Test.FinAck{}:
+      do IO<Q.DatagramConnection & Test.State>:
+        raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.quic_stream_fin_acked(conn,id)
+        Test.answer(Q.DatagramConnection,U32,raw,value => Test.Flag{value})
+    case Test.PendingNotice{}:
+      do IO<Q.DatagramConnection & Test.State>:
+        IO.print("FIN_PENDING")
+        return (conn,Test.Complete{})
     case Test.Flush{}:
       do IO<Q.DatagramConnection & Test.State>:
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,U32> <- Q.flush_quic_stream(conn,id)
@@ -71,41 +83,43 @@ def perform(conn: Q.DatagramConnection, id: U32, action: Test.Action) -> Test.Re
         raw : Q.DatagramConnection & Result<&1,&1,U32 & String,Unit> <- Q.drop_quic_stream(conn,id)
         Test.answer(Q.DatagramConnection,Unit,raw,Test.complete)
 
-def exchange(conn: Q.DatagramConnection) -> IO(Unit):
-  Test.advance(~Q.DatagramConnection,~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,0,1,Test.scenarios(),4000n)
+def exchange(conn: Q.DatagramConnection, checks: List<&2,Test.Check>) -> IO(Unit):
+  Test.advance(~Q.DatagramConnection,~Test.Driver{Fixture.step,perform,Q.drop_quic_datagram},conn,0,1,checks,4000n)
 
-def accepted(pair: Q.QuicDatagramListener & Q.DatagramConnection) -> IO(Unit):
+def accepted(pair: Q.QuicDatagramListener & Q.DatagramConnection, checks: List<&2,Test.Check>) -> IO(Unit):
   (listener,conn) = pair
   do IO<Unit>:
-    exchange(conn)
+    exchange(conn,checks)
     Q.close_shared_quic(listener)
 
-def serve(bound: Q.QuicDatagramListener & U32) -> IO(Unit):
+def serve(bound: Q.QuicDatagramListener & U32, checks: List<&2,Test.Check>) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(U32.show(port))
     pair : Q.QuicDatagramListener & Q.DatagramConnection <- Fixture.server_accept(9000n,listener)
-    accepted(pair)
+    accepted(pair,checks)
 
-def command(host: String, port: Maybe<&2,U32>) -> IO(Unit):
+def command(host: String, port: Maybe<&2,U32>, checks: List<&2,Test.Check>) -> IO(Unit):
   match port:
     case Some{0}:
       do IO<Unit>:
         bound : Q.QuicDatagramListener & U32 <- IO.try(Q.QuicDatagramListener & U32,
           Q.bind_shared_quic(host,0,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn()))
-        serve(bound)
+        serve(bound,checks)
     case Some{port}:
       do IO<Unit>:
         conn : Q.DatagramConnection <- IO.try(Q.DatagramConnection,
           Q.connect(host,port,List.replicate(U32,32n,73),Fixture.public_key(False{}),Fixture.fixture_alpn(),5000n))
-        exchange(conn)
+        exchange(conn,checks)
     case None{}:
       IO.die(Unit,1,"expected a UDP port")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{host,Con{port,Nil{}}}}:
-      command(host,U32.read(port))
+      command(host,U32.read(port),Test.scenarios())
+    case Con{_,Con{host,Con{port,Con{"finish",Nil{}}}}}:
+      command(host,U32.read(port),Test.finish_checks())
     case _:
       IO.die(Unit,1,"expected an IP address and UDP port")
 

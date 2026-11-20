@@ -657,6 +657,19 @@ check-quic-datagram-cancel check-quic-multipath-cancel: check-%: $(BUILD)/iroh-b
 	@test -x "$(UPSTREAM_QUIC_STREAM_CANCEL)" || { echo 'Set UPSTREAM_QUIC_STREAM_CANCEL to the Iroh stream cancellation fixture.' >&2; exit 2; }
 	python3 -B tests/quic_stream_cancel.py "$<" "$(UPSTREAM_QUIC_STREAM_CANCEL)"
 
+.PHONY: check-quic-stream-finish check-quic-datagram-finish check-quic-multipath-finish
+UPSTREAM_QUIC_STREAM_FINISH ?=
+check-quic-stream-finish: check-quic-datagram-finish check-quic-multipath-finish
+
+.PHONY: check-quic-stream-finish-control
+check-quic-stream-finish-control:
+	@test -x "$(UPSTREAM_QUIC_STREAM_FINISH)" || { echo 'Set UPSTREAM_QUIC_STREAM_FINISH to the Iroh FIN acknowledgement fixture.' >&2; exit 2; }
+	sh tests/quic_stream_finish_control.sh "$(UPSTREAM_QUIC_STREAM_FINISH)"
+
+check-quic-datagram-finish check-quic-multipath-finish: check-%-finish: $(BUILD)/iroh-bend-%-cancel
+	@test -x "$(UPSTREAM_QUIC_STREAM_FINISH)" || { echo 'Set UPSTREAM_QUIC_STREAM_FINISH to the Iroh FIN acknowledgement fixture.' >&2; exit 2; }
+	python3 -B tests/quic_stream_finish.py "$<" "$(UPSTREAM_QUIC_STREAM_FINISH)"
+
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
 $(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend src/quic_stream.bend src/quic_nat.bend tools/nelua-effect.sh

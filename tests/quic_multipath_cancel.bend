@@ -28,6 +28,18 @@ def perform(conn: Q.MultipathConnection, id: U32, action: Test.Action) -> Test.R
       do IO<Q.MultipathConnection & Test.State>:
         raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.write_multipath_stream(conn,id,[byte],fin)
         Test.answer(Q.MultipathConnection,U32,raw,Test.queued)
+    case Test.EmptyFin{}:
+      do IO<Q.MultipathConnection & Test.State>:
+        raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.write_multipath_stream(conn,id,[],1)
+        Test.answer(Q.MultipathConnection,U32,raw,Test.queued)
+    case Test.FinAck{}:
+      do IO<Q.MultipathConnection & Test.State>:
+        raw : Q.MultipathConnection & Result<&1,&1,U32 & String,U32> <- Q.multipath_stream_fin_acked(conn,id)
+        Test.answer(Q.MultipathConnection,U32,raw,value => Test.Flag{value})
+    case Test.PendingNotice{}:
+      do IO<Q.MultipathConnection & Test.State>:
+        IO.print("FIN_PENDING")
+        return (conn,Test.Complete{})
     case Test.Flush{}:
       IO.pure(Q.MultipathConnection & Test.State,(conn,Test.Complete{}))
     case Test.Read{}:
@@ -63,41 +75,43 @@ def perform(conn: Q.MultipathConnection, id: U32, action: Test.Action) -> Test.R
         raw : Q.MultipathConnection & Result<&1,&1,U32 & String,Unit> <- Q.drop_multipath_stream(conn,id)
         Test.answer(Q.MultipathConnection,Unit,raw,Test.complete)
 
-def exchange(conn: Q.MultipathConnection) -> IO(Unit):
-  Test.advance(~Q.MultipathConnection,~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,0,1,Test.scenarios(),4000n)
+def exchange(conn: Q.MultipathConnection, checks: List<&2,Test.Check>) -> IO(Unit):
+  Test.advance(~Q.MultipathConnection,~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,0,1,checks,4000n)
 
-def accepted(pair: Q.MultipathListener & Q.MultipathConnection) -> IO(Unit):
+def accepted(pair: Q.MultipathListener & Q.MultipathConnection, checks: List<&2,Test.Check>) -> IO(Unit):
   (listener,conn) = pair
   do IO<Unit>:
-    exchange(conn)
+    exchange(conn,checks)
     Q.close_multipath_listener(listener)
 
-def serve(bound: Q.MultipathListener & U32) -> IO(Unit):
+def serve(bound: Q.MultipathListener & U32, checks: List<&2,Test.Check>) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(U32.show(port))
     pair : Q.MultipathListener & Q.MultipathConnection <- Listener.accept(9000n,listener)
-    accepted(pair)
+    accepted(pair,checks)
 
-def command(host: String, port: Maybe<&2,U32>) -> IO(Unit):
+def command(host: String, port: Maybe<&2,U32>, checks: List<&2,Test.Check>) -> IO(Unit):
   match port:
     case Some{0}:
       do IO<Unit>:
         bound : Q.MultipathListener & U32 <- IO.try(Q.MultipathListener & U32,
           Q.bind_multipath_bytes(host,0,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn()))
-        serve(bound)
+        serve(bound,checks)
     case Some{port}:
       do IO<Unit>:
         conn : Q.MultipathConnection <- IO.try(Q.MultipathConnection,
           Q.connect_multipath_bytes(host,port,List.replicate(U32,32n,73),Fixture.fixture_key(0),Fixture.text_alpn(),5000n))
-        exchange(conn)
+        exchange(conn,checks)
     case None{}:
       IO.die(Unit,1,"expected a UDP port")
 
 def run(args: List<String>) -> IO(Unit):
   match args:
     case Con{_,Con{host,Con{port,Nil{}}}}:
-      command(host,U32.read(port))
+      command(host,U32.read(port),Test.scenarios())
+    case Con{_,Con{host,Con{port,Con{"finish",Nil{}}}}}:
+      command(host,U32.read(port),Test.finish_checks())
     case _:
       IO.die(Unit,1,"expected an IP address and UDP port")
 

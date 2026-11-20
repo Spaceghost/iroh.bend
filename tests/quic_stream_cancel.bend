@@ -6,6 +6,9 @@ type Action is Data:
   Accept{direction: U32}
   Write{byte: U32, fin: U32}
   Flush{}
+  EmptyFin{}
+  FinAck{}
+  PendingNotice{}
   Read{}
   SendDatagram{byte: U32}
   ReadDatagram{}
@@ -21,6 +24,7 @@ type State is Data:
   Handle{id: U32}
   Byte{value: U32}
   Fin{}
+  Flag{value: U32}
   NoCode{}
   Code{value: Wire.VarInt}
   Error{number: U32, message: String}
@@ -36,7 +40,7 @@ def scenarios() -> List<&2,Check>:
   [Check{Open{0},Handle{0}},Check{Write{1,0},Complete{}},Check{Flush{},Complete{}},
    Check{ReadDatagram{},Byte{11}},Check{PeerStop{},NoCode{}},Check{PeerReset{},NoCode{}},
    Check{Reset{Wire.Var{1073741824,0}},Error{22,""}},Check{Reset{max},Complete{}},
-   Check{Reset{zero},Error{32,""}},Check{Write{7,0},Error{32,""}},
+   Check{Reset{zero},Error{32,""}},Check{FinAck{},Error{32,""}},Check{Write{7,0},Error{32,""}},
    Check{Read{},Byte{101}},Check{Read{},Fin{}},Check{Stop{zero},Error{32,""}},Check{Drop{},Complete{}},
    Check{Open{0},Handle{0}},Check{Write{2,0},Complete{}},Check{Flush{},Complete{}},
    Check{ReadDatagram{},Byte{12}},Check{Stop{Wire.Var{1073741824,0}},Error{22,""}},
@@ -46,7 +50,7 @@ def scenarios() -> List<&2,Check>:
    Check{PeerReset{},Code{zero}},Check{Read{},Error{104,""}},Check{Read{},Fin{}},Check{PeerReset{},Code{zero}},Check{Stop{zero},Error{32,""}},Check{PeerStop{},NoCode{}},
    Check{Write{103,1},Complete{}},Check{Flush{},Complete{}},Check{Drop{},Complete{}},
    Check{Accept{0},Handle{0}},Check{Read{},Byte{4}},Check{Write{44,0},Complete{}},Check{Flush{},Complete{}},
-   Check{PeerStop{},Code{Wire.Var{1,17}}},Check{Write{7,0},Error{32,""}},
+   Check{PeerStop{},Code{Wire.Var{1,17}}},Check{FinAck{},Error{32,""}},Check{Write{7,0},Error{32,""}},
    Check{Read{},Byte{104}},Check{Read{},Fin{}},Check{Drop{},Complete{}},
    Check{Open{1},Handle{0}},Check{Stop{zero},Error{32,""}},Check{Reset{Wire.Var{0,63}},Complete{}},
    Check{Drop{},Complete{}},Check{Accept{1},Handle{0}},Check{Reset{zero},Error{32,""}},
@@ -57,6 +61,19 @@ def scenarios() -> List<&2,Check>:
    Check{Accept{0},Handle{0}},Check{Read{},Byte{6}},Check{Reset{zero},Complete{}},
    Check{Stop{max},Complete{}},Check{Drop{},Complete{}},
    Check{SendDatagram{250},Complete{}},Check{ReadDatagram{},Byte{251}}]
+
+def finish_checks() -> List<&2,Check>:
+  [Check{Open{0},Handle{0}},Check{FinAck{},Flag{0}},Check{Write{31,0},Complete{}},Check{Flush{},Complete{}},
+   Check{ReadDatagram{},Byte{41}},Check{Write{32,1},Complete{}},Check{Flush{},Complete{}},
+   Check{FinAck{},Flag{0}},Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},
+   Check{Reset{Wire.Var{0,1}},Error{32,""}},Check{SendDatagram{42},Complete{}},
+   Check{Read{},Byte{33}},Check{Read{},Fin{}},Check{FinAck{},Flag{1}},Check{Drop{},Complete{}},
+   Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},Check{FinAck{},Flag{0}},
+   Check{EmptyFin{},Complete{}},Check{Flush{},Complete{}},Check{FinAck{},Flag{0}},
+   Check{PendingNotice{},Complete{}},Check{FinAck{},Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}},
+   Check{SendDatagram{52},Complete{}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{53}},
+   Check{Accept{1},Handle{0}},Check{FinAck{},Error{32,""}},Check{Read{},Byte{61}},
+   Check{Read{},Fin{}},Check{Drop{},Complete{}},Check{SendDatagram{63},Complete{}},Check{ReadDatagram{},Byte{64}}]
 
 def Reply(-C: Type) -> Type:
   IO(C & State)
@@ -116,6 +133,8 @@ def matches(want: State, actual: State) -> Bool:
       U32.is_eq(v,w)
     case Fin{} Fin{}:
       True{}
+    case Flag{v} Flag{w}:
+      U32.is_eq(v,w)
     case NoCode{} NoCode{}:
       True{}
     case Code{Wire.Var{a,b}} Code{Wire.Var{c,d}}:
@@ -130,6 +149,8 @@ def waiting(actual: State, want: State) -> Bool:
     case Pending{} _:
       True{}
     case NoCode{} Code{_}:
+      True{}
+    case Flag{0} Flag{1}:
       True{}
     case _ _:
       False{}
@@ -148,7 +169,7 @@ def finish(-C: Type, engine: Driver<C>, conn: C) -> IO(Unit):
   Driver{_,_,close} = engine
   do IO<Unit>:
     close(conn)
-    IO.print("PASS both directions of stream cancellation and datagrams on the original connection")
+    IO.print("PASS stream checks and datagrams on the original connection")
 
 def apply_check(-C: Type, engine: Driver<C>, conn: C, id: U32, check: Check) -> Reply(C):
   Driver{step,apply,_} = engine
@@ -172,7 +193,7 @@ def failure(-C: Type, engine: Driver<C>, conn: C, index: U32, status: State) -> 
   Driver{_,_,close} = engine
   do IO<Unit>:
     close(conn)
-    IO.print(String.append("stream cancellation check ",U32.show(index)))
+    IO.print(String.append("stream check ",U32.show(index)))
     report(status)
 
 def verdict(-C: Type, conn: C, id: U32, actual: State, equal: Bool, pending: Bool,
