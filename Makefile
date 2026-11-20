@@ -255,7 +255,7 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
-.PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener
+.PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-endpoint-multipath
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -287,6 +287,13 @@ PICOQUIC_BUILD ?=
 PICOTLS_BUILD ?= $(PICOQUIC_BUILD)/_deps/picotls-build
 UPSTREAM_QUIC_MULTIPATH ?=
 UPSTREAM_QUIC_MULTIPATH_DIAL ?=
+UPSTREAM_ENDPOINT_MULTIPATH ?=
+PICOQUIC_FLAGS = -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include"
+PICOQUIC_LIBS = -Wl,--wrap=ptls_handle_message -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
+	"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
+	"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group
+MULTIPATH_CURL_CFLAGS ?= $$($(PKG_CONFIG) --cflags libcurl)
+MULTIPATH_CURL_LIBS ?= $$($(PKG_CONFIG) --libs libcurl)
 
 check-picoquic-multipath: check-quic-multipath
 
@@ -298,6 +305,26 @@ check-quic-multipath-listener: $(BUILD)/iroh-bend-quic-multipath-listener $(BUIL
 	@test -x "$(UPSTREAM_QUIC_MULTIPATH_DIAL)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH_DIAL to the Iroh multipath dialer.' >&2; exit 2; }
 	python3 -B tests/quic_multipath_listener.py "$(BUILD)/iroh-bend-quic-multipath-listener" \
 		"$(UPSTREAM_QUIC_MULTIPATH_DIAL)" "$(BUILD)/iroh-bend-quic-multipath"
+
+check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
+	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh endpoint multipath fixture.' >&2; exit 2; }
+	python3 -B tests/endpoint_multipath.py "$(BUILD)/iroh-bend-endpoint-multipath" \
+		"$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(if $(UPSTREAM_IROH_RELAY_URL),$(RELAY_URL))" "$(UPSTREAM_IROH_RELAY_URL)"
+
+$(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend tests/quic_multipath_bend.bend src/endpoint_multipath.bend src/quic_multipath.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS) quic_multipath)) tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/endpoint-multipath-stage/src" "$(BUILD)/endpoint-multipath-stage/tests"
+	cp $(RELAY_QUIC_SOURCES) src/endpoint_multipath.bend src/quic_multipath.bend "$(BUILD)/endpoint-multipath-stage/src/"
+	cp tests/endpoint_multipath.bend tests/quic_multipath_bend.bend "$(BUILD)/endpoint-multipath-stage/tests/"
+	for native in $(RELAY_QUIC_EFFECTS) quic_multipath; do \
+		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "src/$$native.nelua" \
+			"$(abspath $(BUILD)/endpoint-multipath-stage/src)/$$native.c" || exit; \
+	done
+	cd "$(BUILD)/endpoint-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/endpoint_multipath.bend -o "$(abspath $@)"
+
+$(BUILD)/iroh-bend-endpoint-multipath: $(BUILD)/endpoint-multipath.c
+	$(CLANG) -std=gnu11 -O2 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
+		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
+		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
 
 $(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_multipath.nelua tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/quic-multipath-stage/src" "$(BUILD)/quic-multipath-stage/tests"
@@ -321,11 +348,8 @@ $(BUILD)/iroh-bend-quic-multipath $(BUILD)/iroh-bend-quic-multipath-listener:
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }
-	$(CLANG) -std=gnu11 -O2 -I"$(PICOQUIC_SOURCE)/picoquic" -I"$(PICOTLS_SOURCE)/include" \
-		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" \
-		-Wl,--wrap=ptls_handle_message -Wl,--start-group "$(PICOQUIC_BUILD)/libpicoquic-core.a" \
-		"$(PICOTLS_BUILD)/libpicotls-core.a" "$(PICOTLS_BUILD)/libpicotls-minicrypto.a" \
-		"$(PICOTLS_BUILD)/libpicotls-openssl.a" -Wl,--end-group \
+	$(CLANG) -std=gnu11 -O2 $(PICOQUIC_FLAGS) \
+		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $$($(PKG_CONFIG) --libs openssl)
 
 $(BUILD)/quic-datagram.c: tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua tools/nelua-effect.sh
