@@ -255,7 +255,7 @@ $(BUILD)/iroh-bend-relay-server: $(BUILD)/relay-server.c
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libwebsockets)
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
-.PHONY: check-picoquic-multipath
+.PHONY: check-picoquic-multipath check-quic-multipath
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -287,15 +287,21 @@ PICOQUIC_BUILD ?=
 PICOTLS_BUILD ?= $(PICOQUIC_BUILD)/_deps/picotls-build
 UPSTREAM_QUIC_MULTIPATH ?=
 
-check-picoquic-multipath: $(BUILD)/iroh-bend-picoquic-multipath
+check-picoquic-multipath: check-quic-multipath
+
+check-quic-multipath: $(BUILD)/iroh-bend-quic-multipath
 	@test -x "$(UPSTREAM_QUIC_MULTIPATH)" || { echo 'Set UPSTREAM_QUIC_MULTIPATH to the Iroh multipath fixture.' >&2; exit 2; }
-	sh tests/quic_multipath.sh "$(BUILD)/iroh-bend-picoquic-multipath" "$(UPSTREAM_QUIC_MULTIPATH)"
+	sh tests/quic_multipath.sh "$(BUILD)/iroh-bend-quic-multipath" "$(UPSTREAM_QUIC_MULTIPATH)"
 
-$(BUILD)/picoquic-multipath.c: tests/quic_multipath.nelua
-	mkdir -p "$(BUILD)"
-	$(NELUA) --code --cache-dir "$(abspath $(BUILD)/nelua)" -o "$@" "$<"
+$(BUILD)/quic-multipath.c: tests/quic_multipath_bend.bend src/quic_multipath.bend src/quic_multipath.nelua tools/nelua-effect.sh
+	mkdir -p "$(BUILD)/quic-multipath-stage/src" "$(BUILD)/quic-multipath-stage/tests"
+	cp src/quic_multipath.bend "$(BUILD)/quic-multipath-stage/src/"
+	cp tests/quic_multipath_bend.bend "$(BUILD)/quic-multipath-stage/tests/"
+	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/quic_multipath.nelua \
+		"$(abspath $(BUILD)/quic-multipath-stage/src/quic_multipath.c)"
+	cd "$(BUILD)/quic-multipath-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/quic_multipath_bend.bend -o "$(abspath $@)"
 
-$(BUILD)/iroh-bend-picoquic-multipath: $(BUILD)/picoquic-multipath.c
+$(BUILD)/iroh-bend-quic-multipath: $(BUILD)/quic-multipath.c
 	@test -f "$(PICOQUIC_SOURCE)/picoquic/picoquic.h" && test -f "$(PICOTLS_SOURCE)/include/picotls.h" \
 		&& test -f "$(PICOQUIC_BUILD)/libpicoquic-core.a" && test -f "$(PICOTLS_BUILD)/libpicotls-core.a" \
 		|| { echo 'Set PICOQUIC_SOURCE, PICOTLS_SOURCE, PICOQUIC_BUILD, and PICOTLS_BUILD.' >&2; exit 2; }

@@ -1,0 +1,815 @@
+## pragmas.noentrypoint = true
+## pragmas.nogc = true
+## cinclude '<picoquic.h>'
+## cinclude '<picoquic_internal.h>'
+## cinclude '<picotls.h>'
+## cinclude '<picotls/openssl.h>'
+## cinclude '<openssl/evp.h>'
+## cinclude '<arpa/inet.h>'
+## cinclude '<unistd.h>'
+## cinclude '<errno.h>'
+## cinclude '<stdlib.h>'
+require 'C.stdlib'
+require 'C.string'
+local quic_t <cimport,nodecl,codename 'picoquic_quic_t'> = @record{tls_master_ctx: pointer}
+local path_t <cimport,nodecl,codename 'picoquic_path_t'> = @record{unique_path_id:uint64}
+local cnx_t <cimport,nodecl,codename 'picoquic_cnx_t'> = @record{
+  is_multipath_enabled:cuint,nb_paths:cint,path:**path_t,nb_bytes_queued:uint64
+}
+local tls_t <cimport,nodecl,codename 'ptls_t'> = @record{}
+local buffer_t <cimport,nodecl,codename 'ptls_buffer_t'> = @record{}
+local iov_t <cimport,nodecl,codename 'ptls_iovec_t'> = @record{base:*uint8,len:csize}
+local ext_t <cimport,nodecl,codename 'ptls_raw_extension_t'> = @record{type:uint16,data:iov_t}
+local props_t <cimport,nodecl,codename 'ptls_handshake_properties_t'> = @record{additional_extensions:*ext_t}
+local evp_t <cimport,nodecl,codename 'EVP_PKEY'> = @record{}
+local verify_t <cimport,nodecl,codename 'ptls_verify_certificate_t'> = @record{cb:pointer,algos:pointer}
+local context_t <cimport,nodecl,codename 'ptls_context_t'> = @record{
+  use_raw_public_keys:cuint,sign_certificate:pointer,verify_certificate:*verify_t
+}
+local pin_t <cimport,nodecl,codename 'ptls_openssl_raw_pubkey_verify_certificate_t'> = @record{
+  super:verify_t,expected_pubkey:*evp_t
+}
+## cdefine 'iroh_mp_v4 struct sockaddr_in'
+## cdefine 'iroh_mp_v6 struct sockaddr_in6'
+## cdefine 'iroh_mp_sock_store struct sockaddr_storage'
+## cdefine 'IROH_MP_V4_SIZE sizeof(struct sockaddr_in)'
+## cdefine 'IROH_MP_V6_SIZE sizeof(struct sockaddr_in6)'
+## cdefine 'IROH_MP_STORAGE_SIZE sizeof(struct sockaddr_storage)'
+## cdefine 'IROH_MP_PIN_MISMATCH (PICOQUIC_TRANSPORT_CRYPTO_ERROR(PTLS_ALERT_BAD_CERTIFICATE))'
+## cdefine 'iroh_mp_ipv4 struct in_addr'
+## cdefine 'IROH_MP_SIGN_SIZE sizeof(ptls_openssl_sign_certificate_t)'
+local IROH_MP_SIGN_SIZE:csize <cimport,nodecl>
+local IROH_MP_V4_SIZE:cuint <cimport,nodecl>
+local IROH_MP_V6_SIZE:cuint <cimport,nodecl>
+local IROH_MP_STORAGE_SIZE:cuint <cimport,nodecl>
+local IROH_MP_PIN_MISMATCH:uint64 <cimport,nodecl>
+local signer_t <cimport,nodecl,codename 'ptls_openssl_sign_certificate_t'> = @record{}
+local function ptls_openssl_init_sign_certificate(signer:*signer_t,key:*evp_t):cint <cimport,nodecl> end
+local ip_t <cimport,nodecl,codename 'iroh_mp_ipv4'> = @record{s_addr:uint32}
+local addr_t <cimport,nodecl,codename 'iroh_mp_v4'> = @record{sin_family:uint16,sin_port:uint16,sin_addr:ip_t}
+local addr6_t <cimport,nodecl,codename 'iroh_mp_v6'> = @record{sin6_family:uint16,sin6_port:uint16,sin6_addr:[16]uint8}
+local storage_t <cimport,nodecl,codename 'iroh_mp_sock_store'> = @record{ss_family:uint16,padding:[118]uint8,alignment:uint64}
+
+local function ptls_get_context(tls:*tls_t):*context_t <cimport,nodecl> end
+local function ptls_is_server(tls:*tls_t):cint <cimport,nodecl> end
+local function real_tls(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer, len:csize,
+    props:*props_t):cint <cimport,codename '__real_ptls_handle_message'> end
+
+local function picoquic_current_time():uint64 <cimport,nodecl> end
+local function picoquic_create(max:uint32, cert:cstring,key:cstring,ca:cstring,alpn:cstring, cb:pointer, cbctx:pointer,
+    cidcb:pointer,cidctx:pointer,seed:pointer, now:uint64, sim:pointer,tickets:cstring,enckey:pointer,enclen:csize):*quic_t <cimport,nodecl> end
+local function picoquic_set_default_multipath_option(quic:*quic_t, enabled:cint) <cimport,nodecl> end
+local function picoquic_set_verify_certificate_callback(quic:*quic_t, verify:*verify_t, dispose:pointer) <cimport,nodecl> end
+local function picoquic_set_client_cert_verification_policy(quic:*quic_t, strict:cint) <cimport,nodecl> end
+local function picoquic_set_tls_certificate_chain(quic:*quic_t, certs:*iov_t, count:csize) <cimport,nodecl> end
+local function picoquic_create_client_cnx(quic:*quic_t, peer:pointer,time:uint64,version:uint32,sni:cstring,alpn:cstring,cb:pointer,ctx:pointer):*cnx_t <cimport,nodecl> end
+local function picoquic_enable_path_callbacks(cnx:*cnx_t, enabled:cint) <cimport,nodecl> end
+local function picoquic_probe_new_path(cnx:*cnx_t, peer:pointer, src:pointer,time:uint64):cint <cimport,nodecl> end
+local function picoquic_set_stream_path_affinity(cnx:*cnx_t,id:uint64,path:uint64):cint <cimport,nodecl> end
+local function picoquic_get_next_local_stream_id(cnx:*cnx_t, uni:cint):uint64 <cimport,nodecl> end
+local function picoquic_add_to_stream(cnx:*cnx_t,id:uint64, data:pointer,count:csize,fin:cint):cint <cimport,nodecl> end
+local function picoquic_incoming_packet(quic:*quic_t, data:*uint8,size:csize, src:pointer,dst:pointer,idx:cint,ecn:uint8,time:uint64):cint <cimport,nodecl> end
+local function picoquic_prepare_packet(cnx:*cnx_t,time:uint64,out:*uint8,cap:csize,len:*csize,peer:*storage_t,src:*storage_t,
+    index:*cint):cint <cimport,nodecl> end
+local function picoquic_get_local_error(cnx:*cnx_t):uint64 <cimport,nodecl> end
+local function picoquic_free(quic:*quic_t) <cimport,nodecl> end
+local function EVP_PKEY_new_raw_private_key_ex(ctx:pointer, name:cstring, props:cstring, key:*uint8,n:csize):*evp_t <cimport,nodecl> end
+local function EVP_PKEY_new_raw_public_key_ex(ctx:pointer, name:cstring, props:cstring, key:*uint8,n:csize):*evp_t <cimport,nodecl> end
+local function EVP_PKEY_free(key:*evp_t) <cimport,nodecl> end
+local function i2d_PUBKEY(key:*evp_t, out:**uint8):cint <cimport,nodecl> end
+local function ptls_openssl_raw_pubkey_init_verify_certificate(pin:*pin_t, pubkey:*evp_t):cint <cimport,nodecl> end
+local function ptls_openssl_raw_pubkey_dispose_verify_certificate(pin:*pin_t) <cimport,nodecl> end
+local function socket(domain:cint,kind:cint,protocol:cint):cint <cimport,nodecl> end
+local function connect(fd:cint, addr:pointer, size:cuint):cint <cimport,nodecl> end
+local function getsockname(fd:cint, addr:pointer, size:*cuint):cint <cimport,nodecl> end
+local function close(fd:cint):cint <cimport,nodecl> end
+local function recv(fd:cint, data:pointer,size:csize,flags:cint):isize <cimport,nodecl> end
+local function send(fd:cint, data:pointer,size:csize,flags:cint):isize <cimport,nodecl> end
+local function htons(port:uint16):uint16 <cimport,nodecl> end
+local function inet_pton(family:cint,s:cstring,addr:pointer):cint <cimport,nodecl> end
+local AF_INET:cint <cimport,nodecl>
+local AF_INET6:cint <cimport,nodecl>
+local SOCK_DGRAM:cint <cimport,nodecl>
+local SOCK_NONBLOCK:cint <cimport,nodecl>
+local SOCK_CLOEXEC:cint <cimport,nodecl>
+local picoquic_callback_ready:cint <cimport,nodecl>
+local picoquic_callback_path_available:cint <cimport,nodecl>
+local picoquic_callback_stream_fin:cint <cimport,nodecl>
+local picoquic_callback_stream_data:cint <cimport,nodecl>
+
+local function picoquic_close(cnx: *cnx_t, reason: uint64): cint <cimport,nodecl> end
+local function picoquic_compare_addr(expected: pointer, actual: pointer): cint <cimport,nodecl> end
+local function picoquic_set_app_stream_ctx(cnx: *cnx_t, id: uint64, ctx: pointer): cint <cimport,nodecl> end
+local function picoquic_unlink_app_stream_ctx(cnx: *cnx_t, id: uint64) <cimport,nodecl> end
+local function picoquic_abandon_path(cnx: *cnx_t, id: uint64, reason: uint64, now: uint64): cint <cimport,nodecl> end
+local function picoquic_reset_stream(cnx: *cnx_t, id: uint64, code: uint64): cint <cimport,nodecl> end
+local function picoquic_stop_sending(cnx: *cnx_t, id: uint64, code: uint64): cint <cimport,nodecl> end
+local function bind(fd: cint, address: pointer, size: cuint): cint <cimport,nodecl> end
+local picoquic_callback_path_suspended: cint <cimport,nodecl>
+local picoquic_callback_path_deleted: cint <cimport,nodecl>
+local picoquic_callback_stream_reset: cint <cimport,nodecl>
+local picoquic_callback_stop_sending: cint <cimport,nodecl>
+local picoquic_callback_close: cint <cimport,nodecl>
+local picoquic_callback_application_close: cint <cimport,nodecl>
+local picoquic_callback_stateless_reset: cint <cimport,nodecl>
+local PICOQUIC_ERROR_PATH_ID_BLOCKED: cint <cimport,nodecl>
+local PICOQUIC_ERROR_PATH_CID_BLOCKED: cint <cimport,nodecl>
+local errno: cint <cimport,nodecl>
+local EAGAIN: cint <cimport,nodecl>
+local EINTR: cint <cimport,nodecl>
+local ECONNREFUSED: cint <cimport,nodecl>
+local ENETUNREACH: cint <cimport,nodecl>
+local EHOSTUNREACH: cint <cimport,nodecl>
+local EBADF: uint32 <cimport,nodecl>
+local EINVAL: uint32 <cimport,nodecl>
+local ENOMEM: uint32 <cimport,nodecl>
+local EIO: uint32 <cimport,nodecl>
+local EACCES: uint32 <cimport,nodecl>
+local ENOTSUP: uint32 <cimport,nodecl>
+local ECONNRESET: uint32 <cimport,nodecl>
+local EPIPE: uint32 <cimport,nodecl>
+local ENOBUFS: uint32 <cimport,nodecl>
+local PTLS_ALERT_BAD_CERTIFICATE: cint <cimport,nodecl>
+
+##[[
+local names = {
+  'start_multipath', 'step_multipath', 'probe_multipath', 'multipath_status',
+  'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
+  'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
+  'MultipathConnection', 'MultipathReadPending', 'MultipathReadFin', 'MultipathReadBytes',
+  'Some', 'None', 'Unit', 'Con', 'Nil'
+}
+for _, name in ipairs(names) do
+  cinclude(string.format(
+    '#ifdef CID(%s)\n#define iroh_mp_%s CID(%s)\n#else\n#define iroh_mp_%s UINT32_MAX\n#endif',
+    name,name,name,name))
+end
+]]
+local iroh_mp_start_multipath: uint32 <cimport,nodecl>
+local iroh_mp_step_multipath: uint32 <cimport,nodecl>
+local iroh_mp_probe_multipath: uint32 <cimport,nodecl>
+local iroh_mp_multipath_status: uint32 <cimport,nodecl>
+local iroh_mp_open_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_assign_stream_path: uint32 <cimport,nodecl>
+local iroh_mp_write_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_read_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_drop_multipath_stream: uint32 <cimport,nodecl>
+local iroh_mp_close_multipath: uint32 <cimport,nodecl>
+local iroh_mp_MultipathConnection: uint32 <cimport,nodecl>
+local iroh_mp_MultipathReadPending: uint32 <cimport,nodecl>
+local iroh_mp_MultipathReadFin: uint32 <cimport,nodecl>
+local iroh_mp_MultipathReadBytes: uint32 <cimport,nodecl>
+local iroh_mp_Some: uint32 <cimport,nodecl>
+local iroh_mp_None: uint32 <cimport,nodecl>
+local iroh_mp_Unit: uint32 <cimport,nodecl>
+local iroh_mp_Con: uint32 <cimport,nodecl>
+local iroh_mp_Nil: uint32 <cimport,nodecl>
+
+local Env <cimport,nodecl> = @record{mem: *[0]uint64}
+local IoWork <cimport,nodecl> = @record{}
+local Term = @uint64
+local Effect = @function(Env,*[0]Term,*IoWork): Term
+local function io_eff(tag: uint32, run: Effect) <cimport,nodecl> end
+local function io_cstr(e: Env, term: Term, size: *uint64): cstring <cimport,nodecl> end
+local function io_nul(value: cstring, size: uint64): boolean <cimport,nodecl> end
+local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
+local function io_fail(e: Env, code: uint32, message: cstring): Term <cimport,nodecl> end
+local function io_tup(e: Env, a: Term, b: Term): Term <cimport,nodecl> end
+local function io_box(e: Env, tag: uint64, value: Term): Term <cimport,nodecl> end
+local function io_list(e: Env, bytes: cstring, size: uint64): Term <cimport,nodecl> end
+local function term_pak(tag: uint64, value: uint64): Term <cimport,nodecl> end
+local function term_aux(t: Term): uint64 <cimport,nodecl> end
+local function term_loc(t: Term): uint64 <cimport,nodecl> end
+local function term_tag(t: Term): uint64 <cimport,nodecl> end
+local function term_peek(mem: *[0]Term, t: Term): uint64 <cimport,nodecl> end
+local function ctr_take(e: Env, t: Term, size: uint32, fields: *Term): uint64 <cimport,nodecl> end
+local function spare_free(e: Env, class: uint32, loc: uint64) <cimport,nodecl> end
+local function cls_fit(size: uint32): uint32 <cimport,nodecl> end
+local TAG_CTR: uint64 <cimport,nodecl>
+local TAG_PAK: uint64 <cimport,nodecl>
+
+local IO_CAPACITY: csize <comptime> = 1536
+local STREAM_CHUNK: csize <comptime> = 65536
+local RX_LIMIT: csize <comptime> = 4 * 1024 * 1024
+local TX_LIMIT: uint64 <comptime> = 4 * 1024 * 1024
+local PATH_LIMIT: uint32 <comptime> = 8
+local STREAM_LIMIT: uint32 <comptime> = 128
+local Path = @record{
+  next: pointer, fd: cint, local_addr: storage_t, peer: storage_t,
+  id: uint32, status: uint32
+}
+local Stream = @record{
+  next: pointer, id: uint32, rx: *[0]uint8, size: csize,
+  fin: boolean, sent_fin: boolean, reset: boolean, stop: boolean
+}
+local Connection = @record{
+  next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
+  paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
+  received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
+  ready: boolean, closed: boolean, buffer_error: boolean
+}
+local connections: *Connection
+local next_connection: uint32 = 1
+
+local function bytes_from_list(e: Env, item: Term, out: *uint8, limit: csize): isize
+  local bytes = (@*[0]uint8)(out)
+  local size: csize = 0
+  while term_tag(item) == TAG_CTR and term_aux(item) == iroh_mp_Con do
+    local cells: [2]Term
+    local location = ctr_take(e,item,2,&cells[0])
+    if location ~= 0 then spare_free(e,cls_fit(2),location) end
+    if size >= limit then return -2 end
+    if cells[0] > 255 then return -1 end
+    bytes[size] = (@uint8)(cells[0])
+    size = size + 1
+    item = cells[1]
+  end
+  if term_aux(item) ~= iroh_mp_Nil then return -1 end
+  return (@isize)(size)
+end
+
+local VerifyCallback = @function(*verify_t,*tls_t,cstring,pointer,pointer,*iov_t,csize): cint
+local PinnedKey = @record{backend: pin_t, original: VerifyCallback}
+
+local function verify_raw(self: *verify_t, tls: *tls_t, server: cstring,
+    verify_sign: pointer, verify_data: pointer, certs: *iov_t, count: csize): cint
+  if count ~= 1 then return PTLS_ALERT_BAD_CERTIFICATE end
+  local pin = (@*PinnedKey)(self)
+  return pin.original(self,tls,server,verify_sign,verify_data,certs,count)
+end
+
+local function free_pin(verify: *verify_t)
+  local pin = (@*PinnedKey)(verify)
+  ptls_openssl_raw_pubkey_dispose_verify_certificate(&pin.backend)
+  C.free(pin)
+end
+
+local function install_identity(quic: *quic_t, seed: *uint8, peer: *uint8): boolean
+  local private = EVP_PKEY_new_raw_private_key_ex(nilptr,'ED25519',nilptr,seed,32)
+  if private == nilptr then return false end
+  defer EVP_PKEY_free(private) end
+  local ctx = (@*context_t)(quic.tls_master_ctx)
+  local signer = (@*signer_t)(C.malloc(IROH_MP_SIGN_SIZE))
+  if signer == nilptr then return false end
+  if ptls_openssl_init_sign_certificate(signer,private) ~= 0 then
+    C.free(signer)
+    return false
+  end
+  ctx.sign_certificate = signer
+  local cert = (@*iov_t)(C.malloc(#iov_t))
+  if cert == nilptr then return false end
+  cert.base = (@*uint8)(C.malloc(44))
+  if cert.base == nilptr then
+    C.free(cert)
+    return false
+  end
+  local out = cert.base
+  if i2d_PUBKEY(private,&out) ~= 44 then
+    C.free(cert.base)
+    C.free(cert)
+    return false
+  end
+  cert.len = 44
+  picoquic_set_tls_certificate_chain(quic,cert,1)
+  local public = EVP_PKEY_new_raw_public_key_ex(nilptr,'ED25519',nilptr,peer,32)
+  if public == nilptr then return false end
+  defer EVP_PKEY_free(public) end
+  local pin = (@*PinnedKey)(C.calloc(1,#PinnedKey))
+  if pin == nilptr then return false end
+  if ptls_openssl_raw_pubkey_init_verify_certificate(&pin.backend,public) ~= 0 then
+    C.free(pin)
+    return false
+  end
+  pin.original = (@VerifyCallback)(pin.backend.super.cb)
+  pin.backend.super.cb = (@pointer)(verify_raw)
+  picoquic_set_verify_certificate_callback(quic,&pin.backend.super,(@pointer)(free_pin))
+  picoquic_set_client_cert_verification_policy(quic,1)
+  ctx.use_raw_public_keys = 1
+  return true
+end
+
+local function with_rpk_offer(tls:*tls_t, buf:*buffer_t, offsets:*csize, epoch:csize, bytes:pointer,len:csize,
+    props:*props_t):cint <cexport,codename '__wrap_ptls_handle_message'>
+  local context = ptls_get_context(tls)
+  if ptls_is_server(tls) ~= 0 or context.verify_certificate == nilptr or
+      context.verify_certificate.cb ~= (@pointer)(verify_raw) or
+      props == nilptr or props.additional_extensions == nilptr then
+    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  end
+  -- Offer the client raw key on every ClientHello, including after HelloRetryRequest.
+  -- RFC 7250 client_certificate_type contains a single RawPublicKey entry.
+  local offer: [2]uint8 = {1,2}
+  local extensions:[3]ext_t
+  local original = props.additional_extensions
+  local upstream = (@*[0]ext_t)(original)
+  if upstream[0].type ~= 57 or upstream[1].type ~= 65535 then
+    return real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  end
+  extensions[0] = upstream[0]
+  extensions[1] = {type=19,data={base=&offer[0],len=2}}
+  extensions[2] = {type=65535}
+  props.additional_extensions = &extensions[0]
+  local result = real_tls(tls,buf,offsets,epoch,bytes,len,props)
+  props.additional_extensions = original
+  return result
+end
+
+local function address(host: cstring, port: uint16, out: *storage_t): cuint
+  local v4 = (@*addr_t)(out)
+  if inet_pton(AF_INET,host,&v4.sin_addr) == 1 then
+    v4.sin_family = (@uint16)(AF_INET)
+    v4.sin_port = htons(port)
+    return IROH_MP_V4_SIZE
+  end
+  local v6 = (@*addr6_t)(out)
+  if inet_pton(AF_INET6,host,&v6.sin6_addr) ~= 1 then return 0 end
+  v6.sin6_family = (@uint16)(AF_INET6)
+  v6.sin6_port = htons(port)
+  return IROH_MP_V6_SIZE
+end
+
+local function release_path(path: *Path)
+  if path.fd >= 0 then close(path.fd) end
+  C.free(path)
+end
+
+local function open_path(peer: *storage_t, size: cuint, source: *storage_t, source_size: cuint): (*Path,uint32)
+  local path = (@*Path)(C.calloc(1,#Path))
+  if path == nilptr then return nilptr,ENOMEM end
+  path.fd = socket((@cint)(peer.ss_family),SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0)
+  local local_size = IROH_MP_STORAGE_SIZE
+  if path.fd < 0 or (source ~= nilptr and bind(path.fd,source,source_size) ~= 0) or
+      connect(path.fd,peer,size) ~= 0 or getsockname(path.fd,&path.local_addr,&local_size) ~= 0 then
+    local error = (@uint32)(errno)
+    release_path(path)
+    return nilptr,error
+  end
+  path.peer = (@*[0]storage_t)(peer)[0]
+  return path,0
+end
+
+local function find_path(conn: *Connection, id: uint64): *Path
+  local path = conn.paths
+  while path ~= nilptr and path.id ~= id do path = (@*Path)(path.next) end
+  return path
+end
+
+local function find_stream(conn: *Connection, id: uint64): *Stream
+  local stream = conn.streams
+  while stream ~= nilptr and stream.id ~= id do stream = (@*Stream)(stream.next) end
+  return stream
+end
+
+local function destroy(conn: *Connection)
+  if conn.quic ~= nilptr then picoquic_free(conn.quic) end
+  while conn.paths ~= nilptr do
+    local path = conn.paths
+    conn.paths = (@*Path)(path.next)
+    release_path(path)
+  end
+  while conn.streams ~= nilptr do
+    local stream = conn.streams
+    conn.streams = (@*Stream)(stream.next)
+    C.free(stream.rx)
+    C.free(stream)
+  end
+  C.free(conn)
+end
+
+local function receive_stream(conn: *Connection, stream: *Stream, bytes: *uint8, size: csize): cint
+  if size == 0 then return 0 end
+  if size > RX_LIMIT - conn.received then
+    conn.buffer_error = true
+    return -1
+  end
+  local expanded = (@*[0]uint8)(C.realloc(stream.rx,stream.size + size))
+  if expanded == nilptr then
+    conn.buffer_error = true
+    return -1
+  end
+  stream.rx = expanded
+  C.memcpy(&stream.rx[stream.size],bytes,size)
+  stream.size = stream.size + size
+  conn.received = conn.received + size
+  return 0
+end
+
+local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
+    user: pointer, stream_user: pointer): cint
+  local conn = (@*Connection)(user)
+  if kind == picoquic_callback_ready then
+    conn.ready = true
+  elseif kind == picoquic_callback_path_available or kind == picoquic_callback_path_suspended or
+      kind == picoquic_callback_path_deleted then
+    local path = find_path(conn,id)
+    if path ~= nilptr then
+      if kind == picoquic_callback_path_available then path.status = 1 end
+      if kind == picoquic_callback_path_suspended then path.status = 2 end
+      if kind == picoquic_callback_path_deleted then path.status = 3 end
+    end
+  elseif kind == picoquic_callback_stream_fin or kind == picoquic_callback_stream_data or
+      kind == picoquic_callback_stream_reset or kind == picoquic_callback_stop_sending then
+    local stream = find_stream(conn,id)
+    if stream == nilptr then return 0 end
+    if kind == picoquic_callback_stream_reset then
+      stream.reset = true
+    elseif kind == picoquic_callback_stop_sending then
+      stream.stop = true
+    else
+      if kind == picoquic_callback_stream_fin then stream.fin = true end
+      return receive_stream(conn,stream,bytes,size)
+    end
+  elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
+      kind == picoquic_callback_stateless_reset then
+    conn.closed = true
+  end
+  return 0
+end
+
+local function find_connection(e: Env, handle: Term): *Connection
+  if term_aux(handle) ~= iroh_mp_MultipathConnection then return nilptr end
+  local id: uint64 = 0
+  if term_tag(handle) == TAG_PAK then id = term_loc(handle) end
+  if term_tag(handle) == TAG_CTR then id = e.mem[term_peek(e.mem,handle)] end
+  local conn = connections
+  while conn ~= nilptr and conn.id ~= id do conn = (@*Connection)(conn.next) end
+  return conn
+end
+
+local function closed_error(e: Env, conn: *Connection): Term
+  if conn == nilptr then return io_fail(e,EBADF,'multipath connection closed') end
+  if conn.buffer_error then return io_fail(e,ENOBUFS,'multipath stream receive buffer exhausted') end
+  if picoquic_get_local_error(conn.cnx) == IROH_MP_PIN_MISMATCH then
+    return io_fail(e,EACCES,'QUIC peer endpoint key mismatch')
+  end
+  return io_fail(e,ECONNRESET,'multipath connection closed')
+end
+
+local function start_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local host_size: uint64
+  local host = io_cstr(e,args[0],&host_size)
+  defer C.free(host) end
+  local alpn_size: uint64
+  local alpn = io_cstr(e,args[4],&alpn_size)
+  defer C.free(alpn) end
+  local seed: [32]uint8
+  local key: [32]uint8
+  local seed_size = bytes_from_list(e,args[2],&seed[0],32)
+  local key_size = bytes_from_list(e,args[3],&key[0],32)
+  if seed_size ~= 32 or key_size ~= 32 or args[1] == 0 or args[1] > 65535 or alpn_size == 0 or
+      alpn_size > 255 or io_nul(host,host_size) or io_nul(alpn,alpn_size) then
+    return io_fail(e,EINVAL,'invalid numeric address, Ed25519 key, or ALPN')
+  end
+  local peer: storage_t
+  local peer_size = address(host,(@uint16)(args[1]),&peer)
+  if peer_size == 0 then return io_fail(e,EINVAL,'invalid numeric peer address') end
+  if next_connection == 0 then return io_fail(e,ENOMEM,'multipath handles exhausted') end
+  local conn = (@*Connection)(C.calloc(1,#Connection))
+  if conn == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  local initial,error = open_path(&peer,peer_size,nilptr,0)
+  if initial == nilptr then
+    destroy(conn)
+    return io_fail(e,error,nilptr)
+  end
+  conn.paths = initial
+  conn.path_count = 1
+  initial.status = 1
+  local now = picoquic_current_time()
+  conn.quic = picoquic_create(1,nilptr,nilptr,nilptr,alpn,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
+  if conn.quic == nilptr or not install_identity(conn.quic,&seed[0],&key[0]) then
+    destroy(conn)
+    return io_fail(e,EIO,'could not configure pinned QUIC raw public keys')
+  end
+  picoquic_set_default_multipath_option(conn.quic,1)
+  conn.cnx = picoquic_create_client_cnx(conn.quic,&peer,now,1,nilptr,alpn,(@pointer)(on_event),conn)
+  if conn.cnx == nilptr then
+    destroy(conn)
+    return io_fail(e,EIO,'could not start the QUIC handshake')
+  end
+  picoquic_enable_path_callbacks(conn.cnx,1)
+  conn.id = next_connection
+  next_connection = next_connection + 1
+  conn.next = connections
+  connections = conn
+  return io_done(e,term_pak(iroh_mp_MultipathConnection,conn.id))
+end
+
+local function socket_unreachable(code: cint): boolean
+  return code == ECONNREFUSED or code == ENETUNREACH or code == EHOSTUNREACH
+end
+
+local function flush_output(conn: *Connection): uint32
+  if conn.output_size == 0 then return 0 end
+  local path = conn.output_path
+  if path.status == 3 then
+    conn.output_size = 0
+    return 0
+  end
+  local sent = send(path.fd,&conn.output[0],conn.output_size,0)
+  if sent == (@isize)(conn.output_size) or (sent < 0 and socket_unreachable(errno)) then
+    conn.output_size = 0
+    return 0
+  end
+  if sent < 0 and (errno == EAGAIN or errno == EINTR) then return 0 end
+  return sent < 0 and (@uint32)(errno) or EIO
+end
+
+local function route_packet(conn: *Connection, src: *storage_t, dst: *storage_t): *Path
+  local path = conn.paths
+  while path ~= nilptr do
+    if path.status ~= 3 and (src.ss_family == 0 and path.id == 0 or
+        picoquic_compare_addr(&path.local_addr,src) == 0) and picoquic_compare_addr(&path.peer,dst) == 0 then
+      return path
+    end
+    path = (@*Path)(path.next)
+  end
+  return nilptr
+end
+
+local function write_packet(conn: *Connection, now: uint64): uint32
+  local error = flush_output(conn)
+  if error ~= 0 or conn.output_size ~= 0 then return error end
+  local size: csize
+  local from: storage_t, to: storage_t
+  local iface: cint
+  if picoquic_prepare_packet(conn.cnx,now,&conn.output[0],IO_CAPACITY,&size,&to,&from,&iface) ~= 0 then
+    return EIO
+  end
+  if size == 0 then return 0 end
+  local path = route_packet(conn,&from,&to)
+  if path == nilptr then return 0 end
+  conn.output_path = path
+  conn.output_size = size
+  return flush_output(conn)
+end
+
+local function close_retired_sockets(conn: *Connection)
+  local path = conn.paths
+  local previous: *Path
+  while path ~= nilptr do
+    local next = (@*Path)(path.next)
+    if path.status == 3 then
+      if conn.output_path == path then
+        conn.output_path = nilptr
+        conn.output_size = 0
+      end
+      if previous == nilptr then conn.paths = next else previous.next = next end
+      release_path(path)
+      conn.path_count = conn.path_count - 1
+    else
+      previous = path
+    end
+    path = next
+  end
+end
+
+local function read_packets(conn: *Connection, now: uint64): uint32
+  local bytes: [65536]uint8
+  local path = conn.paths
+  while path ~= nilptr and not conn.closed do
+    if path.status ~= 3 then
+      local size = recv(path.fd,&bytes[0],#bytes,0)
+      if size > 0 then
+        picoquic_incoming_packet(conn.quic,&bytes[0],(@csize)(size),&path.peer,&path.local_addr,0,0,now)
+      elseif size < 0 and errno ~= EAGAIN and errno ~= EINTR and not socket_unreachable(errno) then
+        return (@uint32)(errno)
+      end
+    end
+    path = (@*Path)(path.next)
+  end
+  return 0
+end
+
+local function step(e: Env, conn: *Connection): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  local now = picoquic_current_time()
+  local error = read_packets(conn,now)
+  if error == 0 then error = write_packet(conn,now) end
+  close_retired_sockets(conn)
+  if conn.closed or conn.buffer_error then return closed_error(e,conn) end
+  if error ~= 0 then return io_fail(e,error,'QUIC packet I/O failed') end
+  local state: Term = 0
+  if conn.ready then state = conn.cnx.is_multipath_enabled ~= 0 and 2 or 1 end
+  return io_done(e,state)
+end
+
+local function step_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],step(e,find_connection(e,args[0])))
+end
+
+local function optional_id(e: Env, id: uint64): Term
+  return io_done(e,io_box(e,iroh_mp_Some,id))
+end
+
+local function none(e: Env): Term
+  return io_done(e,term_pak(iroh_mp_None,0))
+end
+
+local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t): cuint
+  if port > 65535 then return 0 end
+  local size: uint64
+  local host = io_cstr(e,item,&size)
+  defer C.free(host) end
+  if io_nul(host,size) then return 0 end
+  return address(host,(@uint16)(port),out)
+end
+
+local function probe(e: Env, conn: *Connection, args: *[0]Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready then return none(e) end
+  if conn.cnx.is_multipath_enabled == 0 then return io_fail(e,ENOTSUP,'peer did not negotiate QUIC multipath') end
+  if conn.path_count >= PATH_LIMIT then return io_fail(e,ENOBUFS,'too many active QUIC paths') end
+  local source: storage_t, peer: storage_t
+  local source_size = numeric_argument(e,args[1],args[2],&source)
+  local peer_size = numeric_argument(e,args[3],args[4],&peer)
+  if source_size == 0 or peer_size == 0 or args[4] == 0 or source.ss_family ~= peer.ss_family then
+    return io_fail(e,EINVAL,'invalid local or remote QUIC path address')
+  end
+  local path,error = open_path(&peer,peer_size,&source,source_size)
+  if path == nilptr then return io_fail(e,error,nilptr) end
+  local previous = conn.cnx.nb_paths
+  local status = picoquic_probe_new_path(conn.cnx,&path.peer,&path.local_addr,picoquic_current_time())
+  if status ~= 0 then
+    release_path(path)
+    if status == PICOQUIC_ERROR_PATH_ID_BLOCKED or status == PICOQUIC_ERROR_PATH_CID_BLOCKED then return none(e) end
+    return io_fail(e,EIO,'could not probe the new QUIC path')
+  end
+  if conn.cnx.nb_paths ~= previous + 1 then
+    release_path(path)
+    return io_fail(e,EIO,'QUIC did not allocate a new path')
+  end
+  local paths = (@*[0]*path_t)(conn.cnx.path)
+  local id = paths[previous].unique_path_id
+  if id >= 0xffffffff then
+    picoquic_abandon_path(conn.cnx,id,0,picoquic_current_time())
+    release_path(path)
+    return io_fail(e,ENOBUFS,'QUIC path IDs exhausted')
+  end
+  path.id = (@uint32)(id)
+  path.next = conn.paths
+  conn.paths = path
+  conn.path_count = conn.path_count + 1
+  if conn.last_path_id < id then conn.last_path_id = (@uint32)(id) end
+  return optional_id(e,id)
+end
+
+local function probe_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],probe(e,find_connection(e,args[0]),args))
+end
+
+local function status_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local path = find_path(conn,args[1])
+  if path == nilptr then
+    local result = args[1] <= conn.last_path_id and io_done(e,3) or io_fail(e,EINVAL,'unknown QUIC path')
+    return io_tup(e,args[0],result)
+  end
+  return io_tup(e,args[0],io_done(e,path.status))
+end
+
+local function open_stream(e: Env, conn: *Connection, direction: Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if not conn.ready then return none(e) end
+  if direction > 1 then return io_fail(e,EINVAL,'invalid QUIC stream direction') end
+  if conn.stream_count >= STREAM_LIMIT then return io_fail(e,ENOBUFS,'too many open QUIC streams') end
+  local id = picoquic_get_next_local_stream_id(conn.cnx,(@cint)(direction))
+  if id > 0xffffffff then return io_fail(e,ENOBUFS,'QUIC stream IDs exhausted') end
+  local stream = (@*Stream)(C.calloc(1,#Stream))
+  if stream == nilptr then return io_fail(e,ENOMEM,nilptr) end
+  if picoquic_set_app_stream_ctx(conn.cnx,id,stream) ~= 0 then
+    C.free(stream)
+    return none(e)
+  end
+  stream.id = (@uint32)(id)
+  stream.next = conn.streams
+  conn.streams = stream
+  conn.stream_count = conn.stream_count + 1
+  return optional_id(e,id)
+end
+
+local function open_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],open_stream(e,find_connection(e,args[0]),args[1]))
+end
+
+local function assign(e: Env, conn: *Connection, stream_id: Term, path_id: Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if find_stream(conn,stream_id) == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  local selected: uint64 = 0xffffffffffffffff
+  if path_id ~= 0xffffffff then
+    local path = find_path(conn,path_id)
+    if path == nilptr or path.status ~= 1 then return io_fail(e,EINVAL,'QUIC path is unavailable') end
+    selected = path_id
+  end
+  if picoquic_set_stream_path_affinity(conn.cnx,stream_id,selected) ~= 0 then
+    return io_fail(e,EPIPE,'could not assign the QUIC stream to the path')
+  end
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function assign_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],assign(e,find_connection(e,args[0]),args[1],args[2]))
+end
+
+local function write_stream(e: Env, conn: *Connection, id: Term, payload: Term, fin: Term): Term
+  local bytes: [STREAM_CHUNK]uint8
+  local size = bytes_from_list(e,payload,&bytes[0],STREAM_CHUNK)
+  if size < 0 or fin > 1 then return io_fail(e,EINVAL,'invalid or oversized QUIC stream write') end
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  local stream = find_stream(conn,id)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if stream.sent_fin or stream.stop then return io_fail(e,EPIPE,'QUIC stream send half closed') end
+  if conn.cnx.nb_bytes_queued + (@uint64)(size) > TX_LIMIT then return io_done(e,0) end
+  if picoquic_add_to_stream(conn.cnx,id,&bytes[0],(@csize)(size),(@cint)(fin)) ~= 0 then
+    return io_fail(e,EPIPE,'could not queue QUIC stream bytes')
+  end
+  stream.sent_fin = fin == 1
+  return io_done(e,1)
+end
+
+local function write_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],write_stream(e,find_connection(e,args[0]),args[1],args[2],args[3]))
+end
+
+local function read_stream(e: Env, conn: *Connection, id: Term, max: Term): Term
+  if conn == nilptr or conn.closed then return closed_error(e,conn) end
+  if max == 0 then return io_fail(e,EINVAL,'QUIC stream read limit must be positive') end
+  local stream = find_stream(conn,id)
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if (id & 2) ~= 0 then return io_fail(e,EPIPE,'QUIC stream is send-only') end
+  if stream.reset then return io_fail(e,ECONNRESET,'QUIC stream reset by peer') end
+  if stream.size == 0 then
+    return io_done(e,term_pak(stream.fin and iroh_mp_MultipathReadFin or iroh_mp_MultipathReadPending,0))
+  end
+  local size = stream.size
+  if size > max then size = (@csize)(max) end
+  local bytes = io_list(e,(@cstring)(stream.rx),size)
+  stream.size = stream.size - size
+  conn.received = conn.received - size
+  if stream.size > 0 then
+    C.memmove(stream.rx,&stream.rx[size],stream.size)
+  else
+    C.free(stream.rx)
+    stream.rx = nilptr
+  end
+  return io_done(e,io_box(e,iroh_mp_MultipathReadBytes,bytes))
+end
+
+local function read_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],read_stream(e,find_connection(e,args[0]),args[1],args[2]))
+end
+
+local function drop_stream(e: Env, conn: *Connection, id: Term): Term
+  if conn == nilptr then return closed_error(e,conn) end
+  local stream = conn.streams
+  local previous: *Stream
+  while stream ~= nilptr and stream.id ~= id do
+    previous = stream
+    stream = (@*Stream)(stream.next)
+  end
+  if stream == nilptr then return io_fail(e,EBADF,'unknown QUIC stream') end
+  if not conn.closed then
+    picoquic_unlink_app_stream_ctx(conn.cnx,id)
+    if not stream.sent_fin and not stream.stop then picoquic_reset_stream(conn.cnx,id,0) end
+    if (id & 2) == 0 and not stream.fin and not stream.reset then picoquic_stop_sending(conn.cnx,id,0) end
+  end
+  if previous == nilptr then conn.streams = (@*Stream)(stream.next) else previous.next = stream.next end
+  conn.stream_count = conn.stream_count - 1
+  conn.received = conn.received - stream.size
+  C.free(stream.rx)
+  C.free(stream)
+  return io_done(e,term_pak(iroh_mp_Unit,0))
+end
+
+local function drop_stream_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  return io_tup(e,args[0],drop_stream(e,find_connection(e,args[0]),args[1]))
+end
+
+local function close_run(e: Env, args: *[0]Term, work: *IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn ~= nilptr then
+    if not conn.closed and picoquic_close(conn.cnx,0) == 0 then write_packet(conn,picoquic_current_time()) end
+    if conn == connections then
+      connections = (@*Connection)(conn.next)
+    else
+      local previous = connections
+      while previous.next ~= conn do previous = (@*Connection)(previous.next) end
+      previous.next = conn.next
+    end
+    destroy(conn)
+  end
+  return term_pak(iroh_mp_Unit,0)
+end
+
+local function register_multipath() <cexport,codename 'iroh_register_multipath',cattribute 'constructor'>
+  if iroh_mp_start_multipath ~= 0xffffffff then io_eff(iroh_mp_start_multipath,start_run) end
+  if iroh_mp_step_multipath ~= 0xffffffff then io_eff(iroh_mp_step_multipath,step_run) end
+  if iroh_mp_probe_multipath ~= 0xffffffff then io_eff(iroh_mp_probe_multipath,probe_run) end
+  if iroh_mp_multipath_status ~= 0xffffffff then io_eff(iroh_mp_multipath_status,status_run) end
+  if iroh_mp_open_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_open_multipath_stream,open_stream_run) end
+  if iroh_mp_assign_stream_path ~= 0xffffffff then io_eff(iroh_mp_assign_stream_path,assign_run) end
+  if iroh_mp_write_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_write_multipath_stream,write_run) end
+  if iroh_mp_read_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_read_multipath_stream,read_run) end
+  if iroh_mp_drop_multipath_stream ~= 0xffffffff then io_eff(iroh_mp_drop_multipath_stream,drop_stream_run) end
+  if iroh_mp_close_multipath ~= 0xffffffff then io_eff(iroh_mp_close_multipath,close_run) end
+end
