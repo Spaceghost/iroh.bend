@@ -441,6 +441,12 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   Ed25519 point and returns the 32 bytes used by `PeerKeys`. `decode` checks
   the spelling and length. `format` emits lowercase hexadecimal from 32 bytes.
   Run `make check-endpoint-id` for the Iroh 1.5.0 vectors.
+- Custom transport addresses use the same `Custom{hi,lo,data}` value as endpoint
+  tickets. `parse` reads the hexadecimal ID and opaque bytes in `id_data` form.
+  `format` emits lowercase hex. `from_bytes` and `to_bytes` use an eight-byte
+  little-endian ID followed by the payload. Run `make check-endpoint-ticket` for
+  the upstream examples and wire vectors. Set `UPSTREAM_CUSTOM_ADDR` to compare
+  a reference fixture on the same inputs. [Bend API](src/custom_addr.bend)
 - [Endpoint tickets](src/endpoint_ticket.bend) encode and decode the
   [iroh-tickets 1.0.0 format](https://github.com/n0-computer/iroh-tickets/blob/v1.0.0/src/endpoint.rs)
   with Iroh 1.5.0 endpoint IDs, relay URLs, IPv4, IPv6, and custom transport
