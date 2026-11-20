@@ -195,7 +195,7 @@ def reconnected(result: Result<&1,&1,U32 & String,Client.Connection>, routes: Ro
     case Done{relay}:
       next(Online{relay,routes},100)
     case Fail{_}:
-      next(Offline{routes},U32.min(U32.mul(delay,2),5000))
+      next(Offline{routes},U32.max(100,U32.min(U32.mul(delay,2),5000)))
 
 def reconnect(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, routes: Routes, delay: U32, url: String, seed: List<&2,U32>,
     next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
@@ -220,17 +220,21 @@ def reconnect(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, routes: Routes, delay: U32,
         stop : Poll<&1,&1,Maybe<&1,Unit>,Unit> <- Chan.try_recv(Unit,shutdown,0)
         cycle(stop,relay,routes,port,updated => ms => run(updated,ms,url,seed,port,shutdown))
 
-def start_connected(result: Result<&1,&1,U32 & String,Client.Connection>, port: U32, +url: String, seed: List<&2,U32>)
+def launch(state: State, delay: U32, port: U32, +url: String, seed: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
+  do IO<Result<&1,&1,U32 & String,Relay.Bridge>>:
+    +shutdown : Chan(Unit) <- Chan.new(Unit,0)
+    finished : Chan(Result<&1,&1,U32 & String,Unit>) <- IO.fork(Result<&1,&1,U32 & String,Unit>,
+      run(state,delay,url,seed,port,shutdown))
+    return Done{Relay.RelayPath{shutdown,finished,url}}
+
+def start_connected(result: Result<&1,&1,U32 & String,Client.Connection>, port: U32, url: String, seed: List<&2,U32>)
     -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   match result:
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Relay.Bridge>,Fail{error})
     case Done{relay}:
-      do IO<Result<&1,&1,U32 & String,Relay.Bridge>>:
-        +shutdown : Chan(Unit) <- Chan.new(Unit,0)
-        finished : Chan(Result<&1,&1,U32 & String,Unit>) <- IO.fork(Result<&1,&1,U32 & String,Unit>,
-          run(Online{relay,Empty{}},100,url,seed,port,shutdown))
-        return Done{Relay.RelayPath{shutdown,finished,url}}
+      launch(Online{relay,Empty{}},100,port,url,seed)
 
 def start_valid(valid: Bool, +url: String, +seed: List<&2,U32>, port: U32) -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   match valid:
@@ -243,3 +247,18 @@ def start_valid(valid: Bool, +url: String, +seed: List<&2,U32>, port: U32) -> IO
 
 def start(url: String, seed: List<&2,U32>, +local_port: U32) -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
   start_valid(U32.is_gt(local_port,0) && U32.is_le(local_port,65535),url,seed,local_port)
+
+def background_checked(port_ok: Bool, url_ok: Bool, port: U32, url: String, seed: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
+  match port_ok url_ok:
+    case False{} _:
+      IO.pure(Result<&1,&1,U32 & String,Relay.Bridge>,Fail{(1,"inbound relay requires a bound loopback port")})
+    case _ False{}:
+      IO.pure(Result<&1,&1,U32 & String,Relay.Bridge>,Fail{(1,"inbound relay requires a WebSocket URL")})
+    case _ _:
+      launch(Offline{Empty{}},0,port,url,seed)
+
+def start_background(+url: String, seed: List<&2,U32>, +local_port: U32)
+    -> IO(Result<&1,&1,U32 & String,Relay.Bridge>):
+  background_checked(U32.is_gt(local_port,0) && U32.is_le(local_port,65535),
+    String.starts_with(url,"ws://") || String.starts_with(url,"wss://"),local_port,url,seed)

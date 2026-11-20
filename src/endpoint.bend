@@ -729,11 +729,13 @@ def attached_listener(result: Result<&1,&1,U32 & String,Path.Bridge>, listener: 
         return Fail{error}
 
 def attach_inbound(result: Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>,
-    url: String, seed: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+    url: String, seed: List<&2,U32>,
+    start: String -> List<&2,U32> -> U32 -> IO(Result<&1,&1,U32 & String,Path.Bridge>))
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   match result:
     case Done{(listener,+port)}:
       do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
-        bridge : Result<&1,&1,U32 & String,Path.Bridge> <- Inbound.start(url,seed,port)
+        bridge : Result<&1,&1,U32 & String,Path.Bridge> <- start(url,seed,port)
         attached_listener(bridge,listener,port)
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,RelayedListener & U32>,Fail{error})
@@ -751,17 +753,19 @@ def bind_relay_identity(url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, ea
   do IO<Result<&1,&1,U32 & String,RelayedListener>>:
     bound : Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32> <-
       bind_identity(IpAddress{"127.0.0.1",0},seed,alpn,early_data)
-    attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_inbound(bound,url,seed)
+    attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_inbound(bound,url,seed,
+      address => secret => port => Inbound.start(address,secret,port))
     return relay_only(attached)
 
 # Share one identity, accept queue, and connection table between IPv4 and IPv6
-# direct traffic and the relay. Pass port zero to select a UDP port.
+# direct traffic and the relay. Registration proceeds in the background.
+# Pass port zero to select a UDP port.
 def bind_direct_relay_identity(port: U32, url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
     -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
     bound : Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32> <-
       Quic.bind_dual_quic_identity("::",port,seed,alpn,early_data)
-    attach_inbound(bound,url,seed)
+    attach_inbound(bound,url,seed,address => secret => local => Inbound.start_background(address,secret,local))
 
 def accepted_relay(pair: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>,
     bridge: Path.Bridge) -> RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>:

@@ -149,7 +149,7 @@ check-relay-quic: $(BUILD)/iroh-bend-relay-quic
 	sh tests/relay_quic.sh "$(BUILD)/iroh-bend-relay-quic" "$(RELAY_URL)" "$(UPSTREAM_RELAY_QUIC)" \
 		"$(PKARR_URL)" "$(DISCOVERY_DNS_PORT)" "$(UPSTREAM_QUIC_SHARED)" "$(UPSTREAM_QUIC_SHARED_DIAL)"
 
-.PHONY: check-relay-quic-inbound check-relay-quic-reconnect check-relay-quic-direct-relay
+.PHONY: check-relay-quic-inbound check-relay-quic-reconnect check-relay-quic-direct-relay check-relay-quic-startup
 UPSTREAM_RELAY_INBOUND ?=
 check-relay-quic-inbound: $(BUILD)/iroh-bend-relay-quic
 	@test -x "$(UPSTREAM_RELAY_INBOUND)" || { echo 'Set UPSTREAM_RELAY_INBOUND to the Iroh two-peer relay dialer.' >&2; exit 2; }
@@ -162,6 +162,10 @@ check-relay-quic-reconnect: $(BUILD)/iroh-bend-relay-quic
 check-relay-quic-direct-relay: $(BUILD)/iroh-bend-relay-quic
 	@test -x "$(UPSTREAM_RELAY_INBOUND)" || { echo 'Set UPSTREAM_RELAY_INBOUND to the Iroh dialer with direct-relay mode.' >&2; exit 2; }
 	python3 -B tests/relay_quic_inbound.py --direct-relay "$<" "$(UPSTREAM_RELAY_INBOUND)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
+
+check-relay-quic-startup: $(BUILD)/iroh-bend-relay-quic
+	@test -x "$(UPSTREAM_RELAY_INBOUND)" || { echo 'Set UPSTREAM_RELAY_INBOUND to the Iroh dialer with relay-startup mode.' >&2; exit 2; }
+	python3 -B tests/relay_quic_inbound.py --relay-startup "$<" "$(UPSTREAM_RELAY_INBOUND)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 $(BUILD)/relay-quic.c: tests/relay_quic.bend tests/direct.bend tests/quic_streams.bend tests/quic_datagram.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS))) tools/nelua-effect.sh
 	mkdir -p "$(BUILD)/relay-quic-stage/src" "$(BUILD)/relay-quic-stage/tests"

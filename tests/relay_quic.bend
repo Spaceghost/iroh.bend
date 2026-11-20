@@ -547,24 +547,47 @@ def accept_mixed_third(pair: Endpoint.RelayedListener & Endpoint.Connection(), f
     third : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
     serve_mixed(third,first,second)
 
-def accept_mixed_second(pair: Endpoint.RelayedListener & Endpoint.Connection()) -> IO(Unit):
+def serve_after_outage(pair: Endpoint.RelayedListener & Endpoint.Connection(), direct: U32) -> IO(Unit):
+  (listener,relayed) = pair
+  do IO<Unit>:
+    label : U32 <- serve_inbound_peer(relayed)
+    IO.try(Unit,Endpoint.close_relay_identity(listener))
+    mixed_total(U32.or(direct,mixed_peer_bit(label)))
+
+def serve_while_offline(pair: Endpoint.RelayedListener & Endpoint.Connection(), first: Endpoint.Connection()) -> IO(Unit):
+  (listener,second) = pair
+  do IO<Unit>:
+    a : U32 <- serve_inbound_peer(first)
+    b : U32 <- serve_inbound_peer(second)
+    IO.print("PASS Bend served direct IPv4 and IPv6 peers before relay registration")
+    relay : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    serve_after_outage(relay,U32.or(mixed_peer_bit(a),mixed_peer_bit(b)))
+
+def mixed_exchange(outage: Bool, pair: Endpoint.RelayedListener & Endpoint.Connection(), first: Endpoint.Connection()) -> IO(Unit):
+  match outage:
+    case False{}:
+      accept_mixed_third(pair,first)
+    case True{}:
+      serve_while_offline(pair,first)
+
+def accept_mixed_second(pair: Endpoint.RelayedListener & Endpoint.Connection(), outage: Bool) -> IO(Unit):
   (listener,first) = pair
   do IO<Unit>:
     second : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
-    accept_mixed_third(second,first)
+    mixed_exchange(outage,second,first)
 
-def accept_mixed(bound: Endpoint.RelayedListener & U32) -> IO(Unit):
+def accept_mixed(bound: Endpoint.RelayedListener & U32, outage: Bool) -> IO(Unit):
   (listener,port) = bound
   do IO<Unit>:
     IO.print(String.append("direct and relay identity listener ready ",U32.show(port)))
     first : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
-    accept_mixed_second(first)
+    accept_mixed_second(first,outage)
 
-def listen_mixed(url: String) -> IO(Unit):
+def listen_mixed(url: String, outage: Bool) -> IO(Unit):
   do IO<Unit>:
     bound : Endpoint.RelayedListener & U32 <- IO.try(Endpoint.RelayedListener & U32,
       Endpoint.bind_direct_relay_identity(0,url,List.replicate(U32,32n,42),Fixture.alpn(),0))
-    accept_mixed(bound)
+    accept_mixed(bound,outage)
 
 def run(args: List<String>) -> IO(Unit):
   match args:
@@ -573,7 +596,9 @@ def run(args: List<String>) -> IO(Unit):
     case [_, "listen-relay-reconnect", url]:
       listen_inbound(url,True{})
     case [_, "listen-direct-relay", url]:
-      listen_mixed(url)
+      listen_mixed(url,False{})
+    case [_, "listen-relay-startup", url]:
+      listen_mixed(url,True{})
     case Con{_,Con{"listen",Con{url,Nil{}}}}:
       listen(url)
     case Con{_,Con{"dial",Con{url,Nil{}}}}:
