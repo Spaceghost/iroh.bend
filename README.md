@@ -807,6 +807,11 @@ passing address-refresh test below.
 Both backends report when the peer acknowledges a graceful FIN or a locally issued
 RESET_STREAM while the opposite stream half is still open.
 
+On Linux, relay shutdown forwards the datagrams already queued on each private
+loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
+with `RELAY_URL` set to a running Iroh relay. The test verifies packet order,
+source ports, and delivery to two peers using relay protocols v1 and v2.
+
 Ticket lookup passes two complementary tests against Iroh 1.5.0 on IPv4 and
 IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.
 The other keeps that route silent and releases the working address through DNS

@@ -180,6 +180,8 @@ $(BUILD)/relay-live.c: tests/relay_live.bend $(RELAY_SOURCES) src/ed25519.nelua 
 	cd "$(BUILD)/relay-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_live.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-relay-live: $(BUILD)/relay-live.c
+$(BUILD)/iroh-bend-relay-quic-drain: $(BUILD)/relay-quic-drain.c
+$(BUILD)/iroh-bend-relay-live $(BUILD)/iroh-bend-relay-quic-drain:
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags openssl libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs openssl libcurl)
 
@@ -723,6 +725,23 @@ UPSTREAM_QUIC_RELAY_CLOSE ?=
 check-quic-relay-close-control:
 	@test -x "$(UPSTREAM_QUIC_RELAY_CLOSE)" || { echo 'Set UPSTREAM_QUIC_RELAY_CLOSE to the Iroh relay-only close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_relay_close.py "$(UPSTREAM_QUIC_RELAY_CLOSE)" "$(UPSTREAM_QUIC_RELAY_CLOSE)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --control
+
+# Queue the datagrams before the forwarding worker starts so socket scheduling cannot hide loss.
+.PHONY: check-relay-quic-drain
+check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
+	"$<" seal
+	@set -e; for role in outbound inbound; do for version in 1 2; do "$<" "$(RELAY_URL)" "$$role" "$$version"; done; done
+
+$(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
+$(BUILD)/relay-quic-drain.c: $(BUILD)/%.c: tools/nelua-effect.sh
+	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
+	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
+	cp $(filter tests/%.bend,$^) "$(@:.c=-stage)/tests/"
+	for native in $(filter %.nelua,$^); do \
+		name=$$(basename "$$native" .nelua); \
+		tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" "$$native" "$(abspath $(@:.c=-stage))/src/$$name.c" || exit; \
+	done
+	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) tests/$(subst -,_,$*).bend -o "$(abspath $@)"
 
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_connection_close.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
 $(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_connection_close.bend src/endpoint_multipath.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend

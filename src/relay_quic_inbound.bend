@@ -172,22 +172,36 @@ def receive(state: State, port: U32, now: U32) -> IO(State):
         received : Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>> <- Client.try_receive(relay,2)
         relay_result(received,routes,port,now)
 
-def advance(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, state: State, port: U32, now: U32,
-    next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
-  match stop:
-    case Ready{_}:
-      finish(state)
-    case Wait{_}:
+def drained_route(result: Relay.DrainResult(), rest: Routes,
+    next: Routes -> Client.Connection -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match result:
+    case Done{relay}:
+      next(rest,relay)
+    case Fail{error}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
-        updated : State <- receive(state,port,now)
-        next(updated,100)
+        close_routes(rest)
+        return Fail{error}
+
+@unsafe def drain_routes(routes: Routes, relay: Client.Connection, +port: U32) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match routes:
+    case Empty{}:
+      Relay.close_drained(Done{relay})
+    case Route{peer,udp,_,rest}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        drained : Relay.DrainResult() <- Relay.drain_peer(udp,relay,port,peer)
+        drained_route(drained,rest,remaining => conn => drain_routes(remaining,conn,port))
 
 def cycle(stop: Poll<&1,&1,Maybe<&1,Unit>,Unit>, relay: Client.Connection, routes: Routes, +port: U32,
     next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
-  do IO<Result<&1,&1,U32 & String,Unit>>:
-    +now : U32 <- Relay.relay_millis()
-    swept : State <- sweep(64n,routes,relay,port,now)
-    advance(stop,swept,port,now,next)
+  match stop:
+    case Ready{_}:
+      drain_routes(routes,relay,port)
+    case Wait{_}:
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        +now : U32 <- Relay.relay_millis()
+        swept : State <- sweep(64n,routes,relay,port,now)
+        updated : State <- receive(swept,port,now)
+        next(updated,100)
 
 def reconnected(result: Result<&1,&1,U32 & String,Client.Connection>, routes: Routes, delay: U32,
     next: State -> U32 -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):

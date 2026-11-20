@@ -9,6 +9,8 @@
 cinclude('#ifdef CID(relay_loopback_port)\n#define iroh_relay_loopback_port CID(relay_loopback_port)\n#else\n#define iroh_relay_loopback_port UINT32_MAX\n#endif')
 ]]
 ## cinclude '#ifdef CID(relay_millis)\n#define iroh_relay_millis CID(relay_millis)\n#else\n#define iroh_relay_millis UINT32_MAX\n#endif'
+## cinclude '#ifdef CID(relay_seal_loopback)\n#define iroh_relay_seal_loopback CID(relay_seal_loopback)\n#else\n#define iroh_relay_seal_loopback UINT32_MAX\n#endif'
+local iroh_relay_seal_loopback: uint32 <cimport,nodecl>
 local iroh_relay_millis: uint32 <cimport,nodecl>
 local iroh_relay_loopback_port: uint32 <cimport,nodecl>
 local Env <cimport,nodecl> = @record{}
@@ -25,12 +27,13 @@ local function io_tup(e: Env, left: Term, right: Term): Term <cimport,nodecl> en
 local function io_done(e: Env, value: Term): Term <cimport,nodecl> end
 local function io_fail(e: Env, code: uint32, msg: cstring): Term <cimport,nodecl> end
 local function getsockname(fd: cint, address: pointer, size: *socklen_t): cint <cimport,nodecl> end
+local function connect(fd: cint, address: pointer, size: socklen_t): cint <cimport,nodecl> end
 local function ntohs(value: uint16): uint16 <cimport,nodecl> end
 local AF_INET: cint <cimport,nodecl>
 local EINVAL: uint32 <cimport,nodecl>
 local errno: cint <cimport,nodecl>
 
-local function bound_port(e: Env, args: *[0]Term, work: *IoWork): Term
+local function loopback(e: Env, args: *[0]Term, seal: boolean): Term
   local fd = (@cint)(io_hand_v(args[0]))
   local address: Address
   local size: socklen_t = #Address
@@ -40,7 +43,21 @@ local function bound_port(e: Env, args: *[0]Term, work: *IoWork): Term
   if size ~= #Address or address.sin_family ~= AF_INET then
     return io_tup(e,args[0],io_fail(e,EINVAL,'expected an IPv4 bridge socket'))
   end
+  -- The private loopback socket never sends to itself. Connecting it to
+  -- its own tuple leaves the Linux receive queue readable and filters later
+  -- arrivals while Bend forwards the packets already admitted.
+  if seal and connect(fd,&address,size) ~= 0 then
+    return io_tup(e,args[0],io_fail(e,(@uint32)(errno),nilptr))
+  end
   return io_tup(e,args[0],io_done(e,ntohs(address.sin_port)))
+end
+
+local function bound_port(e: Env, args: *[0]Term, work: *IoWork): Term
+  return loopback(e,args,false)
+end
+
+local function seal_loopback(e: Env, args: *[0]Term, work: *IoWork): Term
+  return loopback(e,args,true)
 end
 
 local function io_tick(): uint64 <cimport,nodecl> end
@@ -50,6 +67,7 @@ local function millis(e: Env, args: *[0]Term, work: *IoWork): Term
 end
 
 local function register_relay_path() <cexport,codename 'iroh_register_relay_path',cattribute 'constructor'>
+  if iroh_relay_seal_loopback ~= 0xffffffff then io_eff(iroh_relay_seal_loopback,seal_loopback) end
   if iroh_relay_millis ~= 0xffffffff then io_eff(iroh_relay_millis,millis) end
   if iroh_relay_loopback_port ~= 0xffffffff then io_eff(iroh_relay_loopback_port,bound_port) end
 end

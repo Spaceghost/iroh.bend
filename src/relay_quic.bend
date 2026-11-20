@@ -16,6 +16,9 @@ type Segment is Data:
 def relay_loopback_port(socket: Socket) -> IO(Socket & Result<&1,&1,U32 & String,U32>):
   import "./relay_quic.c"
 
+def relay_seal_loopback(socket: Socket) -> IO(Socket & Result<&1,&1,U32 & String,U32>):
+  import "./relay_quic.c"
+
 def relay_millis() -> IO(U32):
   import "./relay_quic.c"
 
@@ -149,20 +152,26 @@ def read_relay(pipe: Flow, peer: List<&2,U32>, ms: U32) -> IO(Flow):
         received : Result<&1,&1,U32 & String,Client.Connection & Maybe<&1,Wire.Frame>> <- Client.try_receive(relay,ms)
         relay_input(udp,port,peer,received)
 
-def send_relay(udp: Socket, relay: Client.Connection, port: U32, +from: U32, peer: List<&2,U32>,
-    data: List<&2,U32>, allowed: Bool) -> IO(Flow):
+def route_local(-T: Type, relay: Client.Connection, port: U32, +from: U32, peer: List<&2,U32>,
+    data: List<&2,U32>, allowed: Bool, next: U32 -> Result<&1,&1,U32 & String,Client.Connection> -> IO(T)) -> IO(T):
   match allowed:
     case False{}:
-      IO.pure(Flow,Forwarding{udp,relay,port})
+      next(port,Done{relay})
     case True{}:
-      do IO<Flow>:
+      do IO<T>:
         sent : Result<&1,&1,U32 & String,Client.Connection> <- Client.send_datagram(relay,peer,0,0,data)
-        advanced(udp,from,sent)
+        next(from,sent)
+
+def send_relay(udp: Socket, relay: Client.Connection, port: U32, from: U32, peer: List<&2,U32>,
+    data: List<&2,U32>, allowed: Bool) -> IO(Flow):
+  route_local(Flow,relay,port,from,peer,data,allowed,dest => reply => advanced(udp,dest,reply))
+
+def local_source(host: String, +from: U32, +port: U32) -> Bool:
+  String.eq(host,"127.0.0.1") && (U32.is_eq(port,0) || U32.is_eq(port,from))
 
 def forward_local(udp: Socket, relay: Client.Connection, +port: U32, peer: List<&2,U32>,
     host: String, +from: U32, data: List<&2,U32>) -> IO(Flow):
-  send_relay(udp,relay,port,from,peer,data,
-    String.eq(host,"127.0.0.1") && (U32.is_eq(port,0) || U32.is_eq(port,from)))
+  send_relay(udp,relay,port,from,peer,data,local_source(host,from,port))
 
 def local_input(packet: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
     relay: Client.Connection, +port: U32, +peer: List<&2,U32>) -> IO(Flow):
@@ -182,40 +191,76 @@ def stop_flow(udp: Socket, relay: Client.Connection) -> IO(Result<&1,&1,U32 & St
     Client.close(relay)
     return Done{Unit{}}
 
+def DrainResult() -> Type:
+  Result<&1,&1,U32 & String,Client.Connection>
+
+def drain_error(udp: Socket, relay: Client.Connection, error: U32 & String) -> IO(DrainResult()):
+  do IO<DrainResult()>:
+    _ : Result<&1,&1,U32 & String,Unit> <- stop_flow(udp,relay)
+    return Fail{error}
+
+def drain_sent(udp: Socket, port: U32, result: DrainResult(),
+    next: Socket -> Client.Connection -> U32 -> IO(DrainResult())) -> IO(DrainResult()):
+  match result:
+    case Done{relay}:
+      next(udp,relay,port)
+    case Fail{error}:
+      do IO<DrainResult()>:
+        Socket.close(udp)
+        return Fail{error}
+
 def drain_packet(packet: Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit>,
-    relay: Client.Connection, port: U32, peer: List<&2,U32>,
-    next: Flow -> IO(Result<&1,&1,U32 & String,Unit>)) -> IO(Result<&1,&1,U32 & String,Unit>):
+    relay: Client.Connection, +port: U32, peer: List<&2,U32>,
+    next: Socket -> Client.Connection -> U32 -> IO(DrainResult())) -> IO(DrainResult()):
   match packet:
     case (udp,Wait{_}):
-      stop_flow(udp,relay)
+      do IO<DrainResult()>:
+        Socket.close(udp)
+        return Done{relay}
     case (udp,Ready{Fail{error}}):
-      do IO<Result<&1,&1,U32 & String,Unit>>:
-        ended : Flow <- fail_both(udp,relay,error)
-        next(ended)
-    case (udp,Ready{Done{(host,from,data)}}):
-      do IO<Result<&1,&1,U32 & String,Unit>>:
-        forwarded : Flow <- forward_local(udp,relay,port,peer,host,from,data)
-        next(forwarded)
+      drain_error(udp,relay,error)
+    case (udp,Ready{Done{(host,+from,data)}}):
+      route_local(DrainResult(),relay,port,from,peer,data,local_source(host,from,port),
+        dest => reply => drain_sent(udp,dest,reply,next))
 
-# The QUIC owner queues its final packet before requesting bridge shutdown.
-def drain_outbound(fuel: Nat, flow: Flow, +peer: List<&2,U32>) -> IO(Result<&1,&1,U32 & String,Unit>):
-  match fuel flow:
-    case _ Ended{result}:
-      IO.pure(Result<&1,&1,U32 & String,Unit>,result)
-    case 0n Forwarding{udp,relay,_}:
-      stop_flow(udp,relay)
-    case 1n+left Forwarding{udp,relay,port}:
+# The private socket admits no further packets after sealing. Drain the FIFO
+# through EAGAIN and keep the shared relay session alive for the next peer.
+@unsafe def drain_queued(udp: Socket, relay: Client.Connection, port: U32, +peer: List<&2,U32>) -> IO(DrainResult()):
+  do IO<DrainResult()>:
+    packet : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-
+      UDP.try_recv_bytes_from(udp,65507,0)
+    drain_packet(packet,relay,port,peer,socket => conn => dest => drain_queued(socket,conn,dest,peer))
+
+def sealed(result: Socket & Result<&1,&1,U32 & String,U32>, relay: Client.Connection, port: U32,
+    peer: List<&2,U32>) -> IO(DrainResult()):
+  match result:
+    case (udp,Done{_}):
+      drain_queued(udp,relay,port,peer)
+    case (udp,Fail{error}):
+      drain_error(udp,relay,error)
+
+def drain_peer(udp: Socket, relay: Client.Connection, port: U32, peer: List<&2,U32>) -> IO(DrainResult()):
+  do IO<DrainResult()>:
+    result : Socket & Result<&1,&1,U32 & String,U32> <- relay_seal_loopback(udp)
+    sealed(result,relay,port,peer)
+
+def close_drained(result: DrainResult()) -> IO(Result<&1,&1,U32 & String,Unit>):
+  match result:
+    case Done{relay}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
-        packet : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-
-          UDP.try_recv_bytes_from(udp,65507,0)
-        drain_packet(packet,relay,port,peer,outgoing => drain_outbound(left,outgoing,peer))
+        Client.close(relay)
+        return Done{Unit{}}
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,Unit>,Fail{error})
 
 def after_stop(udp: Socket, relay: Client.Connection, port: U32, peer: List<&2,U32>,
     poll: Poll<&1,&1,Maybe<&1,Unit>,Unit>, advance: Flow -> IO(Result<&1,&1,U32 & String,Unit>))
     -> IO(Result<&1,&1,U32 & String,Unit>):
   match poll:
     case Ready{_}:
-      drain_outbound(64n,Forwarding{udp,relay,port},peer)
+      do IO<Result<&1,&1,U32 & String,Unit>>:
+        drained : DrainResult() <- drain_peer(udp,relay,port,peer)
+        close_drained(drained)
     case Wait{_}:
       do IO<Result<&1,&1,U32 & String,Unit>>:
         packet : Socket & Poll<&1,&1,Result<&1,&1,U32 & String,String & U32 & List<&2,U32>>,Unit> <-
