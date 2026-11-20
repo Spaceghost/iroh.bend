@@ -135,3 +135,21 @@ def send_encoded_address(conn: Quic.MultipathConnection, encoded: Maybe<&2,List<
 def send_address(conn: Quic.MultipathConnection, frame: Wire.Frame)
     -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,U32>):
   send_encoded_address(conn,Wire.encode(frame))
+
+
+def local_address(result: Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>)
+    -> (Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>):
+  match result:
+    case (conn,Done{([a,b,c,d],port)}):
+      (conn,Done{State.Socket{Wire.IPv4{[a,b,c,d]},port}})
+    case (conn,Done{(bytes,port)}):
+      (conn,Done{State.Socket{Wire.IPv6{bytes},port}})
+    case (conn,Fail{error}):
+      (conn,Fail{error})
+
+def local_candidate(conn: Quic.MultipathConnection)
+    -> IO(Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>):
+  do IO<Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>>:
+    result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32> <-
+      Quic.multipath_nat_local_candidate(conn)
+    return local_address(result)

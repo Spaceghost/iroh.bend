@@ -2,6 +2,8 @@ import Base
 import ../src/quic_multipath.bend as Quic
 import ../src/quic_nat.bend as NatWire
 import ../src/quic_nat_state.bend as NatState
+import ../src/quic_nat_send.bend as NatSend
+import ../src/quic_multipath_nat.bend as NatProbe
 
 def binary_alpn() -> List<&2,U32>:
   Con{0,Con{255,Con{10,List.replicate(U32,252n,128)}}}
@@ -393,14 +395,102 @@ def report_withdrawal(conn: Quic.MultipathConnection, correct: Bool) -> IO(Quic.
     case False{}:
       reject(Quic.MultipathConnection,conn,1,"Iroh NAT withdrawal returned the wrong candidate port")
 
+def finish_nat_probe(result: Quic.MultipathConnection & NatProbe.Progress,
+    retry: Quic.MultipathConnection -> NatProbe.Probe -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match result:
+    case (conn,NatProbe.Answered{port}):
+      do IO<Quic.MultipathConnection>:
+        IO.print(String.append("PASS Bend dialer verified Iroh's PATH_RESPONSE from port ",U32.show(port)))
+        return conn
+    case (conn,NatProbe.Pending{probe}):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn,probe)
+    case (conn,NatProbe.Failed{code,message}):
+      reject(Quic.MultipathConnection,conn,code,message)
+    case (conn,NatProbe.TimedOut{}):
+      reject(Quic.MultipathConnection,conn,1,"Bend dialer NAT probe expired")
+
+def wait_nat_probe(fuel: Nat, conn: Quic.MultipathConnection, probe: NatProbe.Probe) -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      reject(Quic.MultipathConnection,conn,1,"Iroh did not answer the Bend dialer's NAT probe")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        active : Quic.MultipathConnection <- step(conn)
+        progress : Quic.MultipathConnection & NatProbe.Progress <- NatProbe.poll(active,probe)
+        finish_nat_probe(progress,next => current => wait_nat_probe(left,next,current))
+
+def reach_progress(pair: Quic.MultipathConnection & U32,
+    ready: Quic.MultipathConnection -> IO(Quic.MultipathConnection),
+    retry: Quic.MultipathConnection -> IO(Quic.MultipathConnection)) -> IO(Quic.MultipathConnection):
+  match pair:
+    case (conn,1):
+      ready(conn)
+    case (conn,_):
+      do IO<Quic.MultipathConnection>:
+        IO.sleep(1)
+        retry(conn)
+
+def send_reach_out(fuel: Nat, conn: Quic.MultipathConnection, +frame: NatWire.Frame, +target: NatState.Candidate)
+    -> IO(Quic.MultipathConnection):
+  match fuel:
+    case 0n:
+      reject(Quic.MultipathConnection,conn,1,"Iroh did not acknowledge Bend's REACH_OUT")
+    case 1n+left:
+      do IO<Quic.MultipathConnection>:
+        active : Quic.MultipathConnection <- step(conn)
+        sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- NatProbe.send_address(active,frame)
+        progress : Quic.MultipathConnection & U32 <- ok(U32,sent)
+        reach_progress(progress,ready =>
+          do IO<Quic.MultipathConnection>:
+            IO.print("PASS Iroh acknowledged the Bend dialer's REACH_OUT")
+            probe : NatProbe.Probe <- NatProbe.start(target,333000)
+            wait_nat_probe(5000n,ready,probe),
+          retry => send_reach_out(left,retry,frame,target))
+
+def send_nat_round(conn: Quic.MultipathConnection, attempt: NatSend.RoundResult) -> IO(Quic.MultipathConnection):
+  match attempt:
+    case NatSend.Round{_,NatSend.RoundStarted{_,[frame],[target]}}:
+      send_reach_out(4000n,conn,frame,target)
+    case _:
+      reject(Quic.MultipathConnection,conn,1,"expected a local and remote candidate for NAT traversal")
+
+def is_ipv6(candidate: NatState.Candidate) -> Bool:
+  match candidate:
+    case NatState.Socket{NatWire.IPv6{_},_}:
+      True{}
+    case _:
+      False{}
+
+def begin_nat_round(conn: Quic.MultipathConnection, local: NatSend.Change, peer: NatState.PeerState, ipv6: Bool)
+    -> IO(Quic.MultipathConnection):
+  match local:
+    case NatSend.Changed{state,NatSend.Updated{}}:
+      send_nat_round(conn,NatSend.begin(state,peer,ipv6))
+    case _:
+      reject(Quic.MultipathConnection,conn,1,"could not register the dialer's local NAT candidate")
+
+def local_candidate_ready(pair: Quic.MultipathConnection & NatState.Candidate, peer: NatState.PeerState)
+    -> IO(Quic.MultipathConnection):
+  (conn,+candidate) = pair
+  local = NatSend.start(NatState.Client{},True{},Some{64},Some{32})
+  begin_nat_round(conn,NatSend.add(local,candidate),peer,is_ipv6(candidate))
+
+def start_nat_round(conn: Quic.MultipathConnection, peer: NatState.PeerState) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    local : Quic.MultipathConnection & Result<&1,&1,U32 & String,NatState.Candidate> <- NatProbe.local_candidate(conn)
+    pair : Quic.MultipathConnection & NatState.Candidate <- ok(NatState.Candidate,local)
+    local_candidate_ready(pair,peer)
+
 def candidate_received(conn: Quic.MultipathConnection, change: NatState.Transition, port: U32, mode: U32,
     next: Quic.MultipathConnection -> NatState.PeerState -> IO(Quic.MultipathConnection))
     -> IO(Quic.MultipathConnection):
   match change mode:
-    case NatState.Received{_,NatState.AddressAdded{_}} 4:
+    case NatState.Received{state,NatState.AddressAdded{_}} 4:
       do IO<Quic.MultipathConnection>:
         IO.print("PASS Bend accepted an authenticated Iroh ADD_ADDRESS")
-        return conn
+        start_nat_round(conn,state)
     case NatState.Received{_,NatState.AddressRemoved{NatState.Socket{_,removed}}} 6:
       report_withdrawal(conn,U32.is_eq(removed,port))
     case NatState.Received{state,NatState.AddressAdded{_}} 6:

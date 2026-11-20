@@ -86,6 +86,7 @@ check_family listen 127.0.0.1
 check_family listen6 ::1
 check_nat_dial listen 127.0.0.1
 check_nat_dial listen6 ::1
+python3 -B "$(dirname "$0")/quic_multipath_nat_dial.py" "$client" "$peer"
 if [ "${CHECK_MULTIPLE_ALPNS:-0}" = 1 ]; then
     check_multiple listen 127.0.0.1
     check_multiple listen6 ::1
