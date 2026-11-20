@@ -1,6 +1,18 @@
 # Resuming iroh.bend
 
-When the owner says `resume` or `continue`, pick up the first open item below. Update this section when a checkpoint moves.
+When the owner says `resume` or `continue`, use the existing Fedora thread named `iroh.bend`.
+
+```sh
+ssh fedora '~/workspaces/2026-11-20-iroh-conformance/worker/resume.sh'
+```
+
+The launcher prints the current worker PID when it is already running. When the session has stopped, it resumes the same thread with Fedora’s `~/.bin/ocodex` at `max` in the active worktree. The user service keeps running after SSH disconnects. Read the latest output with the following command.
+
+```sh
+ssh fedora 'tmux -S "/run/user/$(id -u)/iroh-bend-ocodex.sock" capture-pane -p -t iroh-bend: | tail -12'
+```
+
+Continue the first open item below and update the checkpoint after each verified change.
 
 ## Current checkpoint
 
