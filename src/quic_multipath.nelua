@@ -607,7 +607,7 @@ local Connection = @record{
   selected_alpn: *Alpn, peer_parameters: PeerParameters, detached: boolean, ready: boolean, closed: boolean, buffer_error: boolean,
   nat_inbox: *NatInbox, nat_source: *Path, nat_route_v4: *Path, nat_route_v6: *Path, discovery: *AddressDiscovery, routed_discovery: *RoutedDiscovery,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
-  early: boolean, early_decided: boolean
+  early: boolean, early_decided: boolean, keepalive_configured: boolean
 }
 local connections: *Connection
 local next_connection: uint32 = 1
@@ -1785,6 +1785,8 @@ local function on_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kin
       conn.closed = true
       return -1
     end
+    -- Transport parameter negotiation is complete and the remote key is authenticated.
+    if not conn.keepalive_configured then picoquic_enable_keep_alive(cnx,5000000) end
     conn.ready = true
   elseif kind == picoquic_callback_datagram then
     receive_datagram(conn,bytes,size)
@@ -3860,6 +3862,7 @@ end
 local function keepalive_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  conn.keepalive_configured = true
   if args[1] == 0 then picoquic_disable_keep_alive(conn.cnx)
   else picoquic_enable_keep_alive(conn.cnx,args[1] * 1000) end
   return io_tup(e,args[0],io_done(e,term_pak(iroh_mp_Unit,0)))

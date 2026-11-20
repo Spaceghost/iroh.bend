@@ -102,7 +102,7 @@ local ngtcp2_settings <cimport,nodecl> = @record{initial_ts: uint64, log_write: 
 local ngtcp2_pkt_hd <cimport,nodecl> = @record{dcid: ngtcp2_cid, scid: ngtcp2_cid, version: uint32}
 local ngtcp2_version_cid <cimport,nodecl> = @record{version: uint32, dcid: *cuchar, dcidlen: csize}
 local ngtcp2_transport_params <cimport,nodecl> = @record{
-  max_datagram_frame_size: uint64, initial_max_data: uint64,
+  max_datagram_frame_size: uint64, max_idle_timeout: uint64, initial_max_data: uint64,
   initial_max_stream_data_bidi_local: uint64, initial_max_stream_data_bidi_remote: uint64,
   initial_max_stream_data_uni: uint64, initial_max_streams_bidi: uint64, initial_max_streams_uni: uint64,
   original_dcid: ngtcp2_cid, original_dcid_present: cuchar
@@ -168,6 +168,7 @@ local NGTCP2_ERR_CONN_ID_BLOCKED: cint <cimport,nodecl>
 local NGTCP2_ERR_INVALID_STATE: cint <cimport,nodecl>
 local NGTCP2_ERR_NOMEM: cint <cimport,nodecl>
 local NGTCP2_PATH_VALIDATION_RESULT_SUCCESS: cint <cimport,nodecl>
+local NGTCP2_SECONDS: uint64 <cimport,nodecl>
 local NGTCP2_PROTO_VER_V1: uint32 <cimport,nodecl>
 local function inet_pton(family: cint, text: cstring, ip: pointer): cint <cimport,nodecl> end
 local function htons(port: cushort): cushort <cimport,nodecl> end
@@ -1112,6 +1113,7 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
   if iroh_dgram_quic_close_packet ~= 0xffffffff then callbacks.decrypt = (@pointer)(decrypt_packet) end
   local params: ngtcp2_transport_params
   ngtcp2_transport_params_default(&params)
+  params.max_idle_timeout = 30 * NGTCP2_SECONDS
   params.max_datagram_frame_size = DATAGRAM_FRAME_LIMIT
   params.initial_max_data = STREAM_WINDOW * STREAM_COUNT
   params.initial_max_stream_data_bidi_local = STREAM_WINDOW
@@ -1133,7 +1135,10 @@ local function open_engine(conn: *Connection, initial: *ngtcp2_pkt_hd, now: uint
     status = ngtcp2_conn_client_new(&conn.engine,&dcid,&scid,&path,NGTCP2_PROTO_VER_V1,
       &callbacks,&settings,&params,nilptr,conn)
   end
-  if status == 0 then ngtcp2_conn_set_tls_native_handle(conn.engine,conn.tls) end
+  if status == 0 then
+    ngtcp2_conn_set_tls_native_handle(conn.engine,conn.tls)
+    ngtcp2_conn_set_keep_alive_timeout(conn.engine,5 * NGTCP2_SECONDS)
+  end
   return status
 end
 

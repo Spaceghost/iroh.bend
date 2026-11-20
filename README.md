@@ -93,15 +93,30 @@ client requires a libcurl build with WebSocket support.
    The optional `control` argument exchanges the fixture's local and expected peer
    identities for `make check-quic-close-control`.
    See the [Iroh graceful-close test](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L3161-L3198).
-   Run `make check-quic-idle UPSTREAM_QUIC_IDLE=/path/to/peer` to check both native
-   transports against Iroh 1.5.0 after an 800 ms negotiated idle timeout.
-   Run `make check-quic-idle-control` with the same variable for Iroh on both ends.
-   The peer accepts
-   `listen|listen6 idle|activity [control]` or `dial ADDRESS idle|activity [control]`,
-   using the same identity and ALPN as the close fixture. The dialer sends datagram
-   byte 10 and receives 20. In the activity case it repeats four times at 300 ms
-   intervals, incrementing both bytes each time. Both endpoints check `TimedOut`
-   after the last exchange and print `PASS CASE timed out`.
+   Run `make check-quic-idle UPSTREAM_QUIC_IDLE=/path/to/peer` to check idle expiry
+   and default keepalives against Iroh 1.5.0. Use `make check-quic-idle-control`
+   with the same variable for Iroh on both ends. The peer accepts `listen CASE`,
+   `listen6 CASE`, or `dial ADDRESS CASE`, with an optional final `control` to
+   select the tested endpoint's identity. The keys and ALPN match the close fixture.
+   Every case starts with the dialer sending datagram byte 10 and receiving 20.
+
+   - In `idle` and `activity`, Iroh advertises an 800 ms timeout. The activity case
+     adds four exchanges spaced 300 ms apart, incrementing both bytes each time.
+     Both peers wait for `TimedOut` and print `PASS CASE timed out`.
+   - In `one-way`, both peers print `READY`. The runner blocks traffic from the
+     tested endpoint and writes `START` to the observer. The observer sends byte
+     31, the tested endpoint replies with 32, and both must report `TimedOut`.
+     This exercises the one-direction loss condition in
+     [the upstream QUIC idle test](https://github.com/n0-computer/noq/blob/c7b87d5843c2335c8a15b21324fb4fce99572ed8/noq-proto/src/tests/mod.rs#L1658-L1696).
+   - In `defaults`, the tested endpoint keeps its normal configuration. The
+     observer disables its own idle timeout and checks that Iroh negotiated 30 s.
+     After both print `READY`, the runner lets initial handshake traffic settle,
+     blocks traffic toward the tested endpoint, and writes `START` to the observer.
+     The observer prints `PING` when Iroh counts an incoming QUIC PING. The runner
+     restores delivery and writes `RESUME`. The observer sends 31, verifies the
+     reply 32, and closes with application code zero and an empty reason. Both
+     peers print `PASS defaults kept alive`.
+
    For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
    registers with the supplied Iroh relay, and prints `READY relay` when ready to accept.
@@ -825,7 +840,11 @@ RESET_STREAM while the opposite stream half is still open.
 Both also report `TimedOut` after an established connection expires. IPv4
 and IPv6 tests exercise both listener and dialer roles against Iroh 1.5.0,
 including traffic that keeps the connection open past its original deadline.
-The tests verify that later datagram and stream operations report the timeout.
+They also check expiry under one-way packet loss and verify that later datagram
+and stream operations report the timeout. With default settings, Iroh observes
+a 30-second negotiated idle timeout and a heartbeat after five seconds from each
+backend. Both connections exchange fresh data after the heartbeat. These checks
+cover the connection-wide timers.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

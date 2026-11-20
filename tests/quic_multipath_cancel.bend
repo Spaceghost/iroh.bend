@@ -99,15 +99,15 @@ def endpoint_reason(conn: Q.MultipathConnection) -> IO(Q.MultipathConnection & C
 type Suite is Data:
   StreamCases{checks: List<&2,Test.Check>}
   CloseCase{send: Bool, id: U32}
-  IdleCase{listener: Bool, more: Nat, name: String}
+  IdleCase{listener: Bool, mode: IdleTest.Mode}
 
 def exchange(conn: Q.MultipathConnection, suite: Suite) -> IO(Unit):
   match suite:
     case StreamCases{checks}:
       Test.advance(~Q.MultipathConnection,~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,0,1,checks,4000n)
-    case IdleCase{listener,more,name}:
+    case IdleCase{listener,mode}:
       IdleTest.exchange(~Q.MultipathConnection,~CloseTest.Operations{close_endpoint,endpoint_reason,Q.step_multipath},
-        ~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,listener,more,name)
+        ~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,listener,mode)
     case CloseCase{send,id}:
       CloseTest.exchange(~Q.MultipathConnection,~CloseTest.Operations{close_endpoint,endpoint_reason,Q.step_multipath},
         ~Test.Driver{Fixture.step,perform,Q.close_multipath},conn,send,id)
@@ -152,9 +152,13 @@ def run(args: List<String>) -> IO(Unit):
     case Con{_,Con{host,Con{port,Nil{}}}}:
       command(host,U32.read(port),StreamCases{Test.scenarios()})
     case [_,host,+port,"idle"]:
-      command(host,U32.read(port),IdleCase{String.eq(port,"0"),0n,"idle"})
+      command(host,U32.read(port),IdleCase{String.eq(port,"0"),IdleTest.Idle{}})
     case [_,host,+port,"activity"]:
-      command(host,U32.read(port),IdleCase{String.eq(port,"0"),4n,"activity"})
+      command(host,U32.read(port),IdleCase{String.eq(port,"0"),IdleTest.Activity{}})
+    case [_,host,+port,"one-way"]:
+      command(host,U32.read(port),IdleCase{String.eq(port,"0"),IdleTest.OneWay{}})
+    case [_,host,+port,"defaults"]:
+      command(host,U32.read(port),IdleCase{String.eq(port,"0"),IdleTest.Defaults{}})
     case Con{_,Con{host,Con{port,Con{"finish",Nil{}}}}}:
       command(host,U32.read(port),StreamCases{Test.finish_checks()})
     case Con{_,Con{host,Con{port,Con{"reset-ack",Nil{}}}}}:

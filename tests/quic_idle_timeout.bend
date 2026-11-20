@@ -94,16 +94,58 @@ def release(-C: Type, driver: Stream.Driver<C>, conn: C) -> IO(Unit):
     release(C,driver,done)
     IO.print(String.append("PASS ",String.append(name," timed out")))
 
-@unsafe def exchange(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C, listener: Bool,
-    more: Nat, name: String) -> IO(Unit):
+type Mode is Data:
+  Idle{}
+  Activity{}
+  OneWay{}
+  Defaults{}
+
+def repetitions(mode: Mode) -> Nat:
+  match mode:
+    case Activity{}:
+      4n
+    case _:
+      0n
+
+@unsafe def reply(~C: Type, ~driver: Stream.Driver<C>, conn: C) -> IO(C):
+  do IO<C>:
+    IO.print("READY")
+    Stream.run_checks(~C,~driver,conn,0,1,[Stream.Check{Stream.ReadDatagram{},Stream.Byte{31}},
+      Stream.Check{Stream.SendDatagram{32},Stream.Complete{}}],13000n)
+
+@unsafe def expired(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C,
+    name: String) -> IO(Unit):
+  do IO<Unit>:
+    last : Nat <- IO.now()
+    pending : C & Close.ReadResult() <- CloseTest.inspect(C,ops,conn)
+    open : C <- CloseTest.initial(C,pending)
+    end_conn : C <- wait(~C,~ops,open,6000n)
+    now : Nat <- IO.now()
+    checked : C <- CloseTest.require(C,end_conn,Nat.is_ge(now,Nat.add(last,700n)),
+      "idle timeout before the negotiated deadline")
+    finish(~C,~ops,~driver,checked,name)
+
+@unsafe def scenario(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C, mode: Mode) -> IO(Unit):
+  match mode:
+    case Defaults{}:
+      do IO<Unit>:
+        answered : C <- reply(~C,~driver,conn)
+        closed : C <- CloseTest.wait(~C,~ops,answered,0,5000n)
+        release(C,driver,closed)
+        IO.print("PASS defaults kept alive")
+    case OneWay{}:
+      do IO<Unit>:
+        answered : C <- reply(~C,~driver,conn)
+        expired(~C,~ops,~driver,answered,"one-way")
+    case Activity{}:
+      expired(~C,~ops,~driver,conn,"activity")
+    case Idle{}:
+      expired(~C,~ops,~driver,conn,"idle")
+
+@unsafe def exchange(~C: Type, ~ops: CloseTest.Operations<C>, ~driver: Stream.Driver<C>, conn: C,
+    listener: Bool, +mode: Mode) -> IO(Unit):
   do IO<Unit>:
     before : C & Close.ReadResult() <- CloseTest.inspect(C,ops,conn)
     active : C <- CloseTest.initial(C,before)
-    echoed : C <- traffic(~C,~driver,active,listener,0,more)
-    last : Nat <- IO.now()
-    pending : C & Close.ReadResult() <- CloseTest.inspect(C,ops,echoed)
-    open : C <- CloseTest.initial(C,pending)
-    expired : C <- wait(~C,~ops,open,6000n)
-    now : Nat <- IO.now()
-    checked : C <- CloseTest.require(C,expired,Nat.is_ge(now,Nat.add(last,700n)),"idle timer expired before the negotiated deadline")
-    finish(~C,~ops,~driver,checked,name)
+    echoed : C <- traffic(~C,~driver,active,listener,0,repetitions(mode))
+    scenario(~C,~ops,~driver,echoed,mode)
