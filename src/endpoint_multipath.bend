@@ -79,19 +79,62 @@ def nat_listener_bound(bound: Result<&1,&1,U32 & String,RelayedListener & U32>, 
     case Fail{error}:
       Fail{error}
 
-def bind_nat_listener_offer(offer: Maybe<&2,List<&2,U32>>, port: U32, url: String, +seed: List<&2,U32>,
+def qad_name(parts: List<&2,String>) -> String:
+  match parts:
+    case Con{host,_}:
+      host
+    case Nil{}:
+      ""
+
+def qad_authority(+authority: String, bracketed: Bool, userinfo: Bool) -> String:
+  match bracketed userinfo:
+    case _ True{}:
+      ""
+    case True{} False{}:
+      qad_name(String.split(String.drop(authority,1n),']'))
+    case False{} False{}:
+      qad_name(String.split(authority,':'))
+
+def qad_path(parts: List<&2,String>) -> String:
+  match parts:
+    case Con{+authority,_}:
+      qad_authority(qad_name(String.split(qad_name(String.split(authority,'?')),'#')),
+        String.starts_with(authority,"["),String.contains(authority,"@"))
+    case Nil{}:
+      ""
+
+def qad_host(+url: String, secure: Bool) -> String:
+  match secure:
+    case True{}:
+      qad_path(String.split(String.drop(url,6n),'/'))
+    case False{}:
+      qad_path(String.split(String.drop(url,5n),'/'))
+
+def observe_nat_listener(bound: Result<&1,&1,U32 & String,Quic.MultipathListener & U32>, +url: String)
+    -> IO(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>):
+  match bound:
+    case Done{(listener,port)}:
+      do IO<Result<&1,&1,U32 & String,Quic.MultipathListener & U32>>:
+        active : Quic.MultipathListener <-
+          Quic.configure_listener_qad(listener,qad_host(url,String.starts_with(url,"wss://")),7842)
+        return Done{(active,port)}
+    case Fail{error}:
+      IO.pure(Result<&1,&1,U32 & String,Quic.MultipathListener & U32>,Fail{error})
+
+def bind_nat_listener_offer(offer: Maybe<&2,List<&2,U32>>, port: U32, +url: String, +seed: List<&2,U32>,
     alpns: List<&2,List<&2,U32>>, early_data: U32, limit: U32) -> IO(BindNatRelayed()):
   match offer:
     case Some{parameter}:
       do IO<BindNatRelayed()>:
         bound : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <-
           Quic.bind_dual_multipath_nat_identity("::",port,seed,alpns,early_data,parameter)
-        attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_listener(bound,url,seed)
+        observed : Result<&1,&1,U32 & String,Quic.MultipathListener & U32> <- observe_nat_listener(bound,url)
+        attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_listener(observed,url,seed)
         return nat_listener_bound(attached,limit)
     case None{}:
       IO.pure(BindNatRelayed(),Fail{(22,"invalid NAT traversal limit")})
 
-# Applications advertise reachable addresses on each accepted connection.
+# Discover reachable addresses on the shared UDP sockets and allow explicit candidates per connection.
 def bind_nat_listener(port: U32, url: String, seed: List<&2,U32>, alpns: List<&2,List<&2,U32>>,
     early_data: U32, +limit: U32) -> IO(BindNatRelayed()):
   bind_nat_listener_offer(NatWire.encode_limit(limit),port,url,seed,alpns,early_data,limit)
@@ -317,37 +360,6 @@ def dial_relay_offer(address: Endpoint.Address, identity: Endpoint.Identity, tim
   Endpoint.IpAddress{host,port} = address
   Endpoint.PeerKeys{seed,peer,alpn} = identity
   Quic.connect_multipath_bytes_with_nat_limit(host,port,seed,peer,alpn,routed_nat_limit(),U32.to_nat(timeout))
-
-def qad_name(parts: List<&2,String>) -> String:
-  match parts:
-    case Con{host,_}:
-      host
-    case Nil{}:
-      ""
-
-def qad_authority(+authority: String, bracketed: Bool, userinfo: Bool) -> String:
-  match bracketed userinfo:
-    case _ True{}:
-      ""
-    case True{} False{}:
-      qad_name(String.split(String.drop(authority,1n),']'))
-    case False{} False{}:
-      qad_name(String.split(authority,':'))
-
-def qad_path(parts: List<&2,String>) -> String:
-  match parts:
-    case Con{+authority,_}:
-      qad_authority(qad_name(String.split(qad_name(String.split(authority,'?')),'#')),
-        String.starts_with(authority,"["),String.contains(authority,"@"))
-    case Nil{}:
-      ""
-
-def qad_host(+url: String, secure: Bool) -> String:
-  match secure:
-    case True{}:
-      qad_path(String.split(String.drop(url,6n),'/'))
-    case False{}:
-      qad_path(String.split(String.drop(url,5n),'/'))
 
 def configure_relay_qad(conn: Quic.MultipathConnection, +url: String) -> IO(Quic.MultipathConnection):
   # Iroh publishes QAD on its default QUIC port, independent of the WS port.

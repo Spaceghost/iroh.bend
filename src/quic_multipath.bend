@@ -112,6 +112,17 @@ def poll_routed_qad(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,QadChange()>>):
   import "./quic_multipath.c"
 
+# Resolve the QAD service for the two shared listener sockets.
+def configure_listener_qad(listener: MultipathListener, host: String, port: U32) -> IO(MultipathListener):
+  import "./quic_multipath.c"
+
+def QadSnapshot() -> Type:
+  U32 & (Maybe<&1,QadSocket()> & Maybe<&1,QadSocket()>)
+
+def listener_qad_addresses(conn: MultipathConnection, revision: U32)
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,QadSnapshot()>>):
+  import "./quic_multipath.c"
+
 def multipath_nat_local_candidate(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32> & U32>):
   import "./quic_multipath.c"

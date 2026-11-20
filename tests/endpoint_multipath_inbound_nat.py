@@ -5,14 +5,17 @@ from urllib.parse import urlsplit
 from relay_quic_reconnect import RelayProxy, child, expect
 
 
-async def check(native, reference, url, origin, address):
+async def check(native, reference, url, origin, address, observed=False):
     relay = urlsplit(url)
     proxy = RelayProxy(relay)
-    async with await asyncio.start_server(proxy.handle, "127.0.0.1", 0) as listener:
+    ipv6_relay = ":" in relay.hostname
+    proxy_ip = "::1" if ipv6_relay else "127.0.0.1"
+    relay_host = f"[{relay.hostname}]" if ipv6_relay else relay.hostname
+    async with await asyncio.start_server(proxy.handle, proxy_ip, 0) as listener:
         port = listener.sockets[0].getsockname()[1]
-        bridge = relay._replace(netloc=f"{relay.hostname}:{port}").geturl()
-        async with asyncio.timeout(28):
-            async with child(native, bridge, address) as server:
+        bridge = relay._replace(netloc=f"{relay_host}:{port}").geturl()
+        async with asyncio.timeout(55):
+            async with child(native, bridge, "observed" if observed else address) as server:
                 prefix = b"inbound NAT listener ready "
                 line = await server.stdout.readline()
                 if not line.startswith(prefix):
@@ -32,12 +35,21 @@ async def check(native, reference, url, origin, address):
                     await iroh.stdin.drain()
                     if await iroh.wait() or await server.wait():
                         raise RuntimeError("inbound NAT fixture exited with an error")
-    print(f"PASS inbound Iroh stream survived {relay.scheme} relay loss using {address}")
+    source = "discovered" if observed else "explicit"
+    print(f"PASS inbound Iroh stream survived {relay.scheme} relay loss using {source} address {address}")
 
 
-async def main(native, reference, url, origin):
-    for address in ("127.0.0.2", "::1"):
-        await check(native, reference, url, origin, address)
+async def main(native, reference, url, origin, mode="explicit"):
+    if mode == "observed":
+        host = urlsplit(url).hostname
+        if host not in ("127.0.0.1", "::1"):
+            raise ValueError("the QAD integration fixture requires a loopback relay")
+        await check(native, reference, url, origin, host, observed=True)
+    elif mode == "explicit":
+        for address in ("127.0.0.2", "::1"):
+            await check(native, reference, url, origin, address)
+    else:
+        raise ValueError(f"unknown NAT address source {mode!r}")
 
 
 if __name__ == "__main__":

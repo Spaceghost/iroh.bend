@@ -298,7 +298,7 @@ local names = {
   'open_multipath_stream', 'assign_stream_path', 'write_multipath_stream',
   'MultipathEarlyStream', 'open_multipath_early_stream', 'write_multipath_early_stream', 'resolve_multipath_early_stream',
   'read_multipath_stream', 'drop_multipath_stream', 'close_multipath',
-  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
+  'read_multipath_nat_frame', 'send_multipath_nat_challenge', 'take_multipath_nat_response', 'send_multipath_nat_address', 'bind_multipath_nat_source', 'route_multipath_nat_source', 'start_multipath_qad', 'poll_multipath_qad', 'configure_routed_qad', 'poll_routed_qad', 'configure_listener_qad', 'listener_qad_addresses', 'multipath_nat_local_candidate', 'open_multipath_nat_path', 'bind_multipath', 'bind_multipath_nat_offer', 'bind_multipath_alpns_nat_offer', 'bind_multipath_bytes', 'bind_multipath_alpns', 'set_multipath_alpns',
   'bind_resumable_multipath', 'bind_multipath_identity', 'bind_dual_multipath_identity', 'bind_dual_multipath_nat_identity', 'multipath_remote_id', 'accept_multipath', 'close_multipath_listener',
   'QadServer', 'bind_qad_server', 'step_qad_server', 'close_qad_server',
   'accept_multipath_stream', 'next_multipath_path',
@@ -362,6 +362,8 @@ local iroh_mp_route_multipath_nat_source: uint32 <cimport,nodecl>
 local iroh_mp_start_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_configure_routed_qad: uint32 <cimport,nodecl>
 local iroh_mp_poll_routed_qad: uint32 <cimport,nodecl>
+local iroh_mp_configure_listener_qad: uint32 <cimport,nodecl>
+local iroh_mp_listener_qad_addresses: uint32 <cimport,nodecl>
 local iroh_mp_poll_multipath_qad: uint32 <cimport,nodecl>
 local iroh_mp_multipath_nat_local_candidate: uint32 <cimport,nodecl>
 local iroh_mp_open_multipath_nat_path: uint32 <cimport,nodecl>
@@ -514,12 +516,6 @@ local ADD_ADDRESS_V6: uint64 <comptime> = 0x3d7f91
 local REMOVE_ADDRESS: uint64 <comptime> = 0x3d7f94
 local REACH_OUT_V4: uint64 <comptime> = 0x3d7f92
 local REACH_OUT_V6: uint64 <comptime> = 0x3d7f93
-local Listener = @record{
-  next: pointer, id: uint32, fd: cint, ipv4_fd:cint, quic: *quic_t, local_addr: storage_t,
-  ipv4_addr:storage_t, dispatch_ipv4:boolean,
-  refs: uint32, stopped: boolean, ossl:*mp_ssl_ctx, ossl_peer:*evp_t, resumable:boolean,
-  nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer: boolean
-}
 local Path = @record{
   next: pointer, fd: cint, local_addr: storage_t, peer: storage_t,
   id: uint32, status: uint32, unconnected: boolean
@@ -562,6 +558,13 @@ local AddressDiscovery = @record{
 }
 local QadRoute = @record{peer:storage_t, observed:storage_t, running:*AddressDiscovery, retry_at:uint64}
 local RoutedDiscovery = @record{host:cstring, handle:uint32, port:uint16, v4:QadRoute, v6:QadRoute}
+local Listener = @record{
+  next: pointer, id: uint32, fd: cint, ipv4_fd:cint, quic: *quic_t, local_addr: storage_t,
+  ipv4_addr:storage_t, dispatch_ipv4:boolean,
+  refs: uint32, stopped: boolean, ossl:*mp_ssl_ctx, ossl_peer:*evp_t, resumable:boolean,
+  discovery:*RoutedDiscovery, qad_revision:uint32,
+  nat_offer: [NAT_PARAMETER_SIZE]uint8, sends_nat_offer: boolean
+}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
   paths: *Path, path_count: uint32, last_path_id: uint32, streams: *Stream, stream_count: uint32,
@@ -1414,17 +1417,6 @@ local function find_stream(conn: *Connection, id: uint64): *Stream
   return stream
 end
 
-local function release_listener(listener: *Listener)
-  listener.refs = listener.refs - 1
-  if listener.refs ~= 0 then return end
-  if listener.quic ~= nilptr then picoquic_free(listener.quic) end
-  if listener.fd >= 0 then close(listener.fd) end
-  if listener.ipv4_fd >= 0 then close(listener.ipv4_fd) end
-  SSL_CTX_free(listener.ossl)
-  EVP_PKEY_free(listener.ossl_peer)
-  C.free(listener)
-end
-
 local function pop_datagram(conn: *Connection)
   local item = conn.datagram_first
   conn.datagram_first = (@*Datagram)(item.next)
@@ -1467,6 +1459,18 @@ local function free_routed_discovery(config:*RoutedDiscovery)
   free_discovery(config.v6.running)
   C.free(config.host)
   C.free(config)
+end
+
+local function release_listener(listener: *Listener)
+  listener.refs = listener.refs - 1
+  if listener.refs ~= 0 then return end
+  free_routed_discovery(listener.discovery)
+  if listener.quic ~= nilptr then picoquic_free(listener.quic) end
+  if listener.fd >= 0 then close(listener.fd) end
+  if listener.ipv4_fd >= 0 then close(listener.ipv4_fd) end
+  SSL_CTX_free(listener.ossl)
+  EVP_PKEY_free(listener.ossl_peer)
+  C.free(listener)
 end
 
 local function destroy(conn: *Connection)
@@ -2355,6 +2359,135 @@ local function read_packets(conn: *Connection, now: uint64): uint32
   return 0
 end
 
+local function discovery_event(cnx:*cnx_t, id:uint64, bytes:*uint8, size:csize, kind:cint, ctx:pointer,
+    stream_user:pointer): cint
+  local discovery = (@*AddressDiscovery)(ctx)
+  if kind == picoquic_callback_ready then
+    discovery.ready = true
+  elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
+      kind == picoquic_callback_stateless_reset then
+    discovery.closed = true
+  end
+  return 0
+end
+
+local function create_discovery(peer:*storage_t, name:cstring, roots:cstring): *AddressDiscovery
+  local discovery = (@*AddressDiscovery)(C.calloc(1,#AddressDiscovery))
+  if discovery == nilptr then return nilptr end
+  discovery.peer = $peer
+  local now = picoquic_current_time()
+  discovery.started = now
+  discovery.quic = picoquic_create(1,nilptr,nilptr,roots,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
+  if discovery.quic ~= nilptr then
+    picoquic_set_client_cert_verification_policy(discovery.quic,1)
+    picoquic_set_default_address_discovery_mode(discovery.quic,2)
+    discovery.cnx = picoquic_create_client_cnx(discovery.quic,peer,now,1,name,'/iroh-qad/0',
+      (@pointer)(discovery_event),discovery)
+  end
+  if discovery.cnx == nilptr then
+    free_discovery(discovery)
+    return nilptr
+  end
+  return discovery
+end
+
+local function send_discovery(path:*Path, discovery:*AddressDiscovery): uint32
+  local data: [IO_CAPACITY]uint8
+  local from: storage_t, to: storage_t
+  local length: csize
+  local iface: cint
+  local now = picoquic_current_time()
+  if picoquic_prepare_packet(discovery.cnx,now,&data[0],#data,&length,&to,&from,&iface) ~= 0 then return EIO end
+  if length == 0 then return 0 end
+  local written = sendto(path.fd,&data[0],length,0,&discovery.peer,address_size(&discovery.peer))
+  if written == (@isize)(length) then return 0 end
+  if written < 0 and (errno == EAGAIN or errno == EINTR) then return 0 end
+  return written < 0 and (@uint32)(errno) or EIO
+end
+
+local function unspecified_address(addr:*storage_t): boolean
+  local zero: [16]uint8
+  if addr.ss_family == AF_INET then return ((@*addr_t)(addr)).sin_addr.s_addr == 0 end
+  return C.memcmp(&((@*addr6_t)(addr)).sin6_addr,&zero[0],16) == 0
+end
+
+local function observed_address(discovery:*AddressDiscovery, output:*storage_t): boolean
+  if not discovery.ready or picoquic_get_path_addr(discovery.cnx,0,3,output) ~= 0 then return false end
+  if output.ss_family == AF_INET then
+    return not unspecified_address(output) and ((@*addr_t)(output)).sin_port ~= 0
+  end
+  return output.ss_family == AF_INET6 and not unspecified_address(output) and ((@*addr6_t)(output)).sin6_port ~= 0
+end
+
+local function default_qad_roots(): cstring
+  local roots = C.getenv('CURL_CA_BUNDLE')
+  if roots == nilptr then roots = C.getenv('SSL_CERT_FILE') end
+  if roots == nilptr then roots = X509_get_default_cert_file() end
+  return roots
+end
+
+local function poll_qad_route(path:*Path, route:*QadRoute, host:cstring, previous:*storage_t): boolean
+  if path == nilptr or route.peer.ss_family == 0 then return false end
+  local now = picoquic_current_time()
+  if route.running == nilptr and now >= route.retry_at then
+    -- Keep each address family independent and leave the last authenticated
+    -- observation in use if the relay is temporarily unreachable.
+    route.retry_at = now + 25000000
+    local roots = default_qad_roots()
+    if roots ~= nilptr and C.strlen(roots) ~= 0 then route.running = create_discovery(&route.peer,host,roots) end
+  end
+  local discovery = route.running
+  if discovery == nilptr then return false end
+  local observed: storage_t
+  if observed_address(discovery,&observed) then
+    $previous = route.observed
+    route.observed = observed
+    picoquic_close(discovery.cnx,0)
+    send_discovery(path,discovery)
+    free_discovery(discovery)
+    route.running = nilptr
+    return previous.ss_family == 0 or picoquic_compare_addr(previous,&observed) ~= 0
+  end
+  if discovery.closed or picoquic_get_cnx_state(discovery.cnx) == picoquic_state_disconnected or
+      now >= discovery.started + 3000000 or send_discovery(path,discovery) ~= 0 then
+    free_discovery(discovery)
+    route.running = nilptr
+  end
+  return false
+end
+
+local PacketHeader <cimport,nodecl,codename 'picoquic_packet_header'> = @record{}
+local function picoquic_parse_packet_header(quic:*quic_t, bytes:*uint8, size:csize, peer:*storage_t,
+    header:*PacketHeader, cnx:**cnx_t, receiving:cint):cint <cimport,nodecl> end
+
+local function listener_packet_context(listener:*Listener, bytes:*uint8, size:csize, peer:*storage_t): *quic_t
+  local config = listener.discovery
+  if config == nilptr then return listener.quic end
+  local discovery = peer.ss_family == AF_INET and config.v4.running or config.v6.running
+  if discovery ~= nilptr and picoquic_compare_addr(peer,&discovery.peer) == 0 then
+    local header:PacketHeader
+    local cnx:*cnx_t
+    picoquic_parse_packet_header(discovery.quic,bytes,size,peer,&header,&cnx,1)
+    if cnx == discovery.cnx then return discovery.quic end
+  end
+  return listener.quic
+end
+
+local function pump_listener_qad(listener:*Listener)
+  local config = listener.discovery
+  if config == nilptr then return end
+  local v4:Path = {fd=listener.ipv4_fd,local_addr=listener.ipv4_addr}
+  local v6:Path = {fd=listener.fd,local_addr=listener.local_addr}
+  local previous:storage_t
+  local changed_v4 = v4.fd >= 0 and config.v4.observed.ss_family == 0 and
+    poll_qad_route(&v4,&config.v4,config.host,&previous)
+  local changed_v6 = config.v6.observed.ss_family == 0 and
+    poll_qad_route(&v6,&config.v6,config.host,&previous)
+  if changed_v4 or changed_v6 then
+    listener.qad_revision = listener.qad_revision + 1
+  end
+end
+
 local function receive_listener(listener: *Listener, now: uint64): uint32
   local bytes: [65536]uint8
   local peer: storage_t
@@ -2383,7 +2516,9 @@ local function receive_listener(listener: *Listener, now: uint64): uint32
     destination = listener.local_addr
   end
   if count > 0 then
-    picoquic_incoming_packet(listener.quic,&bytes[0],(@csize)(count),&peer,&destination,iface,ecn,now)
+    local size = (@csize)(count)
+    local quic = listener_packet_context(listener,&bytes[0],size,&peer)
+    picoquic_incoming_packet(quic,&bytes[0],size,&peer,&destination,iface,ecn,now)
   elseif count < 0 and errno ~= EAGAIN and errno ~= EINTR then
     return (@uint32)(errno)
   end
@@ -2403,6 +2538,7 @@ end
 local function pump_listener(listener: *Listener, now: uint64): uint32
   local error = receive_listener(listener,now)
   if error ~= 0 then return error end
+  pump_listener_qad(listener)
   local packet = picoquic_dequeue_stateless_packet(listener.quic)
   if packet ~= nilptr then
     if not listener.stopped then
@@ -2481,12 +2617,6 @@ local function numeric_argument(e: Env, item: Term, port: Term, out: *storage_t)
   defer C.free(host) end
   if io_nul(host,size) then return 0 end
   return address(host,(@uint16)(port),out)
-end
-
-local function unspecified_address(addr:*storage_t): boolean
-  local zero: [16]uint8
-  if addr.ss_family == AF_INET then return ((@*addr_t)(addr)).sin_addr.s_addr == 0 end
-  return C.memcmp(&((@*addr6_t)(addr)).sin6_addr,&zero[0],16) == 0
 end
 
 local function bind_listener(e: Env, args: *[0]Term, mode: uint32, advertise_nat: boolean, resumable: boolean, discover_peer: boolean, dual:boolean): Term
@@ -3196,38 +3326,6 @@ local function close_qad_server_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return term_pak(iroh_mp_Unit,0)
 end
 
-local function discovery_event(cnx:*cnx_t, id:uint64, bytes:*uint8, size:csize, kind:cint, ctx:pointer,
-    stream_user:pointer): cint
-  local discovery = (@*AddressDiscovery)(ctx)
-  if kind == picoquic_callback_ready then
-    discovery.ready = true
-  elseif kind == picoquic_callback_close or kind == picoquic_callback_application_close or
-      kind == picoquic_callback_stateless_reset then
-    discovery.closed = true
-  end
-  return 0
-end
-
-local function create_discovery(peer:*storage_t, name:cstring, roots:cstring): *AddressDiscovery
-  local discovery = (@*AddressDiscovery)(C.calloc(1,#AddressDiscovery))
-  if discovery == nilptr then return nilptr end
-  discovery.peer = $peer
-  local now = picoquic_current_time()
-  discovery.started = now
-  discovery.quic = picoquic_create(1,nilptr,nilptr,roots,nilptr,nilptr,nilptr,nilptr,nilptr,nilptr,now,nilptr,nilptr,nilptr,0)
-  if discovery.quic ~= nilptr then
-    picoquic_set_client_cert_verification_policy(discovery.quic,1)
-    picoquic_set_default_address_discovery_mode(discovery.quic,2)
-    discovery.cnx = picoquic_create_client_cnx(discovery.quic,peer,now,1,name,'/iroh-qad/0',
-      (@pointer)(discovery_event),discovery)
-  end
-  if discovery.cnx == nilptr then
-    free_discovery(discovery)
-    return nilptr
-  end
-  return discovery
-end
-
 local function start_discovery(e:Env, conn:*Connection, args:*[0]Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   if conn.nat_source == nilptr then return io_fail(e,ENOTSUP,'address discovery requires an independent UDP source') end
@@ -3252,28 +3350,6 @@ end
 
 local function start_discovery_run(e:Env, args:*[0]Term, work:*IoWork): Term
   return io_tup(e,args[0],start_discovery(e,find_connection(e,args[0]),args))
-end
-
-local function send_discovery(path:*Path, discovery:*AddressDiscovery): uint32
-  local data: [IO_CAPACITY]uint8
-  local from: storage_t, to: storage_t
-  local length: csize
-  local iface: cint
-  local now = picoquic_current_time()
-  if picoquic_prepare_packet(discovery.cnx,now,&data[0],#data,&length,&to,&from,&iface) ~= 0 then return EIO end
-  if length == 0 then return 0 end
-  local written = sendto(path.fd,&data[0],length,0,&discovery.peer,address_size(&discovery.peer))
-  if written == (@isize)(length) then return 0 end
-  if written < 0 and (errno == EAGAIN or errno == EINTR) then return 0 end
-  return written < 0 and (@uint32)(errno) or EIO
-end
-
-local function observed_address(discovery:*AddressDiscovery, output:*storage_t): boolean
-  if not discovery.ready or picoquic_get_path_addr(discovery.cnx,0,3,output) ~= 0 then return false end
-  if output.ss_family == AF_INET then
-    return not unspecified_address(output) and ((@*addr_t)(output)).sin_port ~= 0
-  end
-  return output.ss_family == AF_INET6 and not unspecified_address(output) and ((@*addr6_t)(output)).sin6_port ~= 0
 end
 
 local function poll_discovery(e:Env, conn:*Connection): Term
@@ -3337,63 +3413,71 @@ local function accept_qad_routes(e:Env, work:*IoWork): Term
   return handle
 end
 
-local function configure_routed_qad_run(e:Env, args:*[0]Term, work:*IoWork): Term
-  local conn = find_connection(e,args[0])
-  if conn == nilptr or conn.closed or conn.nat_inbox == nilptr or conn.routed_discovery ~= nilptr or
-      args[2] == 0 or args[2] > 65535 then return args[0] end
+local function make_qad_routes(e:Env, args:*[0]Term, handle:uint32): *RoutedDiscovery
+  if args[2] == 0 or args[2] > 65535 then return nilptr end
   local size:uint64
   local host = io_cstr(e,args[1],&size)
   if size == 0 or io_nul(host,size) then
     C.free(host)
-    return args[0]
+    return nilptr
   end
   local config = (@*RoutedDiscovery)(C.calloc(1,#RoutedDiscovery))
   if config == nilptr then
     C.free(host)
-    return args[0]
+    return nilptr
   end
   config.host = host
-  config.handle = conn.id
+  config.handle = handle
   config.port = (@uint16)(args[2])
+  return config
+end
+
+local function configure_routed_qad_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed or conn.nat_inbox == nilptr or conn.routed_discovery ~= nilptr then return args[0] end
+  local config = make_qad_routes(e,args,conn.id)
+  if config == nilptr then return args[0] end
   work.data = (@cstring)(config)
   return io_work(work,resolve_qad_routes,accept_qad_routes)
 end
 
-local function default_qad_roots(): cstring
-  local roots = C.getenv('CURL_CA_BUNDLE')
-  if roots == nilptr then roots = C.getenv('SSL_CERT_FILE') end
-  if roots == nilptr then roots = X509_get_default_cert_file() end
-  return roots
+local function accept_listener_qad_routes(e:Env, work:*IoWork): Term
+  local config = (@*RoutedDiscovery)(work.data)
+  local handle = term_pak(iroh_mp_MultipathListener,config.handle)
+  local listener = find_listener(e,handle)
+  if listener == nilptr or listener.discovery ~= nilptr or
+      (config.v4.peer.ss_family == 0 and config.v6.peer.ss_family == 0) then
+    free_routed_discovery(config)
+  else
+    listener.discovery = config
+  end
+  return handle
 end
 
-local function poll_qad_route(path:*Path, route:*QadRoute, host:cstring, previous:*storage_t): boolean
-  if path == nilptr or route.peer.ss_family == 0 then return false end
-  local now = picoquic_current_time()
-  if route.running == nilptr and now >= route.retry_at then
-    -- Keep each address family independent and leave the last authenticated
-    -- observation in use if the relay is temporarily unreachable.
-    route.retry_at = now + 25000000
-    local roots = default_qad_roots()
-    if roots ~= nilptr and C.strlen(roots) ~= 0 then route.running = create_discovery(&route.peer,host,roots) end
+local function configure_listener_qad_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  local listener = find_listener(e,args[0])
+  if listener == nilptr or listener.ipv4_fd < 0 or listener.discovery ~= nilptr then return args[0] end
+  local config = make_qad_routes(e,args,listener.id)
+  if config == nilptr then return args[0] end
+  work.data = (@cstring)(config)
+  return io_work(work,resolve_qad_routes,accept_listener_qad_routes)
+end
+
+local function optional_observation(e:Env, addr:*storage_t): Term
+  if addr.ss_family == 0 then return term_pak(iroh_mp_None,0) end
+  return io_box(e,iroh_mp_Some,socket_candidate(e,addr))
+end
+
+local function listener_qad_addresses_run(e:Env, args:*[0]Term, work:*IoWork): Term
+  local conn = find_connection(e,args[0])
+  if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
+  local listener = conn.listener
+  if listener == nilptr or listener.discovery == nilptr or listener.qad_revision == args[1] then
+    return io_tup(e,args[0],none(e))
   end
-  local discovery = route.running
-  if discovery == nilptr then return false end
-  local observed: storage_t
-  if observed_address(discovery,&observed) then
-    $previous = route.observed
-    route.observed = observed
-    picoquic_close(discovery.cnx,0)
-    send_discovery(path,discovery)
-    free_discovery(discovery)
-    route.running = nilptr
-    return previous.ss_family == 0 or picoquic_compare_addr(previous,&observed) ~= 0
-  end
-  if discovery.closed or picoquic_get_cnx_state(discovery.cnx) == picoquic_state_disconnected or
-      now >= discovery.started + 3000000 or send_discovery(path,discovery) ~= 0 then
-    free_discovery(discovery)
-    route.running = nilptr
-  end
-  return false
+  local config = listener.discovery
+  local addresses = io_tup(e,optional_observation(e,&config.v4.observed),optional_observation(e,&config.v6.observed))
+  return io_tup(e,args[0],optional_id(e,io_tup(e,listener.qad_revision,addresses)))
 end
 
 local function qad_mapping_result(e:Env, previous:*storage_t, current:*storage_t): Term
@@ -3948,6 +4032,8 @@ local function register_multipath() <cexport,codename 'iroh_register_multipath',
   if iroh_mp_close_qad_server ~= 0xffffffff then io_eff(iroh_mp_close_qad_server,close_qad_server_run) end
   if iroh_mp_configure_routed_qad ~= 0xffffffff then io_eff(iroh_mp_configure_routed_qad,configure_routed_qad_run) end
   if iroh_mp_poll_routed_qad ~= 0xffffffff then io_eff(iroh_mp_poll_routed_qad,poll_routed_qad_run) end
+  if iroh_mp_configure_listener_qad ~= 0xffffffff then io_eff(iroh_mp_configure_listener_qad,configure_listener_qad_run) end
+  if iroh_mp_listener_qad_addresses ~= 0xffffffff then io_eff(iroh_mp_listener_qad_addresses,listener_qad_addresses_run) end
   if iroh_mp_start_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_start_multipath_qad,start_discovery_run) end
   if iroh_mp_poll_multipath_qad ~= 0xffffffff then io_eff(iroh_mp_poll_multipath_qad,poll_discovery_run) end
   if iroh_mp_route_multipath_nat_source ~= 0xffffffff then io_eff(iroh_mp_route_multipath_nat_source,route_nat_source_run) end

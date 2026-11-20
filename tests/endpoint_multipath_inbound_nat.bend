@@ -128,28 +128,43 @@ def advertised(result: Nat.ListenerConnection() & Result<&1,&1,U32 & String,Unit
         _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.close_nat_listener(owner)
         Fixture.reject(Unit,conn,code,message)
 
+def start_observed(connection: Nat.ListenerConnection(), owner: Endpoint.NatRelayedListener(), stream: U32,
+    address: Maybe<&2,State.Candidate>) -> IO(Unit):
+  match address:
+    case Some{candidate}:
+      advertised(Nat.advertise_listener(connection,candidate),owner,stream)
+    case None{}:
+      drive(45000n,connection,owner,stream)
+
 def start_stream(result: Quic.MultipathConnection & U32, driver: Nat.ListenerDriver,
-    owner: Endpoint.NatRelayedListener(), address: State.Candidate) -> IO(Unit):
+    owner: Endpoint.NatRelayedListener(), address: Maybe<&2,State.Candidate>) -> IO(Unit):
   (conn,+stream) = result
   do IO<Unit>:
     read : Quic.MultipathConnection <- first_byte(6000n,conn,stream)
     sent : Quic.MultipathConnection <- queue_reply(read,stream,98,0)
-    advertised(Nat.advertise_listener((sent,driver),address),owner,stream)
+    start_observed((sent,driver),owner,stream,address)
 
-def connected(result: Endpoint.NatRelayedListener() & Nat.ListenerConnection(), address: State.Candidate) -> IO(Unit):
+def connected(result: Endpoint.NatRelayedListener() & Nat.ListenerConnection(), address: Maybe<&2,State.Candidate>) -> IO(Unit):
   (owner,(conn,driver)) = result
   do IO<Unit>:
     stream : Quic.MultipathConnection & U32 <- Listener.incoming(6000n,conn,0)
     start_stream(stream,driver,owner,address)
 
-def run_bound(bound: Endpoint.NatRelayedListener() & U32, ip: Wire.Address) -> IO(Unit):
+def explicit_candidate(ip: Maybe<&2,Wire.Address>, port: U32) -> Maybe<&2,State.Candidate>:
+  match ip:
+    case Some{address}:
+      Some{State.Socket{address,port}}
+    case None{}:
+      None{}
+
+def run_bound(bound: Endpoint.NatRelayedListener() & U32, ip: Maybe<&2,Wire.Address>) -> IO(Unit):
   (owner,+port) = bound
   do IO<Unit>:
     IO.print(String.append("inbound NAT listener ready ",U32.show(port)))
     result : Endpoint.NatRelayedListener() & Nat.ListenerConnection() <- accept(30000n,owner)
-    connected(result,State.Socket{ip,port})
+    connected(result,explicit_candidate(ip,port))
 
-def listen(url: String, ip: Wire.Address) -> IO(Unit):
+def listen(url: String, ip: Maybe<&2,Wire.Address>) -> IO(Unit):
   do IO<Unit>:
     bound : Endpoint.NatRelayedListener() & U32 <- IO.try(Endpoint.NatRelayedListener() & U32,
       Endpoint.bind_nat_listener(0,url,List.replicate(U32,32n,42),[Fixture.text_alpn()],0,8))
@@ -158,11 +173,13 @@ def listen(url: String, ip: Wire.Address) -> IO(Unit):
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,url,"127.0.0.2"]:
-      listen(url,Wire.IPv4{[127,0,0,2]})
+      listen(url,Some{Wire.IPv4{[127,0,0,2]}})
     case [_,url,"::1"]:
-      listen(url,Wire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]})
+      listen(url,Some{Wire.IPv6{[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]}})
+    case [_,url,"observed"]:
+      listen(url,None{})
     case _:
-      IO.die(Unit,2,"expected the relay URL and direct candidate IP")
+      IO.die(Unit,2,"expected the relay URL and direct candidate IP or observed")
 
 def main() -> IO(Unit):
   do IO<Unit>:
