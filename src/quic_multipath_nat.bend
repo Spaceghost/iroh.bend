@@ -174,7 +174,7 @@ type CandidateProbe is Data:
 
 type Phase is Data:
   Waiting{}
-  Sending{frames: List<&2,Wire.Frame>, targets: List<&2,State.Candidate>}
+  Sending{frames: List<&2,Wire.Frame>, targets: List<&2,State.Candidate>, active: Maybe<&2,U32>}
   Probing{jobs: List<&2,CandidateProbe>}
   Opening{address: State.Candidate, remaining: List<&2,CandidateProbe>}
   Validating{path: U32, since: U32, remaining: List<&2,CandidateProbe>}
@@ -292,17 +292,30 @@ def initialize_relay(conn: Quic.MultipathConnection, local: U32) -> IO(Quic.Mult
     params : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <- Quic.peer_multipath_parameters(conn)
     return relay_parameters(params,local)
 
-def start_round(attempt: Send.RoundResult, peer: State.PeerState, sockets: ProbeSockets) -> Dialer:
-  match attempt:
-    case Send.Round{state,Send.RoundStarted{_,frames,Con{target,rest}}}:
-      Dialer{peer,state,sockets,False{},Sending{frames,Con{target,rest}}}
-    case Send.Round{state,_}:
-      Dialer{peer,state,sockets,False{},Waiting{}}
+def resting_phase(active: Maybe<&2,U32>) -> Phase:
+  match active:
+    case Some{path}:
+      DirectPath{path}
+    case None{}:
+      Waiting{}
 
-def advance_waiting(+peer: State.PeerState, local: Send.LocalState, +sockets: ProbeSockets, dirty: Bool) -> Dialer:
+def start_round(attempt: Send.RoundResult, peer: State.PeerState, sockets: ProbeSockets,
+    active: Maybe<&2,U32>) -> Dialer:
+  match attempt active:
+    case Send.Round{state,Send.RoundStarted{_,frames,targets}} Some{path}:
+      Dialer{peer,state,sockets,False{},Sending{frames,targets,Some{path}}}
+    case Send.Round{state,Send.RoundStarted{_,frames,Con{target,rest}}} None{}:
+      Dialer{peer,state,sockets,False{},Sending{frames,Con{target,rest},None{}}}
+    case Send.Round{state,_} retained:
+      Dialer{peer,state,sockets,False{},resting_phase(retained)}
+
+def next_round(+peer: State.PeerState, local: Send.LocalState, +sockets: ProbeSockets, active: Maybe<&2,U32>) -> Dialer:
+  start_round(Send.begin(local,peer,allows_ipv6(sockets)),peer,sockets,active)
+
+def advance_waiting(peer: State.PeerState, local: Send.LocalState, sockets: ProbeSockets, dirty: Bool) -> Dialer:
   match dirty:
     case True{}:
-      start_round(Send.begin(local,peer,allows_ipv6(sockets)),peer,sockets)
+      next_round(peer,local,sockets,None{})
     case False{}:
       Dialer{peer,local,sockets,False{},Waiting{}}
 
@@ -423,17 +436,23 @@ def advance_phase(conn: Quic.MultipathConnection, state: Dialer, +now: U32)
   match state:
     case Dialer{peer,local,sockets,dirty,Waiting{}}:
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{advance_waiting(peer,local,sockets,dirty)}))
-    case Dialer{peer,local,RoutedSockets{},True{},Sending{Nil{},_}}:
+    case Dialer{peer,local,RoutedSockets{},True{},DirectPath{path}}:
       IO.pure(Quic.MultipathConnection & DialerResult(),
-        (conn,Done{advance_waiting(peer,local,RoutedSockets{},True{})}))
-    case Dialer{peer,local,sockets,dirty,Sending{Nil{},targets}}:
+        (conn,Done{next_round(peer,local,RoutedSockets{},Some{path})}))
+    case Dialer{peer,local,RoutedSockets{},True{},Sending{Nil{},_,active}}:
+      IO.pure(Quic.MultipathConnection & DialerResult(),
+        (conn,Done{next_round(peer,local,RoutedSockets{},active)}))
+    case Dialer{peer,local,sockets,dirty,Sending{Nil{},_,Some{path}}}:
+      IO.pure(Quic.MultipathConnection & DialerResult(),
+        (conn,Done{Dialer{peer,local,sockets,dirty,DirectPath{path}}}))
+    case Dialer{peer,local,sockets,dirty,Sending{Nil{},targets,None{}}}:
       IO.pure(Quic.MultipathConnection & DialerResult(),
         (conn,Done{Dialer{peer,local,sockets,dirty,Probing{begin_probes(targets,now)}}}))
-    case Dialer{+peer,+local,+sockets,+dirty,Sending{Con{+frame,+rest},+targets}}:
+    case Dialer{+peer,+local,+sockets,+dirty,Sending{Con{+frame,+rest},+targets,+active}}:
       do IO<Quic.MultipathConnection & DialerResult()>:
         sent : Quic.MultipathConnection & Result<&1,&1,U32 & String,U32> <- send_address(conn,frame)
-        return sending_result(sent,Dialer{peer,local,sockets,dirty,Sending{Con{frame,rest},targets}},
-          Dialer{peer,local,sockets,dirty,Sending{rest,targets}})
+        return sending_result(sent,Dialer{peer,local,sockets,dirty,Sending{Con{frame,rest},targets,active}},
+          Dialer{peer,local,sockets,dirty,Sending{rest,targets,active}})
     case Dialer{peer,local,sockets,dirty,Probing{Nil{}}}:
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{advance_waiting(peer,local,sockets,dirty)}))
     case Dialer{+peer,local,sockets,dirty,Probing{Con{Trying{+target,job},rest}}}:
@@ -464,11 +483,8 @@ def new_source_phase(phase: Phase) -> Phase:
 
 def add_routed_source(conn: Quic.MultipathConnection, peer: State.PeerState, change: Send.Change,
     +phase: Phase, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
-  match change:
-    case Send.Changed{local,Send.Updated{}}:
-      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
-    case Send.Changed{local,_}:
-      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
+  Send.Changed{local,_} = change
+  advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
 
 # A peer with room for one address can still receive the new family's
 # local candidate in the next round.
@@ -524,28 +540,56 @@ def drive_frame(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Fail{error}))
 
 def accept_observation(conn: Quic.MultipathConnection, peer: State.PeerState, change: Send.Change,
-    +phase: Phase, dirty: Bool, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
-  match change:
-    case Send.Changed{local,Send.Updated{}}:
+    +phase: Phase, dirty: Bool, now: U32, replaced: Bool) -> IO(Quic.MultipathConnection & DialerResult()):
+  match change replaced:
+    case Send.Changed{local,Send.Updated{}} _:
       advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
-    case Send.Changed{local,_}:
+    case Send.Changed{local,_} True{}:
+      advance_phase(conn,Dialer{peer,local,RoutedSockets{},True{},new_source_phase(phase)},now)
+    case Send.Changed{local,_} False{}:
       IO.pure(Quic.MultipathConnection & DialerResult(),
         (conn,Done{Dialer{peer,local,RoutedSockets{},dirty,phase}}))
 
+def changed_local(change: Send.Change) -> Send.LocalState:
+  Send.Changed{current,_} = change
+  current
+
+def discard_observation(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>,
+    local: Send.LocalState) -> Quic.MultipathConnection & Send.LocalState:
+  match pair:
+    case (conn,Done{address}):
+      (conn,changed_local(Send.remove(local,address)))
+    case (conn,Fail{_}):
+      (conn,local)
+
+def add_replacement(update: Quic.MultipathConnection & Send.LocalState, peer: State.PeerState, +address: State.Candidate,
+    phase: Phase, dirty: Bool, now: U32, replaced: Bool) -> IO(Quic.MultipathConnection & DialerResult()):
+  (conn,local) = update
+  accept_observation(conn,peer,fit_routed_address(Send.add(local,address),address),phase,dirty,now,replaced)
+
+def replace_observation(conn: Quic.MultipathConnection, previous: Maybe<&1,Quic.QadSocket()>,
+    peer: State.PeerState, local: Send.LocalState, address: State.Candidate, phase: Phase, dirty: Bool, now: U32)
+    -> IO(Quic.MultipathConnection & DialerResult()):
+  match previous:
+    case Some{old}:
+      add_replacement(discard_observation(local_address((conn,Done{old})),local),peer,address,phase,dirty,now,True{})
+    case None{}:
+      add_replacement((conn,local),peer,address,phase,dirty,now,False{})
+
 def include_routed_observation(
     observation: Quic.MultipathConnection & Result<&1,&1,U32 & String,State.Candidate>,
-    state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
+    previous: Maybe<&1,Quic.QadSocket()>, state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
   match observation state:
-    case (conn,Done{+address}) Dialer{peer,local,RoutedSockets{},dirty,phase}:
-      accept_observation(conn,peer,fit_routed_address(Send.add(local,address),address),phase,dirty,now)
+    case (conn,Done{address}) Dialer{peer,local,RoutedSockets{},dirty,phase}:
+      replace_observation(conn,previous,peer,local,address,phase,dirty,now)
     case (conn,_) current:
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{current}))
 
 def update_routed_observation(pair: Quic.MultipathConnection & Result<&1,&1,U32 & String,
-    Maybe<&1,List<&2,U32> & U32>>, state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
+    Maybe<&1,Quic.QadChange()>>, state: Dialer, now: U32) -> IO(Quic.MultipathConnection & DialerResult()):
   match pair:
-    case (conn,Done{Some{address}}):
-      include_routed_observation(local_address((conn,Done{address})),state,now)
+    case (conn,Done{Some{(previous,address)}}):
+      include_routed_observation(local_address((conn,Done{address})),previous,state,now)
     case (conn,_):
       IO.pure(Quic.MultipathConnection & DialerResult(),(conn,Done{state}))
 
@@ -554,7 +598,7 @@ def poll_observation(result: Quic.MultipathConnection & DialerResult(), now: U32
   match result:
     case (conn,Done{Dialer{peer,local,RoutedSockets{},dirty,phase}}):
       do IO<Quic.MultipathConnection & DialerResult()>:
-        observed : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>> <-
+        observed : Quic.MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,Quic.QadChange()>> <-
           Quic.poll_routed_qad(conn)
         update_routed_observation(observed,Dialer{peer,local,RoutedSockets{},dirty,phase},now)
     case unchanged:
@@ -587,12 +631,25 @@ def retry_path(state: Dialer) -> Dialer:
   match state:
     case Dialer{peer,local,sockets,_,DirectPath{_}}:
       Dialer{peer,local,sockets,True{},Waiting{}}
+    case Dialer{peer,local,sockets,dirty,Sending{frames,targets,Some{_}}}:
+      Dialer{peer,local,sockets,dirty,Sending{frames,targets,None{}}}
     case current:
       current
+
+def hold_path(state: Dialer, +path: U32) -> Dialer:
+  match state:
+    case Dialer{peer,local,sockets,dirty,Sending{frames,targets,_}}:
+      Dialer{peer,local,sockets,dirty,Sending{frames,targets,Some{path}}}
+    case Dialer{peer,local,sockets,dirty,_}:
+      Dialer{peer,local,sockets,dirty,DirectPath{path}}
+    case Unavailable{}:
+      Unavailable{}
 
 def direct_path(state: Dialer) -> Maybe<&1,U32>:
   match state:
     case Dialer{_,_,_,_,DirectPath{path}}:
+      Some{path}
+    case Dialer{_,_,_,_,Sending{_,_,Some{path}}}:
       Some{path}
     case _:
       None{}

@@ -469,7 +469,7 @@ local function X509_get_default_cert_file():cstring <cimport,nodecl> end
 local AddressDiscovery = @record{
   quic:*quic_t, cnx:*cnx_t, peer:storage_t, started:uint64, ready:boolean, closed:boolean
 }
-local QadRoute = @record{peer:storage_t, observed:storage_t, running:*AddressDiscovery, attempted:boolean}
+local QadRoute = @record{peer:storage_t, observed:storage_t, running:*AddressDiscovery, retry_at:uint64}
 local RoutedDiscovery = @record{host:cstring, handle:uint32, port:uint16, v4:QadRoute, v6:QadRoute}
 local Connection = @record{
   next: pointer, quic: *quic_t, cnx: *cnx_t, id: uint32,
@@ -2261,18 +2261,9 @@ local function nat_probe(inbox:*NatInbox, peer:*storage_t, raw:*uint8, now:uint6
   return nilptr,available
 end
 
-local function send_nat_packet(conn:*Connection, peer:*storage_t, frame:*uint8, size:csize, now:uint64,
-    tracking:**uint8): uint32
-  local fd: cint
-  if conn.listener ~= nilptr then fd = conn.listener.fd
-  else
-    local udp = find_path(conn,0)
-    if tracking == nilptr then udp = nat_socket_for_peer(conn,peer.ss_family) end
-    if udp == nilptr or not udp.unconnected then return ENOTSUP end
-    fd = udp.fd
-  end
+local function send_nat_packet(conn:*Connection, path:*path_t, fd:cint, peer:*storage_t, frame:*uint8,
+    size:csize, now:uint64, tracking:**uint8): uint32
   local cnx = conn.cnx
-  local path = ((@*[0]*path_t)(cnx.path))[0]
   local length = picoquic_predict_packet_header_length(cnx,picoquic_packet_1rtt_protected,&path.pkt_ctx)
   local checksum = picoquic_get_checksum_length(cnx,picoquic_epoch_1rtt)
   local output: [IO_CAPACITY]uint8
@@ -2333,7 +2324,16 @@ local function nat_challenge_effect(e:Env, args:*[0]Term, send_probe:boolean): T
   if found ~= nilptr then return io_done(e,1) end
   if available == nilptr then return io_fail(e,ENOBUFS,'too many outstanding NAT challenges') end
   -- Short probes use the current CID but never register or validate a tuple.
-  local error = send_nat_packet(conn,&peer,&raw[0],CHALLENGE_SIZE,now,nilptr)
+  local fd = conn.listener ~= nilptr and conn.listener.fd or -1
+  if conn.listener == nilptr then
+    local udp = nat_socket_for_peer(conn,peer.ss_family)
+    if udp == nilptr or not udp.unconnected or udp.status == 3 then
+      return io_fail(e,ENOTSUP,'the UDP probe socket is unavailable')
+    end
+    fd = udp.fd
+  end
+  local path = ((@*[0]*path_t)(conn.cnx.path))[0]
+  local error = send_nat_packet(conn,path,fd,&peer,&raw[0],CHALLENGE_SIZE,now,nilptr)
   if error == EAGAIN or error == EINTR then return io_done(e,0) end
   if error ~= 0 then return io_fail(e,error,'could not send NAT traversal challenge') end
   available.peer = peer
@@ -2363,6 +2363,26 @@ local function valid_nat_control(bytes:*uint8, size:csize, dialer:boolean): bool
   return body >= 0 and (@csize)(body) == size - 4 - width
 end
 
+local function nat_control_route(conn:*Connection, peer:*storage_t): (*path_t,cint)
+  local paths = (@*[0]*path_t)(conn.cnx.path)
+  for i = 0,<conn.cnx.nb_paths do
+    local path = paths[i]
+    local source:storage_t
+    if picoquic_get_path_addr(conn.cnx,path.unique_path_id,2,peer) == 0 and
+        picoquic_get_path_addr(conn.cnx,path.unique_path_id,1,&source) == 0 then
+      if conn.listener ~= nilptr then
+        if picoquic_compare_addr(&source,&conn.listener.local_addr) == 0 then return path,conn.listener.fd end
+      else
+        -- A tuple can change while its original descriptor is retired.
+        -- Use the same address lookup as the normal QUIC send path.
+        local route = route_packet(conn,&source,peer)
+        if route ~= nilptr and route.status == 1 and route.fd >= 0 then return path,route.fd end
+      end
+    end
+  end
+  return nilptr,-1
+end
+
 local function advertise_nat(e:Env, conn:*Connection, value:Term): Term
   if conn == nilptr or conn.closed then return closed_error(e,conn) end
   if not conn.ready or conn.nat_inbox == nilptr then
@@ -2387,13 +2407,10 @@ local function advertise_nat(e:Env, conn:*Connection, value:Term): Term
   end
   if state.tracked_payload ~= nilptr then return io_done(e,0) end
   local peer: storage_t
-  local path = ((@*[0]*path_t)(conn.cnx.path))[0]
-  if picoquic_get_path_addr(conn.cnx,path.unique_path_id,2,&peer) ~= 0 then
-    state.frame.size = 0
-    return io_fail(e,EIO,'could not resolve the QUIC peer address')
-  end
+  local path,fd = nat_control_route(conn,&peer)
+  if path == nilptr then return io_done(e,0) end
   local now = picoquic_current_time()
-  local error = send_nat_packet(conn,&peer,&raw.bytes[0],raw.size,now,&state.tracked_payload)
+  local error = send_nat_packet(conn,path,fd,&peer,&raw.bytes[0],raw.size,now,&state.tracked_payload)
   if error == 0 then
     state.tracked_at = now
     return io_done(e,0)
@@ -2773,10 +2790,13 @@ local function default_qad_roots(): cstring
   return roots
 end
 
-local function poll_qad_route(path:*Path, route:*QadRoute, host:cstring): boolean
+local function poll_qad_route(path:*Path, route:*QadRoute, host:cstring, previous:*storage_t): boolean
   if path == nilptr or route.peer.ss_family == 0 then return false end
-  if not route.attempted then
-    route.attempted = true
+  local now = picoquic_current_time()
+  if route.running == nilptr and now >= route.retry_at then
+    -- Keep each address family independent and leave the last authenticated
+    -- observation in use if the relay is temporarily unreachable.
+    route.retry_at = now + 25000000
     local roots = default_qad_roots()
     if roots ~= nilptr and C.strlen(roots) ~= 0 then route.running = create_discovery(&route.peer,host,roots) end
   end
@@ -2784,19 +2804,26 @@ local function poll_qad_route(path:*Path, route:*QadRoute, host:cstring): boolea
   if discovery == nilptr then return false end
   local observed: storage_t
   if observed_address(discovery,&observed) then
+    $previous = route.observed
     route.observed = observed
     picoquic_close(discovery.cnx,0)
     send_discovery(path,discovery)
     free_discovery(discovery)
     route.running = nilptr
-    return true
+    return previous.ss_family == 0 or picoquic_compare_addr(previous,&observed) ~= 0
   end
   if discovery.closed or picoquic_get_cnx_state(discovery.cnx) == picoquic_state_disconnected or
-      picoquic_current_time() - discovery.started >= 3000000 or send_discovery(path,discovery) ~= 0 then
+      now >= discovery.started + 3000000 or send_discovery(path,discovery) ~= 0 then
     free_discovery(discovery)
     route.running = nilptr
   end
   return false
+end
+
+local function qad_mapping_result(e:Env, previous:*storage_t, current:*storage_t): Term
+  local old = term_pak(iroh_mp_None,0)
+  if previous.ss_family ~= 0 then old = io_box(e,iroh_mp_Some,socket_candidate(e,previous)) end
+  return optional_id(e,io_tup(e,old,socket_candidate(e,current)))
 end
 
 local function poll_routed_qad_run(e:Env, args:*[0]Term, work:*IoWork): Term
@@ -2804,11 +2831,12 @@ local function poll_routed_qad_run(e:Env, args:*[0]Term, work:*IoWork): Term
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
   local config = conn.routed_discovery
   if config ~= nilptr then
-    if poll_qad_route(conn.nat_route_v4,&config.v4,config.host) then
-      return io_tup(e,args[0],optional_id(e,socket_candidate(e,&config.v4.observed)))
+    local previous:storage_t
+    if poll_qad_route(conn.nat_route_v4,&config.v4,config.host,&previous) then
+      return io_tup(e,args[0],qad_mapping_result(e,&previous,&config.v4.observed))
     end
-    if poll_qad_route(conn.nat_route_v6,&config.v6,config.host) then
-      return io_tup(e,args[0],optional_id(e,socket_candidate(e,&config.v6.observed)))
+    if poll_qad_route(conn.nat_route_v6,&config.v6,config.host,&previous) then
+      return io_tup(e,args[0],qad_mapping_result(e,&previous,&config.v6.observed))
     end
   end
   return io_tup(e,args[0],none(e))

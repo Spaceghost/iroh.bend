@@ -102,8 +102,14 @@ def poll_multipath_qad(conn: MultipathConnection)
 def configure_routed_qad(conn: MultipathConnection, host: String, port: U32) -> IO(MultipathConnection):
   import "./quic_multipath.c"
 
+def QadSocket() -> Type:
+  List<&2,U32> & U32
+
+def QadChange() -> Type:
+  Maybe<&1,QadSocket()> & QadSocket()
+
 def poll_routed_qad(conn: MultipathConnection)
-    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,List<&2,U32> & U32>>):
+    -> IO(MultipathConnection & Result<&1,&1,U32 & String,Maybe<&1,QadChange()>>):
   import "./quic_multipath.c"
 
 def multipath_nat_local_candidate(conn: MultipathConnection)

@@ -600,11 +600,28 @@ def relayed_traversal(owner: Connection(), candidates: List<&2,Endpoint.Address>
     progress : Quic.MultipathConnection & Nat.DialerResult() <- Nat.drive_ready((conn,Done{2}),Nat.retry_path(driver))
     punched(progress,bridge,candidates,phase,now)
 
+def keep_maintained(result: Quic.MultipathConnection & Nat.DialerResult(), bridge: Maybe<&1,Relay.Bridge>,
+    candidates: List<&2,Endpoint.Address>, phase: ProbeState, now: U32) -> IO(Connection() & ProbeState):
+  match result:
+    case (conn,Done{driver}):
+      keep_published((conn,bridge),candidates,phase,driver,now)
+    case (conn,Fail{_}):
+      advance_direct((conn,bridge),candidates,phase,0,now)
+
+def maintain_relay_nat(owner: Connection(), candidates: List<&2,Endpoint.Address>, +path: U32,
+    driver: Nat.Dialer, now: U32) -> IO(Connection() & ProbeState):
+  (conn,bridge) = owner
+  do IO<Connection() & ProbeState>:
+    result : Quic.MultipathConnection & Nat.DialerResult() <- Nat.drive_ready((conn,Done{2}),Nat.hold_path(driver,path))
+    keep_maintained(result,bridge,candidates,DirectPath{path},now)
+
 def advance_relay_nat(conn: Connection(), candidates: List<&2,Endpoint.Address>, phase: ProbeState,
     driver: Nat.Dialer, now: U32) -> IO(Connection() & ProbeState):
   match phase:
     case Waiting{since}:
       relayed_traversal(conn,candidates,Waiting{since},driver,now)
+    case DirectPath{path}:
+      maintain_relay_nat(conn,candidates,path,driver,now)
     case current:
       keep_published(conn,candidates,current,driver,now)
 

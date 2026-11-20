@@ -10,7 +10,7 @@ from quic_rebind import bind, process
 def check(server, client, relay, limit):
     with ExitStack() as stack:
         dead = bind(stack, "::1", socket.AF_INET6)
-        peer = stack.enter_context(process(server, relay, str(dead.getsockname()[1]), str(limit), "0", "6"))
+        peer = stack.enter_context(process(server, relay, str(dead.getsockname()[1]), str(limit), "0", "6", "0"))
         ready = stack.enter_context(selectors.DefaultSelector())
         ready.register(peer.stdout, selectors.EVENT_READ)
         if not ready.select(10) or peer.stdout.readline() != b"READY\n":

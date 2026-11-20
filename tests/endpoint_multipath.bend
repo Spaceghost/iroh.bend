@@ -185,35 +185,73 @@ def read_routed(sent: Multipath.RoutedConnection & U32, first: U32) -> IO(Unit):
     IO.try(Unit,Multipath.disconnect((read_b,bridge)))
     IO.print("PASS routed endpoint promoted the direct path")
 
-def promote_routed(initial: Multipath.RoutedConnection & U32) -> IO(Unit):
+def held_route(result: Multipath.RoutedConnection & Multipath.PathResult(),
+    retry: Multipath.RoutedConnection -> IO(Multipath.RoutedConnection)) -> IO(Multipath.RoutedConnection):
+  match result:
+    case (owner,Done{Multipath.PromotedPath{_}}):
+      do IO<Multipath.RoutedConnection>:
+        IO.sleep(1)
+        retry(owner)
+    case (owner,_):
+      routed_fail(Multipath.RoutedConnection,owner,1,"the direct path stopped during address refresh")
+
+def hold_tick(owner: Multipath.RoutedConnection, finished: Bool,
+    retry: Multipath.RoutedConnection -> IO(Multipath.RoutedConnection)) -> IO(Multipath.RoutedConnection):
+  match finished:
+    case True{}:
+      IO.pure(Multipath.RoutedConnection,owner)
+    case False{}:
+      do IO<Multipath.RoutedConnection>:
+        result : Multipath.RoutedConnection & Multipath.PathResult() <- Multipath.step_routes(owner)
+        held_route(result,retry)
+
+def hold_until(fuel: Nat, owner: Multipath.RoutedConnection, +start: U32, +interval: U32, now: U32)
+    -> IO(Multipath.RoutedConnection):
+  match fuel:
+    case 0n:
+      routed_fail(Multipath.RoutedConnection,owner,1,"address refresh wait exhausted")
+    case 1n+left:
+      hold_tick(owner,U32.is_ge(U32.sub(now,start),interval),next =>
+        do IO<Multipath.RoutedConnection>:
+          current : U32 <- Quic.multipath_millis()
+          hold_until(left,next,start,interval,current))
+
+def hold_sent(sent: Multipath.RoutedConnection & U32, first: U32, interval: U32) -> IO(Unit):
+  (owner,second) = sent
+  do IO<Unit>:
+    +now : U32 <- Quic.multipath_millis()
+    active : Multipath.RoutedConnection <- hold_until(36000n,owner,now,interval,now)
+    read_routed((active,second),first)
+
+def promote_routed(initial: Multipath.RoutedConnection & U32, interval: U32) -> IO(Unit):
   (relay_sent,first) = initial
   do IO<Unit>:
     IO.print("ENABLE_DIRECT")
     promoted : Multipath.RoutedConnection <- wait_promotion(5000n,relay_sent)
     probed : Multipath.RoutedConnection & U32 <-
       Multipath.use_routed_connection(U32,promoted,c => send_unpinned(c,22))
-    read_routed(probed,first)
+    hold_sent(probed,first,interval)
 
-def send_first_routed(exchanged: Multipath.RoutedConnection & Unit) -> IO(Unit):
+def send_first_routed(exchanged: Multipath.RoutedConnection & Unit, interval: U32) -> IO(Unit):
   (relay_ready,_) = exchanged
   do IO<Unit>:
     initial : Multipath.RoutedConnection & U32 <-
       Multipath.use_routed_connection(U32,relay_ready,c => send_unpinned(c,11))
-    promote_routed(initial)
+    promote_routed(initial,interval)
 
-def exchange_routed(owner: Multipath.RoutedConnection) -> IO(Unit):
+def exchange_routed(owner: Multipath.RoutedConnection, interval: U32) -> IO(Unit):
   do IO<Unit>:
     exchanged : Multipath.RoutedConnection & Unit <-
       Multipath.use_routed_connection(Unit,owner,datagrams_on_relay)
-    send_first_routed(exchanged)
+    send_first_routed(exchanged,interval)
 
-def route_exchange(routes: Endpoint.Routes) -> IO(Unit):
+def route_exchange(routes: Endpoint.Routes, interval: U32) -> IO(Unit):
   do IO<Unit>:
     owner : Multipath.RoutedConnection <- IO.try(Multipath.RoutedConnection,
       Multipath.connect_routed(routes,
         Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),fixture_alpn()},
         Endpoint.HandshakeTimeouts{150,6000}))
-    exchange_routed(owner)
+    exchange_routed(owner,interval)
 
 def test_candidates(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>)
     -> Maybe<&2,List<&2,Endpoint.Address>>:
@@ -225,17 +263,24 @@ def test_candidates(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>)
     case _ _:
       None{}
 
-def auto(candidates: Maybe<&2,List<&2,Endpoint.Address>>, url: String) -> IO(Unit):
+def auto(candidates: Maybe<&2,List<&2,Endpoint.Address>>, url: String, interval: U32) -> IO(Unit):
   match candidates:
     case Some{ips}:
-      route_exchange(Endpoint.DialRoutes{ips,[url]})
+      route_exchange(Endpoint.DialRoutes{ips,[url]},interval)
     case None{}:
       IO.die(Unit,2,"expected both candidate ports")
 
+def hold_interval(mode: String) -> U32:
+  match mode:
+    case "qad-refresh":
+      27000
+    case _:
+      0
+
 def run(args: List<String>) -> IO(Unit):
   match args:
-    case [_,host,blackhole,gated,url,"auto"]:
-      auto(test_candidates(host,U32.read(blackhole),U32.read(gated)),url)
+    case [_,+host,blackhole,gated,url,"auto"]:
+      auto(test_candidates(host,U32.read(blackhole),U32.read(gated)),url,hold_interval(host))
     case [_,host,port,"binary"]:
       direct(host,U32.read(port),Fixture.binary_alpn())
     case Con{_,Con{host,Con{port,Nil{}}}}:

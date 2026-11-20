@@ -100,7 +100,22 @@ def wait_mapping(fuel: Nat, conn: Quic.MultipathConnection, +port: U32) -> IO(Qu
         decoded : Quic.MultipathConnection & Maybe<&1,List<&2,U32>> <- Fixture.ok(Maybe<&1,List<&2,U32>>,frame)
         check_mapping(decoded,port,active => wait_mapping(left,active,port))
 
-def advertise_mapping(conn: Quic.MultipathConnection, blackhole: State.Candidate, port: U32, mapped: U32) -> IO(Unit):
+def wait_refresh(path: Quic.MultipathConnection & U32, refreshed: U32) -> IO(Unit):
+  (conn,id) = path
+  do IO<Unit>:
+    updated : Quic.MultipathConnection <- wait_mapping(39000n,conn,refreshed)
+    reply_direct((updated,id))
+
+def finish_mapping(conn: Quic.MultipathConnection, refreshed: U32) -> IO(Unit):
+  match refreshed:
+    case 0:
+      finish(conn)
+    case port:
+      do IO<Unit>:
+        path : Quic.MultipathConnection & U32 <- Listener.wait_path(4000n,conn)
+        wait_refresh(path,port)
+
+def advertise_mapping(conn: Quic.MultipathConnection, blackhole: State.Candidate, port: U32, mapped: U32, refreshed: U32) -> IO(Unit):
   State.Socket{ip,dead_port} = blackhole
   do IO<Unit>:
     advertised : Quic.MultipathConnection <- Listener.send_candidate_frame(3000n,conn,
@@ -108,10 +123,10 @@ def advertise_mapping(conn: Quic.MultipathConnection, blackhole: State.Candidate
     mapped_conn : Quic.MultipathConnection <- wait_mapping(4000n,advertised,mapped)
     working : Quic.MultipathConnection <- Listener.send_candidate_frame(3000n,mapped_conn,
       Wire.AddAddress{Wire.Var{0,1},Wire.IPv4{[127,0,0,1]},port})
-    finish(working)
+    finish_mapping(working,refreshed)
 
 def advertise_first(conn: Quic.MultipathConnection, driver: Nat.ListenerDriver, port: U32, blackhole: State.Candidate,
-    expected: U32) -> IO(Unit):
+    expected: U32, refreshed: U32) -> IO(Unit):
   match expected:
     case 0:
       do IO<Unit>:
@@ -119,34 +134,34 @@ def advertise_first(conn: Quic.MultipathConnection, driver: Nat.ListenerDriver, 
           Nat.advertise_listener((conn,driver),blackhole))
         pump(900n,advertised,active => advertise_working(active,port))
     case mapped:
-      advertise_mapping(conn,blackhole,port,mapped)
+      advertise_mapping(conn,blackhole,port,mapped,refreshed)
 
-def exchange(owner: Nat.ListenerConnection(), port: U32, blackhole: State.Candidate, expected: U32) -> IO(Unit):
+def exchange(owner: Nat.ListenerConnection(), port: U32, blackhole: State.Candidate, expected: U32, refreshed: U32) -> IO(Unit):
   (conn,driver) = owner
   do IO<Unit>:
     datagrams : Quic.MultipathConnection <- Listener.datagram_echo(conn)
     stream : Quic.MultipathConnection & U32 <- Listener.incoming(4000n,datagrams,0)
     relayed : Quic.MultipathConnection <- Listener.echo(stream,0,11)
-    advertise_first(relayed,driver,port,blackhole,expected)
+    advertise_first(relayed,driver,port,blackhole,expected,refreshed)
 
-def serve(accepted: Nat.NatListener() & Nat.ListenerConnection(), port: U32, blackhole: State.Candidate, expected: U32) -> IO(Unit):
+def serve(accepted: Nat.NatListener() & Nat.ListenerConnection(), port: U32, blackhole: State.Candidate, expected: U32, refreshed: U32) -> IO(Unit):
   (listener,conn) = accepted
   do IO<Unit>:
     Nat.close_listener(listener)
-    exchange(conn,port,blackhole,expected)
+    exchange(conn,port,blackhole,expected,refreshed)
 
 def stop_bridge(binding: Relay.Bridge & U32) -> IO(Unit):
   (bridge,_) = binding
   IO.try(Unit,Relay.stop(bridge))
 
-def listen(bound: Nat.NatListener() & U32, relay: String, blackhole: State.Candidate, expected: U32) -> IO(Unit):
+def listen(bound: Nat.NatListener() & U32, relay: String, blackhole: State.Candidate, expected: U32, refreshed: U32) -> IO(Unit):
   (listener,+port) = bound
   do IO<Unit>:
     bridge : Relay.Bridge & U32 <- IO.try(Relay.Bridge & U32,
       Relay.start(relay,List.replicate(U32,32n,42),Listener.fixture_peer(),port))
     IO.print("READY")
     accepted : Nat.NatListener() & Nat.ListenerConnection() <- Listener.managed_accept(9000n,listener)
-    serve(accepted,port,blackhole,expected)
+    serve(accepted,port,blackhole,expected,refreshed)
     stop_bridge(bridge)
 
 def loopback_address(ipv6: Bool) -> Wire.Address:
@@ -156,20 +171,20 @@ def loopback_address(ipv6: Bool) -> Wire.Address:
     case False{}:
       Wire.IPv4{[127,0,0,1]}
 
-def run(relay: String, port: Maybe<&2,U32>, capacity: Maybe<&2,U32>, mapped: Maybe<&2,U32>, ipv6: Bool) -> IO(Unit):
-  match port capacity mapped:
-    case Some{blackhole} Some{limit} Some{expected}:
+def run(relay: String, port: Maybe<&2,U32>, capacity: Maybe<&2,U32>, mapped: Maybe<&2,U32>, ipv6: Bool, refreshed: Maybe<&2,U32>) -> IO(Unit):
+  match port capacity mapped refreshed:
+    case Some{blackhole} Some{limit} Some{expected} Some{replacement}:
       do IO<Unit>:
         bound : Nat.NatListener() & U32 <- IO.try(Nat.NatListener() & U32,
           Nat.bind_listener("127.0.0.1",0,List.replicate(U32,32n,42),Listener.fixture_peer(),[Fixture.text_alpn()],limit))
-        listen(bound,relay,State.Socket{loopback_address(ipv6),blackhole},expected)
-    case _ _ _:
+        listen(bound,relay,State.Socket{loopback_address(ipv6),blackhole},expected,replacement)
+    case _ _ _ _:
       IO.die(Unit,2,"expected the dead UDP port, candidate limit and mapped port")
 
 def args(input: List<String>) -> IO(Unit):
   match input:
-    case [_,relay,port,width,mapped,family]:
-      run(relay,U32.read(port),U32.read(width),U32.read(mapped),String.starts_with(family,"6"))
+    case [_,relay,port,width,mapped,family,replacement]:
+      run(relay,U32.read(port),U32.read(width),U32.read(mapped),String.starts_with(family,"6"),U32.read(replacement))
     case _:
       IO.die(Unit,2,"expected the relay URL, dead UDP port, candidate limit, mapped port and address family")
 
