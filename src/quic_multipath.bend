@@ -15,6 +15,11 @@ def start_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U
     -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
   import "./quic_multipath.c"
 
+# TLS protocol identifiers are 1 to 255 opaque bytes.
+def start_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathConnection>):
+  import "./quic_multipath.c"
+
 # Drive pending network and timer work. 0 means handshaking, 1 means ready
 # with base QUIC, and 2 means the peer negotiated multipath.
 def step_multipath(conn: MultipathConnection)
@@ -110,6 +115,10 @@ def bind_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U3
     -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
   import "./quic_multipath.c"
 
+def bind_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>, alpn: List<&2,U32>)
+    -> IO(Result<&1,&1,U32 & String,MultipathListener & U32>):
+  import "./quic_multipath.c"
+
 # Drive the listener and poll for an authenticated connection.
 def accept_multipath(listener: MultipathListener)
     -> IO(MultipathListener & Result<&1,&1,U32 & String,Maybe<&1,MultipathConnection>>):
@@ -174,4 +183,10 @@ def connect_multipath(host: String, port: U32, seed: List<&2,U32>, peer: List<&2
     alpn: String, timeout_ms: Nat) -> IO(ConnectResult()):
   do IO<ConnectResult()>:
     started : ConnectResult() <- start_multipath(host,port,seed,peer,alpn)
+    finish_connect(started,timeout_ms)
+
+def connect_multipath_bytes(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
+    alpn: List<&2,U32>, timeout_ms: Nat) -> IO(ConnectResult()):
+  do IO<ConnectResult()>:
+    started : ConnectResult() <- start_multipath_bytes(host,port,seed,peer,alpn)
     finish_connect(started,timeout_ms)

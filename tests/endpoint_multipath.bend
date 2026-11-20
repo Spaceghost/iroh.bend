@@ -102,26 +102,28 @@ def check_route(owner: Multipath.Connection(), fallback: Bool, host: String, por
     case route _:
       fail(Unit,route,1,"endpoint chose the wrong initial route")
 
-def dial(routes: Endpoint.Routes, fallback: Bool, host: String, port: U32) -> IO(Unit):
+def dial_with_alpn(routes: Endpoint.Routes, fallback: Bool, host: String, port: U32, alpn: List<&2,U32>) -> IO(Unit):
   do IO<Unit>:
     owner : Multipath.Connection() <- IO.try(Multipath.Connection(),
       Multipath.connect_routes(routes,
-        Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),
-          [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]},
+        Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),alpn},
         Endpoint.HandshakeTimeouts{150,6000}))
     check_route(owner,fallback,host,port)
 
-def direct(+host: String, direct_port: Maybe<&2,U32>) -> IO(Unit):
+def fixture_alpn() -> List<&2,U32>:
+  [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]
+
+def direct(+host: String, direct_port: Maybe<&2,U32>, alpn: List<&2,U32>) -> IO(Unit):
   match direct_port:
     case Some{+port}:
-      dial(Endpoint.DialRoutes{[Endpoint.IpAddress{host,port}],[]},False{},host,port)
+      dial_with_alpn(Endpoint.DialRoutes{[Endpoint.IpAddress{host,port}],[]},False{},host,port,alpn)
     case None{}:
       IO.die(Unit,2,"expected the Iroh direct port")
 
 def relayed(+host: String, direct_port: Maybe<&2,U32>, dropped_port: Maybe<&2,U32>, url: String) -> IO(Unit):
   match direct_port dropped_port:
     case Some{port} Some{blackhole}:
-      dial(Endpoint.DialRoutes{[Endpoint.IpAddress{host,blackhole}],[url]},True{},host,port)
+      dial_with_alpn(Endpoint.DialRoutes{[Endpoint.IpAddress{host,blackhole}],[url]},True{},host,port,fixture_alpn())
     case _ _:
       IO.die(Unit,2,"expected both UDP ports")
 
@@ -203,8 +205,7 @@ def auto(+host: String, blocked: Maybe<&2,U32>, gated: Maybe<&2,U32>, url: Strin
         owner : Multipath.RoutedConnection <- IO.try(Multipath.RoutedConnection,
           Multipath.connect_routed(Endpoint.DialRoutes{
             [Endpoint.IpAddress{host,blackhole},Endpoint.IpAddress{host,reachable}],[url]},
-            Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),
-              [105,114,111,104,45,98,101,110,100,47,99,111,109,112,97,116,47,49]},
+            Endpoint.PeerKeys{List.replicate(U32,32n,73),Fixture.fixture_key(0),fixture_alpn()},
             Endpoint.HandshakeTimeouts{150,6000}))
         exchange_routed(owner)
     case _ _:
@@ -214,8 +215,10 @@ def run(args: List<String>) -> IO(Unit):
   match args:
     case [_,host,blackhole,gated,url,"auto"]:
       auto(host,U32.read(blackhole),U32.read(gated),url)
+    case [_,host,port,"binary"]:
+      direct(host,U32.read(port),Fixture.binary_alpn())
     case Con{_,Con{host,Con{port,Nil{}}}}:
-      direct(host,U32.read(port))
+      direct(host,U32.read(port),fixture_alpn())
     case Con{_,Con{host,Con{port,Con{blackhole,Con{url,Nil{}}}}}}:
       relayed(host,U32.read(port),U32.read(blackhole),url)
     case _:

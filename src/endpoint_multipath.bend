@@ -9,25 +9,10 @@ def Connection() -> Type:
 def ConnectResult() -> Type:
   Endpoint.TransportResult(Quic.MultipathConnection)
 
-def text_alpn(bytes: List<&2,U32>) -> Bool:
-  match bytes:
-    case Nil{}:
-      True{}
-    case Con{+byte,rest}:
-      U32.is_ge(byte,1) && U32.is_le(byte,127) && text_alpn(rest)
-
-def dial_text(host: String, port: U32, seed: List<&2,U32>, peer: List<&2,U32>,
-    alpn: List<&2,U32>, timeout: U32, valid: Bool) -> IO(Quic.ConnectResult()):
-  match valid:
-    case True{}:
-      Quic.connect_multipath(host,port,seed,peer,String.from_list(Endpoint.as_chars(alpn)),U32.to_nat(timeout))
-    case False{}:
-      IO.pure(Quic.ConnectResult(),Fail{(22,"multipath routing requires an ASCII ALPN without NUL")})
-
 def dial(address: Endpoint.Address, identity: Endpoint.Identity, timeout: U32) -> IO(Quic.ConnectResult()):
   Endpoint.IpAddress{host,port} = address
-  Endpoint.PeerKeys{seed,peer,+alpn} = identity
-  dial_text(host,port,seed,peer,alpn,timeout,text_alpn(alpn))
+  Endpoint.PeerKeys{seed,peer,alpn} = identity
+  Quic.connect_multipath_bytes(host,port,seed,peer,alpn,U32.to_nat(timeout))
 
 def connect_routes(routes: Endpoint.Routes, identity: Endpoint.Identity, timeouts: Endpoint.Timeouts)
     -> IO(ConnectResult()):

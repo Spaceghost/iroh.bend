@@ -159,18 +159,28 @@ def announce(bound: Quic.MultipathListener & U32, mode: U32) -> IO(Unit):
     first : Quic.MultipathListener & Quic.MultipathConnection <- accept(16000n,listener)
     serve(first,mode)
 
-def listen(host: String, mode: U32) -> IO(Unit):
+def fixture_peer() -> List<&2,U32>:
+  [119,44,138,68,43,125,176,110,22,108,251,193,204,188,188,222,
+   111,62,186,118,164,233,142,243,255,197,25,80,34,55,214,239]
+
+def listen_text(host: String, mode: U32) -> IO(Unit):
   do IO<Unit>:
     bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
-      Quic.bind_multipath(host,0,List.replicate(U32,32n,42),
-        [119,44,138,68,43,125,176,110,22,108,251,193,204,188,188,222,
-         111,62,186,118,164,233,142,243,255,197,25,80,34,55,214,239],"iroh-bend/compat/1"))
+      Quic.bind_multipath(host,0,List.replicate(U32,32n,42),fixture_peer(),"iroh-bend/compat/1"))
     announce(bound,mode)
+
+def listen_binary(host: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Quic.MultipathListener & U32 <- IO.try(Quic.MultipathListener & U32,
+      Quic.bind_multipath_bytes(host,0,List.replicate(U32,32n,42),fixture_peer(),Fixture.binary_alpn()))
+    announce(bound,0)
 
 def parse(host: String, mode: Maybe<&2,U32>) -> IO(Unit):
   match mode:
+    case Some{2}:
+      listen_binary(host)
     case Some{number}:
-      listen(host,number)
+      listen_text(host,number)
     case None{}:
       IO.die(Unit,2,"expected a listener mode")
 

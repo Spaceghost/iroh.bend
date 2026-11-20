@@ -1,6 +1,9 @@
 import Base
 import ../src/quic_multipath.bend as Quic
 
+def binary_alpn() -> List<&2,U32>:
+  Con{0,Con{255,Con{10,List.replicate(U32,252n,128)}}}
+
 def reject(-T: Type, conn: Quic.MultipathConnection, +code: U32, message: String) -> IO(T):
   do IO<T>:
     Quic.close_multipath(conn)

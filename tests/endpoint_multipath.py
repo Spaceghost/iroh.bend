@@ -1,3 +1,4 @@
+import os
 import selectors
 import socket
 import subprocess
@@ -8,8 +9,10 @@ from contextlib import ExitStack
 from quic_rebind import bind, process, read_address
 
 
-def check(client, fixture, host, mode, family, relay, peer_relay):
+def check(client, fixture, host, mode, family, relay, peer_relay, binary=False):
     command = (fixture, mode, peer_relay) if relay else (fixture, mode)
+    if binary:
+        command = ("env", "IROH_MULTIPATH_BINARY_ALPN=1", *command)
     with process(*command) as server:
         port = read_address(server)
         with socket.socket(family, socket.SOCK_DGRAM) as blackhole:
@@ -17,11 +20,15 @@ def check(client, fixture, host, mode, family, relay, peer_relay):
             args = (client, host, str(port))
             if relay:
                 args += (str(blackhole.getsockname()[1]), relay)
+            if binary:
+                args += ("binary",)
             subprocess.run(args, timeout=18, check=True)
         transcript, _ = server.communicate(timeout=5)
         print(transcript.decode(), end="", flush=True)
         if server.returncode:
             raise RuntimeError("Iroh rejected the multipath route exchange")
+        if binary:
+            print(f"PASS Bend endpoint dialed Iroh with a 255-byte binary ALPN on {host}", flush=True)
 
 
 def check_routed(client, fixture, host, mode, family, relay, peer_relay):
@@ -88,6 +95,8 @@ if __name__ == "__main__":
         ("::1", "listen6", socket.AF_INET6),
     ):
         check(client, fixture, host, mode, family, "", "")
+        if os.environ.get("CHECK_BINARY_ALPN") == "1":
+            check(client, fixture, host, mode, family, "", "", binary=True)
         if relay:
             check(client, fixture, host, mode, family, relay, peer_relay)
             check_routed(client, fixture, host, mode, family, relay, peer_relay)
