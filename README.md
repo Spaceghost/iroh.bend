@@ -428,9 +428,10 @@ client requires a libcurl build with WebSocket support.
    It holds the connections until it reads `FINISH`.
 5. Set `CUDA_HOME` for your compiler, select a GPU with `CUDA_VISIBLE_DEVICES`,
    and run `make check-gpu` for 16,384 relay ping decodes, four Punycode
-   vectors, four application-close frame vectors, and four public close-reason
-   vectors. One case checks that peer application code 110 stays distinct from
-   the Linux idle-timeout error with the same number.
+   vectors, four custom transport addresses, four application-close frame
+   vectors, and four public close-reason vectors. One case checks that peer
+   application code 110 stays distinct from the Linux idle-timeout error with
+   the same number.
 
 Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
 

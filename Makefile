@@ -57,10 +57,13 @@ $(BUILD)/iroh-bend-relay-http: tests/relay_http.bend src/relay_http.bend src/rel
 check-dns-tcp: $(BUILD)/iroh-bend-discovery
 	python3 tests/discovery_tcp.py $(BUILD)/iroh-bend-discovery
 
+RELAY_URL_SOURCES = src/relay_url.bend src/url_text.bend src/url_path.bend src/url_ip.bend src/ip.bend src/idna.bend src/idna_normalize.bend src/idna_table.bend src/idna_data.bend src/punycode.bend
+ENDPOINT_TICKET_SOURCES = $(RELAY_URL_SOURCES) src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/custom_addr.bend src/relay_challenge.bend src/ed25519.bend
+
 check-gpu: $(BUILD)/iroh-bend-gpu
 	BENDRTS= $(BUILD)/iroh-bend-gpu +RTS --gpu 1GB
 
-$(BUILD)/iroh-bend-gpu: tests/gpu.bend tests/quic_close_wire.bend $(QUIC_CLOSE_SOURCES) tests/punycode.bend src/punycode.bend src/url_text.bend src/relay.bend
+$(BUILD)/iroh-bend-gpu: tests/gpu.bend tests/quic_close_wire.bend $(QUIC_CLOSE_SOURCES) tests/punycode.bend tests/custom_addr.bend $(ENDPOINT_TICKET_SOURCES)
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/gpu.bend -o $@
 
@@ -148,11 +151,9 @@ check-endpoint-ticket: $(BUILD)/iroh-bend-endpoint-ticket
 	python3 -B tests/custom_addr.py "$<" $(if $(UPSTREAM_CUSTOM_ADDR),--upstream "$(UPSTREAM_CUSTOM_ADDR)")
 	python3 -B tests/endpoint_ticket_urls.py "$<" $(if $(UPSTREAM_ENDPOINT_TICKET_CODEC),--upstream "$(UPSTREAM_ENDPOINT_TICKET_CODEC)") $(if $(URL_TESTDATA),--url-testdata "$(URL_TESTDATA)") $(if $(IDNA_TESTDATA),--idna-testdata "$(IDNA_TESTDATA)")
 
-RELAY_URL_SOURCES = src/relay_url.bend src/url_text.bend src/url_path.bend src/url_ip.bend src/ip.bend src/idna.bend src/idna_normalize.bend src/idna_table.bend src/idna_data.bend src/punycode.bend
-
-$(BUILD)/endpoint-ticket.c: tests/endpoint_ticket.bend tests/punycode.bend tests/custom_addr.bend $(RELAY_URL_SOURCES) src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/custom_addr.bend src/relay_challenge.bend src/ed25519.bend src/ed25519.nelua tools/nelua-effect.sh
+$(BUILD)/endpoint-ticket.c: tests/endpoint_ticket.bend tests/punycode.bend tests/custom_addr.bend $(ENDPOINT_TICKET_SOURCES) src/ed25519.nelua tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
-	cp $(RELAY_URL_SOURCES) src/endpoint_ticket.bend src/endpoint_id.bend src/relay.bend src/custom_addr.bend src/relay_challenge.bend src/ed25519.bend "$(@:.c=-stage)/src/"
+	cp $(ENDPOINT_TICKET_SOURCES) "$(@:.c=-stage)/src/"
 	cp tests/endpoint_ticket.bend tests/punycode.bend tests/custom_addr.bend "$(@:.c=-stage)/tests/"
 	tools/nelua-effect.sh "$(NELUA)" "$(abspath $(BUILD)/nelua)" src/ed25519.nelua \
 		"$(abspath $(@:.c=-stage))/src/ed25519.c"

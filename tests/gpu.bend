@@ -1,6 +1,7 @@
 import Base
 import ../src/relay.bend as Relay
 import ./punycode.bend as Punycode
+import ./custom_addr.bend as Custom
 import ./quic_close_wire.bend as CloseWire
 
 def outcome(+expected: U32, decoded: Relay.Frame) -> U32:
@@ -34,24 +35,36 @@ def idna_pair(i: U32) -> U32:
     case _:
       Bool.to_u32(Punycode.pair("☃-⌘","--dqo34k"))
 
-def idna_pairs(+depth: Nat, +i: U32) -> U32:
+def custom_address(i: U32) -> U32:
+  match i:
+    case 0:
+      Bool.to_u32(String.eq(Custom.one("0_"),"0_ 0000000000000000"))
+    case 1:
+      Bool.to_u32(String.eq(Custom.one("+123456789ABCDEF0_00ff"),"123456789abcdef0_00ff f0debc9a7856341200ff"))
+    case 2:
+      Bool.to_u32(String.eq(Custom.binary([255,255,255,255,255,255,255,255,0,255]),"ffffffffffffffff_00ff"))
+    case _:
+      Bool.to_u32(String.eq(Custom.one("10000000000000000_"),"invalid id"))
+
+def vector_pairs(~sample: U32 -> U32, +depth: Nat, +i: U32) -> U32:
   match depth:
     case 0n:
-      idna_pair(i)
+      sample(i)
     case 1n+rest:
       +base = U32.mul(i,2)
-      left right = idna_pairs(rest,base) idna_pairs(rest,U32.inc(base))
+      left right = vector_pairs(~sample,rest,base) vector_pairs(~sample,rest,U32.inc(base))
       U32.add(left,right)
 
 def require(success: Bool) -> IO(Unit):
   match success:
     case True{}:
-      IO.print("PASS 16384 relay ping decodes, 4 Punycode vectors, and 8 connection close vectors on CUDA")
+      IO.print("PASS 16384 relay ping decodes, 4 Punycode vectors, 4 custom addresses, and 8 connection close vectors on CUDA")
     case False{}:
       IO.die(Unit, 1, "CUDA conformance vector mismatch")
 
 def main() -> IO(Unit):
   +passed = batch!(14n, 0, 16384)
-  +labels = idna_pairs!(2n,0)
+  +labels = vector_pairs!(i => idna_pair(i),2n,0)
+  +addresses = vector_pairs!(i => custom_address(i),2n,0)
   +closes = CloseWire.count!(3n,0)
-  require(U32.is_eq(passed,16384) && U32.is_eq(labels,4) && U32.is_eq(closes,8))
+  require(U32.is_eq(passed,16384) && U32.is_eq(labels,4) && U32.is_eq(addresses,4) && U32.is_eq(closes,8))
