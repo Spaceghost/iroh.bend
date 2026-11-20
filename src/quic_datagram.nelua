@@ -1342,8 +1342,8 @@ local function migration_can_lose(conn: *Connection, candidate: boolean): boolea
   return (conn.migration_state == 2) ~= candidate
 end
 
-local function close_transport(conn: *Connection, error: cint)
-  if error == NGTCP2_ERR_DRAINING or (conn.fd < 0 and conn.listener == nilptr) then return end
+local function close_transport(conn: *Connection, error: cint, handshake_fd: cint)
+  if error == NGTCP2_ERR_DRAINING or (handshake_fd < 0 and conn.fd < 0 and conn.listener == nilptr) then return end
   local err: ngtcp2_ccerr
   ngtcp2_ccerr_default(&err)
   if error == NGTCP2_ERR_CRYPTO then
@@ -1353,14 +1353,20 @@ local function close_transport(conn: *Connection, error: cint)
   end
   local size = ngtcp2_conn_write_connection_close(conn.engine,packet_path(conn),nilptr,&conn.output[0],
     PACKET_CAPACITY,&err,io_tick())
-  if size > 0 then send_packet(conn,(@csize)(size)) end
+  if size <= 0 then return end
+  if handshake_fd >= 0 then
+    -- The receiving socket still belongs to Bend when verification fails.
+    send(handshake_fd,&conn.output[0],(@csize)(size),0)
+  else
+    send_packet(conn,(@csize)(size))
+  end
 end
 
 local function ingest(conn: *Connection, path: *ngtcp2_path, packet: *cuchar, size: csize, now: uint64)
   local info: ngtcp2_pkt_info = {}
   local status = ngtcp2_conn_read_pkt(conn.engine,path,&info,packet,size,now)
   if status < 0 and status ~= NGTCP2_ERR_DISCARD_PKT then
-    close_transport(conn,status)
+    close_transport(conn,status,-1)
     conn.read_failure = status
     conn.failed = true
   end
@@ -1626,6 +1632,7 @@ local function handshake_input(e: Env, conn: *Connection, fd: cint): Term
   local status = ngtcp2_conn_read_pkt(conn.engine,&path,&info,&packet[0],(@csize)(n),io_tick())
   if status == NGTCP2_ERR_DISCARD_PKT then return io_done(e,0) end
   if status < 0 then
+    close_transport(conn,status,fd)
     conn.read_failure = status
     return engine_error(e,conn,status)
   end
@@ -2215,7 +2222,7 @@ end
 local function drop_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find(e,args[0])
   if conn ~= nilptr then
-    if not conn.failed then close_transport(conn,0) end
+    if not conn.failed then close_transport(conn,0,-1) end
     if conn.listener ~= nilptr and conn.listener.resumable and authenticated(conn) and
         (not conn.failed or conn.read_failure == NGTCP2_ERR_DRAINING) then
       -- QUIC closes at the transport layer and does not send a TLS close_notify.

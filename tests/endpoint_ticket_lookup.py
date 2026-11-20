@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from endpoint_candidate_lookup import check_discovered_route, check_supplied_route
 from endpoint_lookup_events import check_events
 from endpoint_lookup_race import check_race, check_stale_record, dns_proxy
-from endpoint_ticket_dial import read_ticket
+from endpoint_ticket_dial import read_ticket, require_handshake_rejection
 from quic_rebind import process
 
 
@@ -86,6 +86,8 @@ def check(client, fixture, family, mode, source, pkarr, dns_port, invalid=None, 
         if expected_error:
             if result.returncode == 0 or expected_error not in result.stderr:
                 raise RuntimeError(f"Expected {expected_error!r}, got {result}")
+            if mode == "wrong-id":
+                require_handshake_rejection(peer)
         else:
             if result.returncode:
                 raise RuntimeError(f"Bend {mode} ticket via {source}: {result.stderr.decode()}")

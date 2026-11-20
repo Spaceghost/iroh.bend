@@ -29,6 +29,14 @@ def reject(client, ticket, expected):
         raise RuntimeError(f"Expected {expected!r}, got exit {result.returncode} and {result.stderr!r}")
 
 
+def require_handshake_rejection(peer):
+    # The client has already reported the wrong key. The peer must receive the
+    # QUIC close before its own handshake timeout expires.
+    peer.communicate(timeout=3)
+    if peer.returncode == 0:
+        raise AssertionError("Iroh accepted a connection whose pinned handshake failed")
+
+
 def relay_alias(ticket, relay_url):
     body = ticket.removeprefix("endpoint").upper()
     raw = base64.b32decode(body + "=" * (-len(body) % 8))
@@ -52,6 +60,8 @@ def check(client, fixture, family, mode, relay_url=None, error=None, alternate_s
             ticket = relay_alias(ticket, relay_url)
         if error:
             reject(client, ticket, error)
+            if mode == "wrong-id":
+                require_handshake_rejection(server)
         else:
             route = "relay" if mode in ("fallback", "relay") else "direct"
             subprocess.run((client, "dial-ticket", ticket, route), timeout=16, check=True)
