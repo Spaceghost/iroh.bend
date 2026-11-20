@@ -51,8 +51,8 @@ def accept_pair(~L: Type, ~C: Type, ~accept: L -> IO(L & C),
   (short_listener,short_port) = short
   do IO<Unit>:
     IO.print(U32.show(wide_port))
-    IO.print(U32.show(short_port))
     first : L & C <- accept(wide_listener)
+    IO.print(U32.show(short_port))
     second : L & C <- accept(short_listener)
     serve(first,second)
 

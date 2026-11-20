@@ -13,6 +13,7 @@ class LoopbackRoute(asyncio.DatagramProtocol):
     def __init__(self, host, port):
         self.server = (host, port)
         self.client = None
+        self.client_seen = asyncio.Event()
         self.block_from_server = None
         self.dropped = 0
 
@@ -25,6 +26,7 @@ class LoopbackRoute(asyncio.DatagramProtocol):
         if not from_server:
             if self.client is None:
                 self.client = sender
+                self.client_seen.set()
             if self.client != sender:
                 return
         if from_server == self.block_from_server:
@@ -91,26 +93,41 @@ async def check(bend, reference, case, host, bend_listens, control):
     print(f"PASS idle timeout {context}", flush=True)
 
 
-async def listeners(bend, reference, host):
+async def short_port_after_accept(server, route):
+    async with asyncio.TaskGroup() as pending:
+        port = pending.create_task(server.stdout.readline())
+        if route:
+            await route.client_seen.wait()
+            if port.done():
+                raise RuntimeError("short listener invited its peer while the wide handshake was blocked")
+            route.block_from_server = None
+    return int(port.result())
+
+
+async def listeners(bend, reference, host, delay_first):
     async with asyncio.timeout(15):
         async with child(bend, host, "idle-listeners") as server:
             def address(port):
                 return f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
 
             wide_port = int(await server.stdout.readline())
-            short_port = int(await server.stdout.readline())
-            if wide_port == short_port:
-                raise RuntimeError("two listeners received the same UDP port")
-            async with child(reference, "dial", address(wide_port), "wide", "pair") as wide:
-                async with child(reference, "dial", address(short_port), "configured", "pair") as short:
-                    processes = (server, wide, short)
-                    outputs = await asyncio.gather(*(process.communicate() for process in processes))
-                    markers = (b"PASS independent listener idle timeouts", b"PASS wide kept alive",
-                               b"PASS configured timed out")
-                    for process, (output, _), marker in zip(processes, outputs, markers):
-                        if process.returncode or marker not in output.splitlines():
-                            raise RuntimeError(f"{host} expected {marker!r}, got {output!r}, exit {process.returncode}")
-    print(f"PASS concurrent listener configurations {host}", flush=True)
+            async with route_to(host, wide_port, delay_first) as (port, route):
+                if route:
+                    route.block_from_server = False
+                async with child(reference, "dial", address(port), "wide", "pair") as wide:
+                    short_port = await short_port_after_accept(server, route)
+                    if wide_port == short_port:
+                        raise RuntimeError("two listeners received the same UDP port")
+                    async with child(reference, "dial", address(short_port), "configured", "pair") as short:
+                        processes = (server, wide, short)
+                        outputs = await asyncio.gather(*(process.communicate() for process in processes))
+                        markers = (b"PASS independent listener idle timeouts", b"PASS wide kept alive",
+                                   b"PASS configured timed out")
+                        for process, (output, _), marker in zip(processes, outputs, markers):
+                            if process.returncode or marker not in output.splitlines():
+                                raise RuntimeError(f"{host} expected {marker!r}, got {output!r}, exit {process.returncode}")
+    detail = " after a delayed first handshake" if delay_first else ""
+    print(f"PASS concurrent listener configurations {host}{detail}", flush=True)
 
 
 async def endpoint_route(bend, reference, case, *, host=None, relay=None, lookup=False):
@@ -160,7 +177,9 @@ async def run(args):
                                            for host in ("127.0.0.1", "::1")))
         return
     if args.listeners:
-        await asyncio.gather(*(listeners(args.bend, args.reference, host) for host in ("127.0.0.1", "::1")))
+        for delay_first in (False, True):
+            await asyncio.gather(*(listeners(args.bend, args.reference, host, delay_first)
+                                   for host in ("127.0.0.1", "::1")))
         return
     for case in args.cases:
         await asyncio.gather(*(check(args.bend, args.reference, case, host, listens, args.control)

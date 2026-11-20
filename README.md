@@ -127,8 +127,11 @@ client requires a libcurl build with WebSocket support.
    verifies byte 32 and closes with code zero and an empty reason. The same
    Bend target checks each backend's maximum timer and the next millisecond
    above it. It also binds two listeners in one Bend process, accepts a peer on
-   each, and checks that their different timers apply independently. In this
-   test the Iroh dialers take a final argument `pair`. The short connection
+   each, and checks that their different timers apply independently. Both
+   sockets are bound up front. The short dialer starts after Bend accepts the
+   wide connection. The test repeats with the first wide handshake packet
+   held off the server and checks that the short dialer still starts on time.
+   The Iroh dialers take a final argument `pair`. The short connection
    expires and the wide one receives application close code 123.
    Use `make check-quic-idle-config-routes` to run the dialer cases through
    the public endpoint route-selection API. The Iroh observer accepts the
