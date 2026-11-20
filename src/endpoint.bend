@@ -1217,10 +1217,15 @@ def bind_with_idle_timeout(address: Address, identity: Identity, idle_ms: NatWir
 def bind(address: Address, identity: Identity) -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
   bind_with_idle_timeout(address,identity,Close.default_idle_timeout())
 
-def bind_identity(address: Address, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+def bind_identity_with_idle_timeout(address: Address, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
   IpAddress{host,port} = address
-  Quic.bind_quic_identity(host,port,seed,alpn,early_data)
+  Quic.bind_quic_identity_with_idle_timeout(host,port,seed,alpn,early_data,idle_ms)
+
+def bind_identity(address: Address, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32>):
+  bind_identity_with_idle_timeout(address,seed,alpn,early_data,Close.default_idle_timeout())
 
 def remote_id(owner: Connection()) -> IO(Connection() & Result<&1,&1,U32 & String,List<&2,U32>>):
   use_connection(Result<&1,&1,U32 & String,List<&2,U32>>,owner,Quic.quic_remote_id)
@@ -1275,24 +1280,34 @@ def relay_only(bound: Result<&1,&1,U32 & String,RelayedListener & U32>) -> Resul
       Fail{error}
 
 # Keep the listener alive while its accepted relay connections are in use.
-def bind_relay_identity(url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+def bind_relay_identity_with_idle_timeout(url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,RelayedListener>):
   do IO<Result<&1,&1,U32 & String,RelayedListener>>:
     bound : Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32> <-
-      bind_identity(IpAddress{"127.0.0.1",0},seed,alpn,early_data)
+      bind_identity_with_idle_timeout(IpAddress{"127.0.0.1",0},seed,alpn,early_data,idle_ms)
     attached : Result<&1,&1,U32 & String,RelayedListener & U32> <- attach_inbound(bound,url,seed,
       address => secret => port => Inbound.start(address,secret,port))
     return relay_only(attached)
 
+def bind_relay_identity(url: String, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener>):
+  bind_relay_identity_with_idle_timeout(url,seed,alpn,early_data,Close.default_idle_timeout())
+
 # Share one identity, accept queue, and connection table between IPv4 and IPv6
 # direct traffic and the relay. Registration proceeds in the background.
 # Pass port zero to select a UDP port.
-def bind_direct_relay_identity(port: U32, url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+def bind_direct_relay_identity_with_idle_timeout(port: U32, url: String, +seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
   do IO<Result<&1,&1,U32 & String,RelayedListener & U32>>:
     bound : Result<&1,&1,U32 & String,Quic.QuicDatagramListener & U32> <-
-      Quic.bind_dual_quic_identity("::",port,seed,alpn,early_data)
+      Quic.bind_dual_quic_identity_with_idle_timeout("::",port,seed,alpn,early_data,idle_ms)
     attach_inbound(bound,url,seed,address => secret => local => Inbound.start_background(address,secret,local))
+
+def bind_direct_relay_identity(port: U32, url: String, seed: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,RelayedListener & U32>):
+  bind_direct_relay_identity_with_idle_timeout(port,url,seed,alpn,early_data,Close.default_idle_timeout())
 
 def accepted_relay(pair: Quic.QuicDatagramListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>,
     bridge: Path.Bridge) -> RelayedListener & Result<&1,&1,U32 & String,Maybe<&1,Connection()>>:

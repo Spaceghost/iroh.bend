@@ -306,13 +306,23 @@ def open_early_quic_stream(conn: DatagramConnection, direction: U32)
 # Opt in to TLS tickets and early data. Connections are handed to the
 # application after authentication, including any buffered early data.
 # Authenticate each connecting Ed25519 identity. Set early_data to 1 to issue 0-RTT tickets.
+def bind_quic_identity_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, alpn: List<&2,U32>, early_data: U32,
+    idle_ms: NatWire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  import "./quic_datagram.c"
+
 def bind_quic_identity(host: String, port: U32, secret: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
+    -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
+  bind_quic_identity_with_idle_timeout(host,port,secret,alpn,early_data,Close.default_idle_timeout())
+
+def bind_dual_quic_identity_with_idle_timeout(host: String, port: U32, secret: List<&2,U32>, alpn: List<&2,U32>, early_data: U32,
+    idle_ms: NatWire.VarInt)
     -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
   import "./quic_datagram.c"
 
 def bind_dual_quic_identity(host: String, port: U32, secret: List<&2,U32>, alpn: List<&2,U32>, early_data: U32)
     -> IO(Result<&1,&1,U32 & String,QuicDatagramListener & U32>):
-  import "./quic_datagram.c"
+  bind_dual_quic_identity_with_idle_timeout(host,port,secret,alpn,early_data,Close.default_idle_timeout())
 
 def quic_remote_id(conn: DatagramConnection)
     -> IO(DatagramConnection & Result<&1,&1,U32 & String,List<&2,U32>>):

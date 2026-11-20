@@ -448,11 +448,15 @@ check-quic-datagram: $(BUILD)/iroh-bend-quic-datagram $(QUIC_EARLY_LISTENER)
 		"$(UPSTREAM_DATAGRAM_V6)" "$(UPSTREAM_DATAGRAM_ECHO)" "$(UPSTREAM_QUIC_SHARED)" \
 		"$(UPSTREAM_QUIC_SHARED_DIAL)" "$(UPSTREAM_QUIC_EARLY)" "$(UPSTREAM_QUIC_EARLY_DIAL)" "$(QUIC_EARLY_LISTENER)"
 
-.PHONY: check-quic-resumption-idle
+.PHONY: check-quic-resumption-idle check-quic-resumption-idle-relay
 UPSTREAM_QUIC_RESUMPTION_IDLE ?=
 check-quic-resumption-idle: $(BUILD)/iroh-bend-quic-datagram-resumption-idle
 	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE to the Iroh resumption timeout fixture.' >&2; exit 2; }
 	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)"
+
+check-quic-resumption-idle-relay: $(BUILD)/iroh-bend-quic-datagram-resumption-idle
+	@test -x "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" && test -n "$(UPSTREAM_IROH_RELAY_URL)" && test -n "$(RELAY_URL)" || { echo 'Set UPSTREAM_QUIC_RESUMPTION_IDLE, RELAY_URL, and UPSTREAM_IROH_RELAY_URL.' >&2; exit 2; }
+	python3 -B tests/quic_resumption_idle.py "$<" "$(UPSTREAM_QUIC_RESUMPTION_IDLE)" --relay "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 .PHONY: check-quic-listener-identity
 UPSTREAM_QUIC_IDENTITY_DIAL ?=

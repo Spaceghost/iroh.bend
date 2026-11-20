@@ -578,6 +578,9 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   Ed25519 peer keys independently. Read the accepted peer key with
   `Endpoint.remote_id` or `quic_remote_id`. Pass `1` for `early_data` to
   enable listener-scoped tickets and buffered 0-RTT.
+  Use `Endpoint.bind_identity_with_idle_timeout` for one local address or
+  `bind_dual_quic_identity_with_idle_timeout` for an IPv4/IPv6 socket.
+  Both take a final QUIC VarInt in milliseconds.
 - `Endpoint.bind_relay_identity` accepts peers through one authenticated
   relay registration. Poll with `Endpoint.try_accept_relay_identity`, then
   use the usual connection operations and `Endpoint.remote_id`. Keep the
@@ -598,6 +601,11 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   relayed listener API. Both direct families and the relay share a QUIC
   accept queue and TLS context. Direct dialing peers need reachable IP
   addresses and the returned port in their endpoint address.
+  `Endpoint.bind_relay_identity_with_idle_timeout` and
+  `Endpoint.bind_direct_relay_identity_with_idle_timeout` apply one
+  connection idle limit to all peers the listener accepts, including on
+  resumed connections. Pass zero to disable the local limit. The original
+  constructors use 30,000 ms.
 - `EndpointMultipath.bind_direct_relay_identity` opens the equivalent
   Picoquic listener with a server-ordered list of ALPN byte strings and an
   opt-in early-data flag. Poll with `EndpointMultipath.accept_listener`
@@ -928,8 +936,17 @@ remain open.
 Run `make check-quic-resumption-idle` with `UPSTREAM_QUIC_RESUMPTION_IDLE`
 set to the Iroh 1.5.0 resumption fixture. It reports `IDLE warm MS` and
 `IDLE resumed MS` from the negotiated transport parameters. The tests cover
-IPv4 and IPv6, accepted and rejected early streams and datagrams, and a
-handshake-only resumption that both peers report as `TimedOut`.
+IPv4 and IPv6, listeners pinned to one peer, listeners that accept any
+authenticated identity, dual-stack listeners, accepted and rejected early
+streams and datagrams, and a resumption without early data that both peers
+report as `TimedOut`.
+
+Run `make check-quic-resumption-idle-relay` with the same fixture.
+Set `RELAY_URL` to the relay’s WS or WSS URL ending in `/relay` and
+`UPSTREAM_IROH_RELAY_URL` to its HTTP or HTTPS base URL. In
+`dial-relay` mode the Iroh peer has only a relay address and checks that it
+received application datagrams on that path during both connections. The
+suite also dials the combined listener directly over IPv4 and IPv6.
 
 On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`

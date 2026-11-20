@@ -5,6 +5,7 @@ import ../src/quic_nat.bend as Wire
 import ../src/quic_close.bend as Close
 import ./quic_datagram.bend as Peer
 import ./quic_early_listener.bend as Listener
+import ./quic_relay_close.bend as RelayTest
 import ./quic_datagram_cancel.bend as Datagram
 import ./quic_connection_close.bend as CloseTest
 import ./quic_idle_timeout.bend as Idle
@@ -52,23 +53,87 @@ def dial(+host: String, warm: U32, port: U32, +mode: String, idle_ms: Wire.VarIn
       Bool.to_u32(Bool.not(String.eq(mode,"quiet"))),idle_ms)
     verify(mode,result)
 
-def serve(host: String, mode: Listener.RttListenerMode, idle_ms: Wire.VarInt) -> IO(Unit):
-  do IO<Unit>:
-    bound : Q.QuicDatagramListener & U32 <- IO.try(Q.QuicDatagramListener & U32,
+def bind(kind: String, host: String, idle_ms: Wire.VarInt)
+    -> IO(Result<&1,&1,U32 & String,Q.QuicDatagramListener & U32>):
+  match kind:
+    case "identity":
+      Endpoint.bind_identity_with_idle_timeout(Endpoint.IpAddress{host,0},List.replicate(U32,32n,42),
+        Peer.fixture_alpn(),1,idle_ms)
+    case "dual":
+      Q.bind_dual_quic_identity_with_idle_timeout("::",0,List.replicate(U32,32n,42),Peer.fixture_alpn(),1,idle_ms)
+    case _:
       Endpoint.bind_resumable_with_idle_timeout(Endpoint.IpAddress{host,0},
-        Endpoint.PeerKeys{List.replicate(U32,32n,42),Peer.public_key(True{}),Peer.fixture_alpn()},idle_ms))
+        Endpoint.PeerKeys{List.replicate(U32,32n,42),Peer.public_key(True{}),Peer.fixture_alpn()},idle_ms)
+
+def serve(kind: String, host: String, mode: Listener.RttListenerMode, idle_ms: Wire.VarInt) -> IO(Unit):
+  do IO<Unit>:
+    bound : Q.QuicDatagramListener & U32 <- IO.try(Q.QuicDatagramListener & U32,bind(kind,host,idle_ms))
     Listener.announce_resumable(bound,"",mode)
 
-def server(host: String, mode: String, idle_ms: Wire.VarInt) -> IO(Unit):
+def server(kind: String, host: String, mode: String, idle_ms: Wire.VarInt) -> IO(Unit):
   match mode:
     case "accept":
-      serve(host,Listener.AcceptTicket{},idle_ms)
+      serve(kind,host,Listener.AcceptTicket{},idle_ms)
     case "warm":
-      serve(host,Listener.WarmTicket{},idle_ms)
+      serve(kind,host,Listener.WarmTicket{},idle_ms)
     case "reject":
-      serve(host,Listener.RefuseTicket{},idle_ms)
+      serve(kind,host,Listener.RefuseTicket{},idle_ms)
     case _:
       IO.die(Unit,2,"unknown listener resumption mode")
+
+def authenticated(pair: Endpoint.RelayedListener & Endpoint.Connection())
+    -> IO(Endpoint.RelayedListener & Q.DatagramConnection):
+  match pair:
+    case (listener,(conn,None{})):
+      do IO<Endpoint.RelayedListener & Q.DatagramConnection>:
+        verified : Q.DatagramConnection <- Listener.verify_peer(conn,Peer.public_key(True{}))
+        return (listener,verified)
+    case _:
+      IO.die(Endpoint.RelayedListener & Q.DatagramConnection,1,"an accepted QUIC connection unexpectedly owns a relay bridge")
+
+def relay_accept(listener: Endpoint.RelayedListener) -> IO(Endpoint.RelayedListener & Q.DatagramConnection):
+  do IO<Endpoint.RelayedListener & Q.DatagramConnection>:
+    pair : Endpoint.RelayedListener & Endpoint.Connection() <-
+      RelayTest.accept(~Endpoint.RelayedListener,~Endpoint.Connection(),~Endpoint.try_accept_relay_identity,listener,15000n)
+    authenticated(pair)
+
+def warm_relay(pair: Endpoint.RelayedListener & Q.DatagramConnection) -> IO(Endpoint.RelayedListener):
+  (listener,conn) = pair
+  do IO<Endpoint.RelayedListener>:
+    Listener.warm_session(conn)
+    return listener
+
+def finish_relay(pair: Endpoint.RelayedListener & Q.DatagramConnection) -> IO(Unit):
+  (listener,conn) = pair
+  do IO<Unit>:
+    status : Q.DatagramConnection & Result<&1,&1,U32 & String,Maybe<&1,U32 & U32>> <- Q.quic_resumption_status(conn)
+    Listener.server_resume_status(status,True{})
+    IO.try(Unit,Endpoint.close_relay_identity(listener))
+
+def serve_relay(listener: Endpoint.RelayedListener, port: U32) -> IO(Unit):
+  do IO<Unit>:
+    IO.print(U32.show(port))
+    first : Endpoint.RelayedListener & Q.DatagramConnection <- relay_accept(listener)
+    warm : Endpoint.RelayedListener <- warm_relay(first)
+    resumed : Endpoint.RelayedListener & Q.DatagramConnection <- relay_accept(warm)
+    finish_relay(resumed)
+
+def direct_relay(result: Endpoint.RelayedListener & U32) -> IO(Unit):
+  (listener,port) = result
+  serve_relay(listener,port)
+
+def relay(kind: String, url: String, idle_ms: Wire.VarInt) -> IO(Unit):
+  match kind:
+    case "relay":
+      do IO<Unit>:
+        owner : Endpoint.RelayedListener <- IO.try(Endpoint.RelayedListener,
+          Endpoint.bind_relay_identity_with_idle_timeout(url,List.replicate(U32,32n,42),Peer.fixture_alpn(),1,idle_ms))
+        serve_relay(owner,0)
+    case _:
+      do IO<Unit>:
+        bound : Endpoint.RelayedListener & U32 <- IO.try(Endpoint.RelayedListener & U32,
+          Endpoint.bind_direct_relay_identity_with_idle_timeout(0,url,List.replicate(U32,32n,42),Peer.fixture_alpn(),1,idle_ms))
+        direct_relay(bound)
 
 def pair(a: Maybe<&2,U32>, b: Maybe<&2,U32>, run: U32 -> U32 -> IO(Unit)) -> IO(Unit):
   match a b:
@@ -82,8 +147,10 @@ def run(args: List<String>) -> IO(Unit):
     case [_,"client",host,warm,port,mode,hi,lo]:
       pair(U32.read(hi),U32.read(lo),h => l => pair(U32.read(warm),U32.read(port),
         w => p => dial(host,w,p,mode,Wire.Var{h,l})))
-    case [_,"server",host,mode,hi,lo]:
-      pair(U32.read(hi),U32.read(lo),h => l => server(host,mode,Wire.Var{h,l}))
+    case [_,kind,host,mode,hi,lo]:
+      pair(U32.read(hi),U32.read(lo),h => l => server(kind,host,mode,Wire.Var{h,l}))
+    case [_,kind,url,hi,lo]:
+      pair(U32.read(hi),U32.read(lo),h => l => relay(kind,url,Wire.Var{h,l}))
     case _:
       IO.die(Unit,2,"expected client or server resumption arguments")
 

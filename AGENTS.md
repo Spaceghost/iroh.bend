@@ -18,12 +18,14 @@ Continue the first open item below and update the checkpoint after each verified
 ## Current checkpoint
 
 1. Match Iroh's relay path defaults and path-specific keepalives in the Picoquic endpoint. Iroh uses a 15-second idle limit on direct paths, a 30-second limit on relay paths and a five-second heartbeat on each path. Verify an idle but reachable standby and keep the existing relay-to-direct failback checks passing.
-2. Carry the configured connection idle timeout through the specialized session resumption, early-data and NAT constructors. Check the advertised limit on full, resumed and rejected-early-data handshakes against Iroh 1.5.0.
+2. Carry the configured connection idle timeout through Picoquic’s specialized session resumption, early-data and NAT constructors. Check the advertised limit on full, resumed and rejected-early-data handshakes against Iroh 1.5.0.
 3. Keep live **listener** NAT mapping refresh parked until the owner asks to resume it. The outbound connection's mapping-refresh tests are a separate, passing case.
 
 ## Checking the last checkpoint
 
 Picoquic now expires a silent path independently of the connection. The 14 checks against Iroh's pinned Noq 1.5.0 and raw-key TLS code cover both address families, failed validation in both loss directions, validated paths in both Bend roles, the three-PTO floor, the last local path and base QUIC expiry. The original path exchanges a fresh stream after the alternate expires. The existing 21 Picoquic connection-idle checks and the CUDA suite also pass.
+
+The ngtcp2 resumption and identity listener APIs now carry the configured connection idle timeout on direct and relayed connections. The Iroh 1.5.0 checks for these APIs run with `make check-quic-resumption-idle` and `make check-quic-resumption-idle-relay`. The Fedora reference source, build script and WS/WSS test runner are in `~/workspaces/2026-11-20-iroh-conformance/artifacts/resumption-idle/`.
 
 Run the path checks on Fedora with the build and reference scripts in the evidence directory.
 
