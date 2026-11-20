@@ -1,9 +1,9 @@
 BEND ?= bend
 BUILD ?= build
 
-.PHONY: check check-gpu check-dns-tcp check-relay-websocket check-relay-http
+.PHONY: check check-gpu check-dns-tcp check-relay-websocket check-relay-http check-quic-nat
 
-check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate check-relay-websocket check-relay-http
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate check-relay-websocket check-relay-http check-quic-nat
 	$(BUILD)/iroh-bend-check
 	$(BUILD)/iroh-bend-handshake
 	$(BUILD)/iroh-bend-discovery
@@ -24,6 +24,13 @@ $(BUILD)/iroh-bend-discovery: tests/discovery.bend src/discovery.bend src/relay.
 $(BUILD)/iroh-bend-rate: tests/relay_rate.bend src/relay_rate.bend src/relay_heartbeat.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_rate.bend -o $@
+
+check-quic-nat: $(BUILD)/iroh-bend-quic-nat
+	$(BUILD)/iroh-bend-quic-nat
+
+$(BUILD)/iroh-bend-quic-nat: tests/quic_nat.bend src/quic_nat.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/quic_nat.bend -o $@
 
 check-relay-websocket: $(BUILD)/iroh-bend-websocket
 	$(BUILD)/iroh-bend-websocket
