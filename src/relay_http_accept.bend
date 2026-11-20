@@ -13,7 +13,7 @@ def protocol(version: U32) -> String:
 
 def render(version: U32, accept: List<&2,U32>) -> List<&2,U32>:
   start : String = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n"
-  List.append(&2,U32,Http.ascii(start ++ "Sec-WebSocket-Accept: "),
+  List.append(&2,U32,Http.ascii(start ++ Http.security_headers() ++ "Sec-WebSocket-Accept: "),
     List.append(&2,U32,accept,Http.ascii("\r\nSec-WebSocket-Protocol: " ++ protocol(version) ++ "\r\n\r\n")))
 
 # Encode the 101 for an UpgradeReady returned by the request parser.

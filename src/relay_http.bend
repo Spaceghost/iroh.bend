@@ -351,3 +351,7 @@ def request_upgrade(req: HttpRequest) -> UpgradeResult:
   RequestHead{method,target,version,fields} = req
   +route = path(target)
   decide_upgrade(method,version,fields,equal(route,ascii("/relay")) || equal(route,ascii("/derp")))
+
+def security_headers() -> String:
+  "Strict-Transport-Security: max-age=63072000; includeSubDomains\r\n" ++
+  "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'\r\n"

@@ -4,7 +4,7 @@ import ./relay_http_accept.bend as Accept
 
 type UpgradeRead is Data:
   MoreHttp{state: Http.Reader}
-  HttpRequestReady{request: Http.HttpRequest}
+  HttpRequestReady{request: Http.HttpRequest, pending: List<&2,U32>}
   HttpRejected{status: U32, version_header: Bool}
   WebSocketReady{version: U32, request: Http.HttpRequest, reply: List<&2,U32>, pending: List<&2,U32>}
 
@@ -19,7 +19,7 @@ def accepted(reply: Result<&1,&1,U32 & String,List<&2,U32>>, version: U32, reque
 def respond(decision: Http.UpgradeResult, request: Http.HttpRequest, pending: List<&2,U32>) -> IO(UpgradeRead):
   match decision:
     case Http.OrdinaryRequest{}:
-      IO.pure(UpgradeRead,HttpRequestReady{request})
+      IO.pure(UpgradeRead,HttpRequestReady{request,pending})
     case Http.UpgradeRejected{status}:
       IO.pure(UpgradeRead,HttpRejected{status,False{}})
     case Http.UnsupportedWebSocketVersion{}:

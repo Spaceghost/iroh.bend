@@ -16,6 +16,7 @@ require 'C.string'
 for _, name in ipairs{'relay_bind','relay_bind_raw','relay_poll','relay_millis','relay_queue','relay_authorized_with_meter',
                       'relay_meter_challenge','relay_resume_rx','relay_raw_chunk_done','relay_reconfigure_rx','relay_kick','relay_stop',
                       'relay_nonce','RelayListener','RelayIdle','RelayJoined','RelayBytes','RelayRead','RelayLeft',
+                      'relay_socket_tls','relay_http_keepalive',
                       'Con','True','False','Unit','Some','None',
                       'relay_client_auth_header','relay_export_keying_material',
                       'relay_request_raw','relay_enable_request_details','Nil'} do
@@ -32,6 +33,8 @@ local iroh_srv_relay_authorized_with_meter: uint32 <cimport,nodecl>
 local iroh_srv_relay_meter_challenge: uint32 <cimport,nodecl>
 local iroh_srv_relay_resume_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_raw_chunk_done: uint32 <cimport,nodecl>
+local iroh_srv_relay_socket_tls: uint32 <cimport,nodecl>
+local iroh_srv_relay_http_keepalive: uint32 <cimport,nodecl>
 local iroh_srv_relay_reconfigure_rx: uint32 <cimport,nodecl>
 local iroh_srv_relay_kick: uint32 <cimport,nodecl>
 local iroh_srv_relay_stop: uint32 <cimport,nodecl>
@@ -897,6 +900,18 @@ local function resume_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
   if peer ~= nilptr then resume_rx(peer) end
   return f[0]
 end
+local function socket_tls_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  local tag = peer ~= nilptr and lws_get_ssl(peer.ws) ~= nilptr and iroh_srv_True or iroh_srv_False
+  return io_tup(e,f[0],term_pak(tag,0))
+end
+local function http_keepalive_run(e: Env, f: *[0]Term, work: *IoWork): Term
+  local peer = find_peer(find_server(e,f[0]),(@uint32)(f[1]))
+  if peer ~= nilptr and peer.raw and not peer.authorized and not peer.challenged then
+    peer.deadline = io_tick() + 10000000000
+  end
+  return f[0]
+end
 local function reconfigure_rx_run(e: Env, f: *[0]Term, work: *IoWork): Term
   local server = find_server(e,f[0])
   if server == nilptr then return f[0] end
@@ -973,6 +988,8 @@ local function register() <cexport,codename 'iroh_register_relay_server',cattrib
   if iroh_srv_relay_meter_challenge ~= 0xffffffff then io_eff(iroh_srv_relay_meter_challenge,meter_challenge_run) end
   if iroh_srv_relay_resume_rx ~= 0xffffffff then io_eff(iroh_srv_relay_resume_rx,resume_rx_run) end
   if iroh_srv_relay_raw_chunk_done ~= 0xffffffff then io_eff(iroh_srv_relay_raw_chunk_done,raw_chunk_done_run) end
+  if iroh_srv_relay_socket_tls ~= 0xffffffff then io_eff(iroh_srv_relay_socket_tls,socket_tls_run) end
+  if iroh_srv_relay_http_keepalive ~= 0xffffffff then io_eff(iroh_srv_relay_http_keepalive,http_keepalive_run) end
   if iroh_srv_relay_reconfigure_rx ~= 0xffffffff then io_eff(iroh_srv_relay_reconfigure_rx,reconfigure_rx_run) end
   if iroh_srv_relay_kick ~= 0xffffffff then io_eff(iroh_srv_relay_kick,kick_run) end
   if iroh_srv_relay_stop ~= 0xffffffff then io_eff(iroh_srv_relay_stop,stop_run) end

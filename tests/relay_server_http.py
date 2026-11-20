@@ -2,9 +2,29 @@
 
 from http.client import HTTPConnection, HTTPSConnection
 import json
+import socket
 import ssl
 import sys
 from urllib.parse import urlsplit
+
+
+def pipelined(origin, context):
+    with socket.create_connection((origin.hostname, origin.port), timeout=4) as raw:
+        connection = context.wrap_socket(raw, server_hostname=origin.hostname) if context else raw
+        with connection, connection.makefile("rb") as replies:
+            connection.sendall(
+                b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                b"GET /robots.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            for body in (b"", b"User-agent: *\nDisallow: /\n"):
+                assert replies.readline().startswith(b"HTTP/1.1 200 ")
+                fields = {}
+                while (line := replies.readline()) != b"\r\n":
+                    assert line, "incomplete HTTP header"
+                    name, value = line.split(b":", 1)
+                    fields[name.lower()] = value.strip()
+                assert replies.read(int(fields[b"content-length"])) == body
+            assert replies.read(1) == b""
 
 
 def exercise(origin, context):
@@ -47,6 +67,7 @@ def exercise(origin, context):
         check("/generate_204", 404, {"X-Iroh-Challenge": "valid"})
     check("/unknown", 404)
     check("/ping", 404, method="POST")
+    pipelined(origin, context)
     print(f"PASS relay HTTP routes over {origin.scheme.upper()}")
 
 

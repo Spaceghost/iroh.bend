@@ -177,43 +177,33 @@ def version(number: U32) -> Wire.Version:
     case _:
       Wire.V2{}
 
-def capture_requests(socket: Socket.ServerSocket, port: U32, access: Access.Control, limits: Rate.Limits)
-    -> IO(Result<&1,&1,U32 & String,Server & U32>):
-  match access:
-    case Access.AllowAll{}:
-      IO.pure(Result<&1,&1,U32 & String,Server & U32>,
-        Done{(Relay{Serving{socket,Registry{[],[],limits}},Access.AllowAll{}},port)})
-    case _:
-      do IO<Result<&1,&1,U32 & String,Server & U32>>:
-        enabled : Socket.ServerSocket <- Socket.relay_enable_request_details(socket)
-        return Done{(Relay{Serving{enabled,Registry{[],[],limits}},access},port)}
-
 def attached(result: Result<&1,&1,U32 & String,Socket.ServerSocket & U32>, access: Access.Control, limits: Rate.Limits)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):
   match result:
     case Done{(socket,port)}:
-      capture_requests(socket,port,access,limits)
+      IO.pure(Result<&1,&1,U32 & String,Server & U32>,
+        Done{(Relay{Serving{socket,Registry{[],[],limits}},access},port)})
     case Fail{error}:
       IO.pure(Result<&1,&1,U32 & String,Server & U32>,Fail{error})
 
 def bind_checked(host: String, port: U32, cert: String, key: String, access: Access.Control,
-    limits: Rate.Limits, raw: Bool, valid: Bool) -> IO(Result<&1,&1,U32 & String,Server & U32>):
+    limits: Rate.Limits, valid: Bool) -> IO(Result<&1,&1,U32 & String,Server & U32>):
   match valid:
     case True{}:
       do IO<Result<&1,&1,U32 & String,Server & U32>>:
-        result : Result<&1,&1,U32 & String,Socket.ServerSocket & U32> <- Socket.relay_bind(host,port,cert,key,raw)
+        result : Result<&1,&1,U32 & String,Socket.ServerSocket & U32> <- Socket.relay_bind(host,port,cert,key)
         attached(result,access,limits)
     case False{}:
       IO.pure(Result<&1,&1,U32 & String,Server & U32>,Fail{(22,"invalid relay receive limit")})
 
 def bind_configured(host: String, port: U32, cert: String, key: String, access: Access.Control,
     +limits: Rate.Limits) -> IO(Result<&1,&1,U32 & String,Server & U32>):
-  bind_checked(host,port,cert,key,access,limits,False{},Rate.valid(limits))
+  bind_checked(host,port,cert,key,access,limits,Rate.valid(limits))
 
-# Use the Bend HTTP and WebSocket codecs on the raw transport.
+# Compatibility entry point for callers that explicitly selected Bend framing.
 def bind_raw_configured(host: String, port: U32, cert: String, key: String, access: Access.Control,
-    +limits: Rate.Limits) -> IO(Result<&1,&1,U32 & String,Server & U32>):
-  bind_checked(host,port,cert,key,access,limits,True{},Rate.valid(limits))
+    limits: Rate.Limits) -> IO(Result<&1,&1,U32 & String,Server & U32>):
+  bind_configured(host,port,cert,key,access,limits)
 
 def bind_with_access(host: String, port: U32, cert: String, key: String, access: Access.Control)
     -> IO(Result<&1,&1,U32 & String,Server & U32>):

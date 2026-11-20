@@ -16,6 +16,7 @@ def check(result: Http.UpgradeResult) -> IO(Unit):
         reply : List<&2,U32> <- IO.try(List<&2,U32>,Accept.switching_protocols(version,key))
         checked(Http.equal(reply,Http.ascii(
           "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n" ++
+          Http.security_headers() ++
           "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: iroh-relay-v2\r\n\r\n")))
     case _:
       checked(False{})

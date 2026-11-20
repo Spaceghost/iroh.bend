@@ -2,6 +2,7 @@ import Base
 import ./relay_server_socket.bend as Native
 import ./relay_http.bend as Http
 import ./relay_raw_http.bend as Raw
+import ./relay_http_routes.bend as Routes
 import ./relay_websocket.bend as Ws
 
 type Stage is Data:
@@ -16,28 +17,17 @@ type Buffered is Data:
   Chunk{id: U32, bytes: List<&2,U32>}
 
 type ServerSocket is Type:
-  FramedSocket{socket: Native.ServerSocket}
   RawSocket{socket: Native.ServerSocket, sessions: List<&2,Session>, buffered: Buffered}
-
-def native_bound(bound: Native.ServerSocket & U32) -> ServerSocket & U32:
-  (socket,port) = bound
-  (FramedSocket{socket},port)
 
 def raw_bound(bound: Native.ServerSocket & U32) -> ServerSocket & U32:
   (socket,port) = bound
   (RawSocket{socket,[],NoChunk{}},port)
 
-def relay_bind(host: String, port: U32, cert: String, key: String, raw: Bool)
+def relay_bind(host: String, port: U32, cert: String, key: String)
     -> IO(Result<&1,&1,U32 & String,ServerSocket & U32>):
-  match raw:
-    case False{}:
-      do IO<Result<&1,&1,U32 & String,ServerSocket & U32>>:
-        bound : Result<&1,&1,U32 & String,Native.ServerSocket & U32> <- Native.relay_bind(host,port,cert,key)
-        return Result.map(&1,&1,U32 & String,Native.ServerSocket & U32,ServerSocket & U32,native_bound,bound)
-    case True{}:
-      do IO<Result<&1,&1,U32 & String,ServerSocket & U32>>:
-        bound : Result<&1,&1,U32 & String,Native.ServerSocket & U32> <- Native.relay_bind_raw(host,port,cert,key)
-        return Result.map(&1,&1,U32 & String,Native.ServerSocket & U32,ServerSocket & U32,raw_bound,bound)
+  do IO<Result<&1,&1,U32 & String,ServerSocket & U32>>:
+    bound : Result<&1,&1,U32 & String,Native.ServerSocket & U32> <- Native.relay_bind_raw(host,port,cert,key)
+    return Result.map(&1,&1,U32 & String,Native.ServerSocket & U32,ServerSocket & U32,raw_bound,bound)
 
 def choose_stage(before: Stage, rest: Unit -> Maybe<&2,Stage>, same: Bool) -> Maybe<&2,Stage>:
   match same:
@@ -157,16 +147,30 @@ def upgrade_written(result: Native.ServerSocket & Bool, +id: U32, sessions: List
     case (sock,False{}):
       raw_close(sock,id,sessions,0)
 
-def rejection(status: U32, version: Bool) -> String:
-  match status version:
-    case 431 _:
-      "HTTP/1.1 431 Request Header Fields Too Large\r\n"
-    case 500 _:
-      "HTTP/1.1 500 Internal Server Error\r\n"
-    case _ True{}:
-      "HTTP/1.1 400 Bad Request\r\nSec-WebSocket-Version: 13\r\n"
-    case _ False{}:
-      "HTTP/1.1 400 Bad Request\r\n"
+def queued_http(result: Native.ServerSocket & Bool, +id: U32, sessions: List<&2,Session>,
+    pending: List<&2,U32>) -> IO(ServerSocket & Native.SocketEvent):
+  match result:
+    case (sock,False{}):
+      raw_close(sock,id,sessions,0)
+    case (sock,True{}):
+      do IO<ServerSocket & Native.SocketEvent>:
+        next : Native.ServerSocket <- Native.relay_http_keepalive(sock,id)
+        return (RawSocket{next,replace(sessions,id,AwaitHead{Http.reader()}),Chunk{id,pending}},Native.RelayIdle{})
+
+def send_http(sock: Native.ServerSocket, +id: U32, sessions: List<&2,Session>, pending: List<&2,U32>,
+    response: Routes.WireReply) -> IO(ServerSocket & Native.SocketEvent):
+  match response:
+    case Routes.HttpReply{wire,False{}}:
+      close_reply(sock,id,sessions,wire)
+    case Routes.HttpReply{wire,True{}}:
+      do IO<ServerSocket & Native.SocketEvent>:
+        sent : Native.ServerSocket & Bool <- Native.relay_queue(sock,id,wire)
+        queued_http(sent,id,sessions,pending)
+
+def ordinary(checked: Native.ServerSocket & Bool, id: U32, sessions: List<&2,Session>,
+    request: Http.HttpRequest, pending: List<&2,U32>) -> IO(ServerSocket & Native.SocketEvent):
+  (sock,tls) = checked
+  send_http(sock,id,sessions,pending,Routes.serve(request,tls))
 
 def http(sock: Native.ServerSocket, +id: U32, sessions: List<&2,Session>, read: Raw.UpgradeRead)
     -> IO(ServerSocket & Native.SocketEvent):
@@ -178,10 +182,11 @@ def http(sock: Native.ServerSocket, +id: U32, sessions: List<&2,Session>, read: 
         sent : Native.ServerSocket & Bool <- Native.relay_queue(sock,id,reply)
         upgrade_written(sent,id,sessions,version,request,pending)
     case Raw.HttpRejected{status,version_header}:
-      close_reply(sock,id,sessions,Http.ascii(rejection(status,version_header) ++
-        "Connection: close\r\nContent-Length: 0\r\n\r\n"))
-    case Raw.HttpRequestReady{_}:
-      close_reply(sock,id,sessions,Http.ascii("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
+      send_http(sock,id,sessions,[],Routes.rejected(status,version_header))
+    case Raw.HttpRequestReady{request,pending}:
+      do IO<ServerSocket & Native.SocketEvent>:
+        checked : Native.ServerSocket & Bool <- Native.relay_socket_tls(sock,id)
+        ordinary(checked,id,sessions,request,pending)
 
 def frame_limit(request: Maybe<&2,Http.HttpRequest>) -> U32:
   match request:
@@ -214,16 +219,8 @@ def native_event(result: Native.ServerSocket & Native.SocketEvent, +sessions: Li
     case (sock,event):
       IO.pure(ServerSocket & Native.SocketEvent,(RawSocket{sock,sessions,NoChunk{}},event))
 
-def framed_event(result: Native.ServerSocket & Native.SocketEvent) -> ServerSocket & Native.SocketEvent:
-  (sock,event) = result
-  (FramedSocket{sock},event)
-
 def relay_poll(transport: ServerSocket) -> IO(ServerSocket & Native.SocketEvent):
   match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket & Native.SocketEvent>:
-        event : Native.ServerSocket & Native.SocketEvent <- Native.relay_poll(sock)
-        return framed_event(event)
     case RawSocket{sock,sessions,NoChunk{}}:
       do IO<ServerSocket & Native.SocketEvent>:
         event : Native.ServerSocket & Native.SocketEvent <- Native.relay_poll(sock)
@@ -233,18 +230,10 @@ def relay_poll(transport: ServerSocket) -> IO(ServerSocket & Native.SocketEvent)
 
 def with_socket(transport: ServerSocket, action: Native.ServerSocket -> IO(Native.ServerSocket))
     -> IO(ServerSocket):
-  match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket>:
-        next : Native.ServerSocket <- action(sock)
-        return FramedSocket{next}
-    case RawSocket{sock,sessions,buffered}:
-      do IO<ServerSocket>:
-        next : Native.ServerSocket <- action(sock)
-        return RawSocket{next,sessions,buffered}
-
-def relay_enable_request_details(transport: ServerSocket) -> IO(ServerSocket):
-  with_socket(transport,sock => Native.relay_enable_request_details(sock))
+  RawSocket{sock,sessions,buffered} = transport
+  do IO<ServerSocket>:
+    next : Native.ServerSocket <- action(sock)
+    return RawSocket{next,sessions,buffered}
 
 def relay_resume_rx(transport: ServerSocket, id: U32) -> IO(ServerSocket):
   with_socket(transport,sock => Native.relay_resume_rx(sock,id))
@@ -256,15 +245,8 @@ def relay_reconfigure_rx(transport: ServerSocket, enabled: Bool) -> IO(ServerSoc
   with_socket(transport,sock => Native.relay_reconfigure_rx(sock,enabled))
 
 def relay_stop(transport: ServerSocket) -> IO(Unit):
-  match transport:
-    case FramedSocket{sock}:
-      Native.relay_stop(sock)
-    case RawSocket{sock,_,_}:
-      Native.relay_stop(sock)
-
-def carry_framed(-A: Type, result: Native.ServerSocket & A) -> ServerSocket & A:
-  (sock,value) = result
-  (FramedSocket{sock},value)
+  RawSocket{sock,_,_} = transport
+  Native.relay_stop(sock)
 
 def carry_raw(-A: Type, result: Native.ServerSocket & A, sessions: List<&2,Session>, buffered: Buffered)
     -> ServerSocket & A:
@@ -280,27 +262,17 @@ def native_queue(sock: Native.ServerSocket, id: U32, encoded: Maybe<&2,List<&2,U
       IO.pure(Native.ServerSocket & Bool,(sock,False{}))
 
 def relay_queue(transport: ServerSocket, id: U32, bytes: List<&2,U32>) -> IO(ServerSocket & Bool):
-  match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket & Bool>:
-        result : Native.ServerSocket & Bool <- Native.relay_queue(sock,id,bytes)
-        return carry_framed(Bool,result)
-    case RawSocket{sock,sessions,buffered}:
-      do IO<ServerSocket & Bool>:
-        result : Native.ServerSocket & Bool <- native_queue(sock,id,Ws.encode(Ws.Binary{bytes}))
-        return carry_raw(Bool,result,sessions,buffered)
+  RawSocket{sock,sessions,buffered} = transport
+  do IO<ServerSocket & Bool>:
+    result : Native.ServerSocket & Bool <- native_queue(sock,id,Ws.encode(Ws.Binary{bytes}))
+    return carry_raw(Bool,result,sessions,buffered)
 
 def relay_export_keying_material(transport: ServerSocket, id: U32, key: List<&2,U32>)
     -> IO(ServerSocket & Maybe<&1,List<&2,U32>>):
-  match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket & Maybe<&1,List<&2,U32>>>:
-        result : Native.ServerSocket & Maybe<&1,List<&2,U32>> <- Native.relay_export_keying_material(sock,id,key)
-        return carry_framed(Maybe<&1,List<&2,U32>>,result)
-    case RawSocket{sock,sessions,buffered}:
-      do IO<ServerSocket & Maybe<&1,List<&2,U32>>>:
-        result : Native.ServerSocket & Maybe<&1,List<&2,U32>> <- Native.relay_export_keying_material(sock,id,key)
-        return carry_raw(Maybe<&1,List<&2,U32>>,result,sessions,buffered)
+  RawSocket{sock,sessions,buffered} = transport
+  do IO<ServerSocket & Maybe<&1,List<&2,U32>>>:
+    result : Native.ServerSocket & Maybe<&1,List<&2,U32>> <- Native.relay_export_keying_material(sock,id,key)
+    return carry_raw(Maybe<&1,List<&2,U32>>,result,sessions,buffered)
 
 def auth_value(fields: List<&2,List<&2,U32>>) -> Maybe<&1,List<&2,U32>>:
   match fields:
@@ -320,14 +292,9 @@ def raw_auth(stage: Maybe<&2,Stage>) -> Maybe<&1,List<&2,U32>>:
 
 def relay_client_auth_header(transport: ServerSocket, id: U32)
     -> IO(ServerSocket & Maybe<&1,List<&2,U32>>):
-  match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket & Maybe<&1,List<&2,U32>>>:
-        result : Native.ServerSocket & Maybe<&1,List<&2,U32>> <- Native.relay_client_auth_header(sock,id)
-        return carry_framed(Maybe<&1,List<&2,U32>>,result)
-    case RawSocket{sock,+sessions,buffered}:
-      IO.pure(ServerSocket & Maybe<&1,List<&2,U32>>,
-        (RawSocket{sock,sessions,buffered},raw_auth(lookup(sessions,id))))
+  RawSocket{sock,+sessions,buffered} = transport
+  IO.pure(ServerSocket & Maybe<&1,List<&2,U32>>,
+    (RawSocket{sock,sessions,buffered},raw_auth(lookup(sessions,id))))
 
 def clear_admission(sessions: List<&2,Session>, id: U32, stage: Maybe<&2,Stage>) -> List<&2,Session>:
   match stage:
@@ -337,13 +304,10 @@ def clear_admission(sessions: List<&2,Session>, id: U32, stage: Maybe<&2,Stage>)
       sessions
 
 def relay_authorized_with_meter(transport: ServerSocket, +id: U32, enabled: Bool) -> IO(ServerSocket):
-  match transport:
-    case FramedSocket{sock}:
-      with_socket(FramedSocket{sock},net => Native.relay_authorized_with_meter(net,id,enabled))
-    case RawSocket{sock,+sessions,buffered}:
-      do IO<ServerSocket>:
-        next : Native.ServerSocket <- Native.relay_authorized_with_meter(sock,id,enabled)
-        return RawSocket{next,clear_admission(sessions,id,lookup(sessions,id)),buffered}
+  RawSocket{sock,+sessions,buffered} = transport
+  do IO<ServerSocket>:
+    next : Native.ServerSocket <- Native.relay_authorized_with_meter(sock,id,enabled)
+    return RawSocket{next,clear_admission(sessions,id,lookup(sessions,id)),buffered}
 
 def close_mode(stage: Maybe<&2,Stage>, requested: U32) -> U32:
   match stage:
@@ -354,13 +318,10 @@ def close_mode(stage: Maybe<&2,Stage>, requested: U32) -> U32:
       requested
 
 def relay_kick(transport: ServerSocket, +id: U32, flush: U32) -> IO(ServerSocket):
-  match transport:
-    case FramedSocket{sock}:
-      with_socket(FramedSocket{sock},net => Native.relay_kick(net,id,flush))
-    case RawSocket{sock,+sessions,buffered}:
-      do IO<ServerSocket>:
-        next : Native.ServerSocket <- Native.relay_kick(sock,id,close_mode(lookup(sessions,id),flush))
-        return RawSocket{next,drop(sessions,id),buffered}
+  RawSocket{sock,+sessions,buffered} = transport
+  do IO<ServerSocket>:
+    next : Native.ServerSocket <- Native.relay_kick(sock,id,close_mode(lookup(sessions,id),flush))
+    return RawSocket{next,drop(sessions,id),buffered}
 
 def choose_header(+name: List<&2,U32>, fields: List<&2,Http.HttpField>,
     rest: List<&2,Native.RequestHeader>, duplicate: Bool) -> List<&2,Native.RequestHeader>:
@@ -453,10 +414,5 @@ def raw_details(stage: Maybe<&2,Stage>) -> Native.RequestDetails:
       Native.MissingDetails{}
 
 def relay_request_details(transport: ServerSocket, id: U32) -> IO(ServerSocket & Native.RequestDetails):
-  match transport:
-    case FramedSocket{sock}:
-      do IO<ServerSocket & Native.RequestDetails>:
-        result : Native.ServerSocket & Native.RequestDetails <- Native.relay_request_details(sock,id)
-        return carry_framed(Native.RequestDetails,result)
-    case RawSocket{sock,+sessions,buffered}:
-      IO.pure(ServerSocket & Native.RequestDetails,(RawSocket{sock,sessions,buffered},raw_details(lookup(sessions,id))))
+  RawSocket{sock,+sessions,buffered} = transport
+  IO.pure(ServerSocket & Native.RequestDetails,(RawSocket{sock,sessions,buffered},raw_details(lookup(sessions,id))))

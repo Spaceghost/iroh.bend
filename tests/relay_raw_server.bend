@@ -23,7 +23,7 @@ def ready(bound: Relay.Server & U32) -> IO(Unit):
 def serve(cert: String, key: String, access: Access.Control, limits: Rate.Limits) -> IO(Unit):
   do IO<Unit>:
     bound : Relay.Server & U32 <- IO.try(Relay.Server & U32,
-      Relay.bind_raw_configured("127.0.0.1",0,cert,key,access,limits))
+      Relay.bind_configured("127.0.0.1",0,cert,key,access,limits))
     ready(bound)
 
 def repeated(header: Maybe<&2,Net.RequestHeaderValues>, token: Maybe<&2,List<&2,U32>>) -> Bool:
@@ -54,6 +54,8 @@ def start(args: List<String>) -> IO(Unit):
       serve(cert,key,Access.AllowAll{},Rate.Unlimited{})
     case [_,"rate"]:
       serve("","",Access.AllowAll{},Rate.ReceiveLimit{200,Some{124}})
+    case [_,"rate",cert,key]:
+      serve(cert,key,Access.AllowAll{},Rate.ReceiveLimit{200,Some{20}})
     case [_,"headers"]:
       serve("","",policy(32n),Rate.Unlimited{})
     case _:

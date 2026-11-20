@@ -215,10 +215,10 @@ def duplicate_standard(values: Maybe<&2,Net.RequestHeaderValues>) -> Bool:
 
 def header_decision(custom: Maybe<&2,Net.RequestHeaderValues>, standard: Bool) -> Access.Decision:
   match custom standard:
-    case Some{Net.RepeatedCustomHeader{}} _:
-      Access.Deny{Some{[97,109,98,105,103,117,111,117,115,32,104,101,97,100,101,114]}}
     case Some{Net.HeaderValues{[[118,97,108,117,101]]}} True{}:
       Access.Allow{}
+    case Some{Net.HeaderValues{Con{_,Con{_,_}}}} _:
+      Access.Deny{Some{[97,109,98,105,103,117,111,117,115,32,104,101,97,100,101,114]}}
     case _ _:
       Access.Deny{None{}}
 

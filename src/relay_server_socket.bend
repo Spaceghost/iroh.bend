@@ -64,6 +64,12 @@ def relay_resume_rx(server: ServerSocket, id: U32) -> IO(ServerSocket):
 def relay_raw_chunk_done(server: ServerSocket, id: U32) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 
+def relay_socket_tls(server: ServerSocket, id: U32) -> IO(ServerSocket & Bool):
+  import "./relay_server_socket.c"
+
+def relay_http_keepalive(server: ServerSocket, id: U32) -> IO(ServerSocket):
+  import "./relay_server_socket.c"
+
 def relay_reconfigure_rx(server: ServerSocket, metered: Bool) -> IO(ServerSocket):
   import "./relay_server_socket.c"
 

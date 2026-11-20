@@ -34,6 +34,7 @@ start() {
 }
 
 start ws
+python3 -B tests/relay_server_http.py "http://127.0.0.1:$port"
 python3 -B tests/relay_server_auth.py "$port"
 if [ -n "$upstream" ]; then
     timeout 15 "$upstream" "http://127.0.0.1:$port"
@@ -44,19 +45,22 @@ if [ -n "$upstream" ]; then
     start headers headers
     python3 -B tests/relay_raw_headers.py "$port" "$upstream"
     stop
-
-    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=Relay-Test-CA \
-        -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign' \
-        -out "$scratch/ca.pem" -keyout "$scratch/ca.key" 2> "$scratch/openssl.log"
-    openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
-        -out "$scratch/leaf.csr" -keyout "$scratch/key.pem" 2>> "$scratch/openssl.log"
-    printf '%s\n' 'basicConstraints=critical,CA:FALSE' 'extendedKeyUsage=serverAuth' \
-        'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$scratch/leaf.ext"
-    openssl x509 -req -in "$scratch/leaf.csr" -CA "$scratch/ca.pem" -CAkey "$scratch/ca.key" \
-        -CAcreateserial -days 1 -extfile "$scratch/leaf.ext" -out "$scratch/cert.pem" 2>> "$scratch/openssl.log"
-    openssl x509 -in "$scratch/ca.pem" -outform DER -out "$scratch/ca.der"
-    start wss "$scratch/cert.pem" "$scratch/key.pem"
-    timeout 15 "$upstream" "https://127.0.0.1:$port" "$scratch/ca.der"
-    stop
 fi
+
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=Relay-Test-CA \
+    -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign' \
+    -out "$scratch/ca.pem" -keyout "$scratch/ca.key" 2> "$scratch/openssl.log"
+openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
+    -out "$scratch/leaf.csr" -keyout "$scratch/key.pem" 2>> "$scratch/openssl.log"
+printf '%s\n' 'basicConstraints=critical,CA:FALSE' 'extendedKeyUsage=serverAuth' \
+    'authorityKeyIdentifier=keyid:always' 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$scratch/leaf.ext"
+openssl x509 -req -in "$scratch/leaf.csr" -CA "$scratch/ca.pem" -CAkey "$scratch/ca.key" \
+    -CAcreateserial -days 1 -extfile "$scratch/leaf.ext" -out "$scratch/cert.pem" 2>> "$scratch/openssl.log"
+start wss "$scratch/cert.pem" "$scratch/key.pem"
+python3 -B tests/relay_server_http.py "https://127.0.0.1:$port" "$scratch/ca.pem"
+if [ -n "$upstream" ]; then
+    openssl x509 -in "$scratch/ca.pem" -outform DER -out "$scratch/ca.der"
+    timeout 15 "$upstream" "https://127.0.0.1:$port" "$scratch/ca.der"
+fi
+stop
 printf 'Raw relay logs in %s\n' "$scratch"

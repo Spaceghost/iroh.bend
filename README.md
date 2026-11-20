@@ -5,9 +5,10 @@ implements relay framing, authentication transcripts, client state, and DNS
 and Pkarr discovery packets.
 Nelua binds OpenSSL for direct QUIC and Ed25519, ngtcp2 for shared QUIC
 streams and datagrams, and libcurl for WebSocket
-transport and Pkarr HTTP. The relay server binds libwebsockets for HTTP upgrades,
-WebSocket framing, and TLS. The build generates native C from Bend and Nelua. Upstream Iroh
-runs separately as a compatibility reference.
+transport and Pkarr HTTP. The relay server uses libwebsockets for raw TCP and TLS.
+Bend handles the server HTTP routes, upgrades, and WebSocket framing. The build
+generates native C from Bend and Nelua. Upstream Iroh runs separately as a
+compatibility reference.
 
 ## Build and verify
 
@@ -22,8 +23,7 @@ client requires a libcurl build with WebSocket support.
    The [Bend HTTP parser](src/relay_http.bend) is checked against split
    upgrade requests, repeated fields, and coalesced WebSocket bytes.
    Run `make check-relay-http-accept` to check the RFC 6455 accept digest
-   and Iroh subprotocol response with Nelua and OpenSSL. The live relay
-   still uses libwebsockets for upgrades and framing. Run
+   and Iroh subprotocol response with Nelua and OpenSSL. Run
    `make check-relay-raw-transport` to exercise the Bend codecs together on
    a raw TCP and TLS listener, including the read-byte events delivered
    before decoded frames.
@@ -191,7 +191,7 @@ client requires a libcurl build with WebSocket support.
    using OpenSSL, upstream Iroh logs `authentication succeeded via keying material`
    at trace level for successful TLS-exporter authentication.
    Run `make check-relay-server` with libwebsockets built with OpenSSL and
-   custom HTTP header support, Python 3, and the OpenSSL CLI to test the
+   raw socket support, Python 3, and the OpenSSL CLI to test the
    Bend server with WS and WSS. Set
    `UPSTREAM_RELAY_CLIENT` to an Iroh client fixture that accepts a relay
    base URL and an optional CA certificate in DER format.
@@ -327,9 +327,7 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   and notifies datagram recipients when the last session for a sender closes.
   Supply certificate and private key paths for WSS, or two empty strings for
   WS. Drive `step` regularly and release the listener with `stop`.
-  Use `bind_raw_configured` to opt into the Bend HTTP and WebSocket codecs
-  for authenticated relay traffic. The raw listener handles relay upgrades.
-  Use the default binding for the ordinary HTTP routes below.
+  The default bindings use the Bend HTTP and WebSocket codecs.
   Both listener modes serve the Iroh latency probe at `/ping`, the
   `/healthz` and `/robots.txt` routes, and the index. The HTTP listener
   also answers `/generate_204` captive portal challenges. Applications
@@ -419,7 +417,7 @@ and [authentication handshake](https://github.com/n0-computer/iroh/blob/v1.5.0/i
 | --- | --- |
 | Ed25519 endpoint identity, ALPN, direct QUIC | Single-stream exchange and overlapping bidirectional and unidirectional streams pass with upstream Iroh over IPv4 and IPv6 in both directions. |
 | v1/v2 relay payloads | 13 upstream byte snapshots and additional direction, version, malformed-input, and size checks |
-| Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits charge challenge proofs, binary WebSocket data, fragment overhead, and masked Pong frames before message delivery. Tests cover post-confirmation notices before application traffic, notices on incomplete messages, and live updates. The HTTP and HTTPS relay routes pass the same latency, health, robots, and index checks as Iroh 1.5.0. Plain HTTP also passes the upstream captive portal challenge checks. The opt-in raw listener uses the same relay session handling with Bend HTTP and WebSocket framing. It exposes ordered repeated custom headers and charges post-upgrade transport reads before decoding, including partial frames and control frames. The ordinary HTTP routes and default binding still use the libwebsockets framing path. |
+| Relay authentication and transport | Both Bend relay clients and servers interoperate with Iroh v1/v2 using TLS-exporter authentication. A TLS-terminating proxy triggers challenge fallback and preserves datagram exchange. Tests cover invalid certificates and proofs, mixed v1/v2 datagrams, keepalives, duplicate promotion, and endpoint departures. Admission controls support endpoint lists, shared tokens, and custom callbacks with denial reasons. Applications can disconnect individual sessions or every session for an endpoint. Callbacks can inspect standard headers and individual custom headers. Receive limits charge challenge proofs, binary WebSocket data, fragment overhead, and masked Pong frames before message delivery. Tests cover post-confirmation notices before application traffic, notices on incomplete messages, and live updates. The HTTP and HTTPS relay routes pass the same latency, health, robots, and index checks as Iroh 1.5.0. Plain HTTP also passes the upstream captive portal challenge checks. The default listener uses Bend HTTP and WebSocket framing. It exposes ordered repeated custom headers and charges post-upgrade transport reads before decoding, including partial and control frames. Ordinary HTTP requests support reuse and pipelining on both cleartext and TLS connections. |
 | Public endpoint lifecycle and QUIC features | Bend and Iroh exchange RFC 9221 application datagrams alongside bidirectional and unidirectional streams on the same authenticated connection in both dialing directions over IPv4 and IPv6. The endpoint API exposes this connection for direct dialing, listening, and relay dialing. A Bend listener accepted two overlapping Iroh connections and kept both usable after it stopped accepting new connections. The direct Bend client resumed a pinned session with Iroh and sent 0-RTT streams and datagrams on both address families. A new Iroh listener rejected the prior ticket and the client retried after a pinned full handshake. An opted-in Bend listener accepted Iroh 0-RTT streams and datagrams on IPv4 and IPv6. A fresh Bend listener using the same identity rejected the prior ticket and accepted the 1-RTT retries. The optional Picoquic client uses stream affinity on two simultaneous paths with Iroh. The Picoquic listener accepts peer-initiated uni and bidi streams from overlapping Iroh connections and passes a two-path affinity check with the Bend dialer. Both dialing directions exchange binary and empty datagrams alongside streams on IPv4 and IPv6. The optional multipath endpoint uses the same timed route planner for direct and relay dialing. In IPv4 and IPv6 tests, it fell back to Iroh's WS and WSS relay, opened a direct path on the same connection, and sent application stream data over both paths. The routed API can also validate an alternate published address and prefer it automatically with the relay retained as standby. Iroh received unpinned streams over the relay before promotion and over the direct path afterward. The Picoquic endpoint and listener accept opaque ALPN bytes. A 255-byte identifier with a leading NUL passes in both directions, and the listener rejects a final-byte mismatch. Picoquic dialers can offer several protocols and listeners choose in server preference order. IPv4 and IPv6 tests against Iroh verified the preferred binary protocol, text fallback, an unsupported offer, and exact selected bytes on overlapping connections. The listener can replace its ALPN list at runtime and pause admission with an empty list. Iroh tests on IPv4 and IPv6 confirmed that new dials follow the current list while existing connections keep their selected ALPN and continue exchanging streams and datagrams. Picoquic 0-RTT is pending. |
 | DNS and Pkarr discovery | UDP lookup and TCP fallback passed against a local upstream Iroh DNS server after Pkarr publication. TCP also passes fragmented maximum-length frame and error tests. Signed Pkarr packets pass byte-for-byte and tamper tests. Pkarr HTTP publish, resolve, and automatic refresh work with the upstream Iroh DNS server. Single-peer and iterative IPv4 BEP 44 lookup and publishing interoperate with upstream mainline. Loopback tests cover IPv6 referrals and mixed-family lookup and publishing. The upstream Iroh DNS fallback resolves the replicated Bend publication. |
 | Connectivity | The endpoint exchanged streams and datagrams with Iroh 1.5.0 over the upstream WS and WSS relay using timed direct fallback, verified Pkarr records, and an upstream Iroh DNS resolver. Direct connections survive peer UDP source-port changes and Bend-initiated migration to a new local UDP address over IPv4 and IPv6. A blackholed candidate leaves the original path and open streams usable. Bend explicitly migrates an open connection in either direction between the upstream WS or WSS relay and a direct IPv4 or IPv6 route. Tests remove the old route and finish the existing stream over the new route. Automatic relaying after a connection that started direct loses connectivity, and peer-assisted NAT traversal are pending. |

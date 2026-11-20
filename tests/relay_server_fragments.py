@@ -33,7 +33,9 @@ async def main():
     parser.add_argument("port", type=int)
     parser.add_argument("client")
     parser.add_argument("cafile", nargs="?")
-    parser.add_argument("--pong", action="store_true")
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument("--ping", action="store_true")
+    control.add_argument("--pong", action="store_true")
     args = parser.parse_args()
     tls = ssl.create_default_context(cafile=args.cafile) if args.cafile else None
     injected = False
@@ -54,15 +56,16 @@ async def main():
                     injected = True
                     noticed.clear()
                     # The masked proof spends 104 of the 124 tokens, leaving 20.
-                    # The masked fragment spends those 20, and the pong exceeds them.
-                    prefix = (
-                        fragment(0x8A, b"\0" * 64) if args.pong else fragment(0x02, payload[:14])
-                    )
+                    # The fragment spends those 20. A control frame exceeds them.
+                    if args.ping or args.pong:
+                        prefix = fragment(0x89 if args.ping else 0x8A, b"\0" * 64)
+                    else:
+                        prefix = fragment(0x02, payload[:14])
                     upstream_writer.write(prefix)
                     await upstream_writer.drain()
                     await asyncio.wait_for(noticed.wait(), 2)
                     observed = True
-                    if not args.pong:
+                    if not (args.ping or args.pong):
                         encoded = fragment(0x80, payload[14:])
                 upstream_writer.write(encoded)
                 await upstream_writer.drain()
@@ -105,7 +108,7 @@ async def main():
             raise
         assert observed, "relay did not report the limit before the datagram was complete"
         assert process.returncode == 0, (out, err)
-    frame_type = "pong" if args.pong else "first fragment"
+    frame_type = "ping" if args.ping else "pong" if args.pong else "first fragment"
     print(f"PASS relay charged the masked {frame_type} before completing the datagram")
 
 
