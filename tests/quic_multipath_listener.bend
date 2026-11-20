@@ -139,6 +139,40 @@ def check_selection(conn: Quic.MultipathConnection, expected: List<&2,U32>, mode
     case _:
       IO.pure(Quic.MultipathConnection,conn)
 
+def check_distinct(first: Quic.MultipathConnection, second: Quic.MultipathConnection, equal: Bool)
+    -> IO(Quic.MultipathConnection & Quic.MultipathConnection):
+  match equal:
+    case False{}:
+      IO.pure(Quic.MultipathConnection & Quic.MultipathConnection,(first,second))
+    case True{}:
+      do IO<Quic.MultipathConnection & Quic.MultipathConnection>:
+        Quic.close_multipath(first)
+        Fixture.reject(Quic.MultipathConnection & Quic.MultipathConnection,second,1,
+          "distinct connections returned the same transport parameter bytes")
+
+def validate_both(a: Quic.MultipathConnection & List<&2,U32>, b: Quic.MultipathConnection & List<&2,U32>)
+    -> IO(Quic.MultipathConnection & Quic.MultipathConnection):
+  (first,+a_params) = a
+  (second,+b_params) = b
+  do IO<Quic.MultipathConnection & Quic.MultipathConnection>:
+    left : Quic.MultipathConnection <- Fixture.validate_peer_parameters((first,a_params))
+    right : Quic.MultipathConnection <- Fixture.validate_peer_parameters((second,b_params))
+    check_distinct(left,right,Fixture.same_bytes(a_params,b_params))
+
+def check_parameters(first: Quic.MultipathConnection, second: Quic.MultipathConnection)
+    -> IO(Quic.MultipathConnection & Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection & Quic.MultipathConnection>:
+    a : Quic.MultipathConnection & List<&2,U32> <- Fixture.read_peer_parameters(first)
+    b : Quic.MultipathConnection & List<&2,U32> <- Fixture.read_peer_parameters(second)
+    validate_both(a,b)
+
+def exchange_both(peers: Quic.MultipathConnection & Quic.MultipathConnection) -> IO(Unit):
+  (first,second) = peers
+  do IO<Unit>:
+    exchange(first,55,11,22)
+    exchange(second,66,33,44)
+    IO.print("PASS Bend served both connections after closing the multipath listener")
+
 def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: Quic.MultipathConnection,
     +mode: U32) -> IO(Unit):
   (listener,conn) = second
@@ -146,9 +180,8 @@ def serve_two(second: Quic.MultipathListener & Quic.MultipathConnection, first: 
     Quic.close_multipath_listener(listener)
     preferred : Quic.MultipathConnection <- check_selection(first,Fixture.binary_alpn(),mode)
     fallback : Quic.MultipathConnection <- check_selection(conn,Fixture.text_alpn(),mode)
-    exchange(preferred,55,11,22)
-    exchange(fallback,66,33,44)
-    IO.print("PASS Bend served both connections after closing the multipath listener")
+    peers : Quic.MultipathConnection & Quic.MultipathConnection <- check_parameters(preferred,fallback)
+    exchange_both(peers)
 
 def serve_two_connections(first: Quic.MultipathListener & Quic.MultipathConnection, mode: U32) -> IO(Unit):
   (listener,conn) = first

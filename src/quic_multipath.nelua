@@ -360,6 +360,8 @@ local Stream = @record{
 }
 local Datagram = @record{next:pointer,size:csize}
 local Alpn = @record{next:pointer, wire:[258]uint8, size:csize, has_nul:boolean, retained:boolean}
+local PeerParameters = @record{bytes:*uint8, size:csize}
+local PendingHandshake = @record{alpn:*Alpn, parameters:PeerParameters}
 local Session = @record{
   next: pointer, id: uint32, ticket: *uint8, length: csize,
   local_key: [32]uint8, peer_key: [32]uint8, alpn: [255]uint8, alpn_length: csize, datagram_limit: uint32,
@@ -372,7 +374,7 @@ local Connection = @record{
   received: csize, output: [IO_CAPACITY]uint8, output_size: csize, output_path: *Path,
   output_peer: storage_t, listener: *Listener, accepted: boolean,
   datagram_first: *Datagram, datagram_last: *Datagram, datagram_count: uint32,
-  selected_alpn: *Alpn, ready: boolean, closed: boolean, buffer_error: boolean,
+  selected_alpn: *Alpn, peer_parameters: PeerParameters, ready: boolean, closed: boolean, buffer_error: boolean,
   ticket: *Session, resume: *Session, local_key: [32]uint8, peer_key: [32]uint8,
   early: boolean, early_decided: boolean
 }
@@ -472,11 +474,37 @@ local VerifyCallback = @function(*verify_t,*tls_t,cstring,pointer,pointer,*iov_t
 local PinnedKey = @record{
   backend: pin_t, original: VerifyCallback, response: [4]ext_t, raw_type: uint8,
   alpns: *Alpn, retired: *Alpn, selected: *Alpn, check_extension: extension_cb_t,
-  peer_parameters: *uint8, peer_parameters_size: csize
+  peer_parameters: PeerParameters
 }
 
 local function pinned(quic: *quic_t): *PinnedKey
   return (@*PinnedKey)((@*context_t)(quic.tls_master_ctx).verify_certificate)
+end
+
+local function save_parameters(out: *PeerParameters, data: iov_t): cint
+  local copy: *uint8
+  if data.len ~= 0 then
+    copy = (@*uint8)(C.malloc(data.len))
+    if copy == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
+    C.memcpy(copy,data.base,data.len)
+  end
+  C.free(out.bytes)
+  $out = {bytes=copy,size=data.len}
+  return 0
+end
+
+local function pending_handshake(cnx: *cnx_t, listener: pointer): *PendingHandshake
+  local context = picoquic_get_callback_context(cnx)
+  if context == listener then return nilptr end
+  return (@*PendingHandshake)(context)
+end
+
+local function discard_handshake(cnx: *cnx_t, listener: pointer)
+  local pending = pending_handshake(cnx,listener)
+  if pending == nilptr then return end
+  picoquic_set_callback(cnx,(@pointer)(picoquic_get_callback_function(cnx)),listener)
+  C.free(pending.parameters.bytes)
+  C.free(pending)
 end
 
 local function select_alpn(quic: *quic_t, offers: *iov_t, count: csize): csize
@@ -488,8 +516,14 @@ local function select_alpn(quic: *quic_t, offers: *iov_t, count: csize): csize
   while name ~= nilptr do
     for i = 0,<count do
       if list[i].len == name.size and C.memcmp(list[i].base,&name.wire[3],name.size) == 0 then
-        -- Keep the selected entry on the pending handshake until its connection is authenticated.
-        picoquic_set_callback(cnx,(@pointer)(picoquic_get_callback_function(cnx)),name)
+        local listener = picoquic_get_default_callback_context(quic)
+        local pending = pending_handshake(cnx,listener)
+        if pending == nilptr then
+          pending = (@*PendingHandshake)(C.calloc(1,#PendingHandshake))
+          if pending == nilptr then return count end
+          picoquic_set_callback(cnx,(@pointer)(picoquic_get_callback_function(cnx)),pending)
+        end
+        pending.alpn = name
         return i
       end
     end
@@ -502,14 +536,7 @@ local function check_client_extension(cb: *extension_self, tls: *tls_t, message:
   if message ~= PTLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS then return 0 end
   local pin = (@*PinnedKey)(ptls_get_context(tls).verify_certificate)
   if kind == QUIC_TRANSPORT_EXTENSION and iroh_mp_peer_multipath_parameters ~= 0xffffffff then
-    if data.len == 0 then return 0 end
-    local copy = (@*uint8)(C.malloc(data.len))
-    if copy == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
-    C.memcpy(copy,data.base,data.len)
-    C.free(pin.peer_parameters)
-    pin.peer_parameters = copy
-    pin.peer_parameters_size = data.len
-    return 0
+    return save_parameters(&pin.peer_parameters,data)
   end
   if kind ~= ALPN_EXTENSION then return 0 end
   local name = pin.alpns
@@ -535,7 +562,7 @@ local function free_pin(verify: *verify_t)
   ptls_openssl_raw_pubkey_dispose_verify_certificate(&pin.backend)
   free_alpns(pin.alpns)
   free_alpns(pin.retired)
-  C.free(pin.peer_parameters)
+  C.free(pin.peer_parameters.bytes)
   C.free(pin)
 end
 
@@ -605,12 +632,13 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
   local parsed = picoquic_tls_collected_extensions_cb(tls,props,slots)
   if parsed ~= 0 then return parsed end
   local extensions = (@*[0]ext_t)(slots)
-  local has_transport: boolean, has_raw: boolean
+  local transport: *ext_t
+  local has_raw: boolean
   local i: csize = 0
   while extensions[i].type ~= 65535 do
     local ext = &extensions[i]
     if ext.type == QUIC_TRANSPORT_EXTENSION then
-      has_transport = true
+      transport = ext
     elseif ext.type == 19 and ext.data.len > 0 then
       local offered = (@*[0]uint8)(ext.data.base)
       if offered[0] ~= ext.data.len - 1 then return PTLS_ALERT_UNSUPPORTED_CERTIFICATE end
@@ -620,7 +648,7 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
     end
     i = i + 1
   end
-  if not has_transport then return 0 end
+  if transport == nilptr then return 0 end
   if not has_raw then return PTLS_ALERT_UNSUPPORTED_CERTIFICATE end
   if props.additional_extensions == nilptr or props.additional_extensions.type ~= QUIC_TRANSPORT_EXTENSION then
     return PTLS_ALERT_INTERNAL_ERROR
@@ -634,11 +662,13 @@ local function server_extensions(tls: *tls_t, props: *props_t, slots: *ext_t): c
   local data = ptls_get_data_ptr(tls)
   local cnx = (@*cnx_t)($data)
   if cnx == nilptr then return PTLS_ALERT_INTERNAL_ERROR end
-  local chosen = picoquic_get_callback_context(cnx)
-  if chosen == nilptr or chosen == picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)) then
-    return PTLS_ALERT_NO_APPLICATION_PROTOCOL
+  local pending = pending_handshake(cnx,picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
+  if pending == nilptr then return PTLS_ALERT_NO_APPLICATION_PROTOCOL end
+  if iroh_mp_peer_multipath_parameters ~= 0xffffffff then
+    local status = save_parameters(&pending.parameters,transport.data)
+    if status ~= 0 then return status end
   end
-  local name = (@*Alpn)(chosen)
+  local name = pending.alpn
   if name.has_nul then
     -- picotls serializes its built-in ALPN with strlen. Supply the selected bytes as an extension.
     local status = ptls_set_negotiated_protocol(tls,nilptr,0)
@@ -868,6 +898,7 @@ local function destroy(conn: *Connection)
   while conn.datagram_first ~= nilptr do pop_datagram(conn) end
   free_session(conn.ticket)
   free_session(conn.resume)
+  C.free(conn.peer_parameters.bytes)
   C.free(conn)
 end
 
@@ -1072,8 +1103,13 @@ end
 
 local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize, kind: cint,
     user: pointer, stream_user: pointer): cint
-  if kind ~= picoquic_callback_ready and kind ~= picoquic_callback_almost_ready then return 0 end
   local listener = (@*Listener)(picoquic_get_default_callback_context(picoquic_get_quic_ctx(cnx)))
+  if kind == picoquic_callback_close or kind == picoquic_callback_application_close or
+      kind == picoquic_callback_stateless_reset then
+    discard_handshake(cnx,listener)
+    return 0
+  end
+  if kind ~= picoquic_callback_ready and kind ~= picoquic_callback_almost_ready then return 0 end
   if listener.stopped or next_connection == 0 or listener.refs > LISTENER_LIMIT then return -1 end
   if user == nilptr or user == listener then return -1 end
   local conn = (@*Connection)(C.calloc(1,#Connection))
@@ -1081,14 +1117,17 @@ local function server_event(cnx: *cnx_t, id: uint64, bytes: *uint8, size: csize,
   conn.quic = listener.quic
   conn.cnx = cnx
   conn.listener = listener
-  conn.selected_alpn = (@*Alpn)(user)
+  local pending = (@*PendingHandshake)(user)
+  conn.selected_alpn = pending.alpn
   if remember_shared_path(conn,0) == nilptr then
     C.free(conn)
     return -1
   end
   listener.refs = listener.refs + 1
   register_connection(conn)
+  conn.peer_parameters = pending.parameters
   picoquic_set_callback(cnx,(@pointer)(on_event),conn)
+  C.free(pending)
   return on_event(cnx,id,bytes,size,kind,conn,stream_user)
 end
 
@@ -1281,11 +1320,9 @@ local function peer_parameters_run(e: Env, args: *[0]Term, work: *IoWork): Term
   local conn = find_connection(e,args[0])
   if conn == nilptr or conn.closed then return io_tup(e,args[0],closed_error(e,conn)) end
   if not conn.ready then return io_tup(e,args[0],io_fail(e,EAGAIN,'QUIC handshake is incomplete')) end
-  if conn.listener ~= nilptr then
-    return io_tup(e,args[0],io_fail(e,ENOTSUP,'peer transport parameters are available for dialed connections'))
-  end
-  local pin = pinned(conn.quic)
-  local parameters = io_list(e,(@cstring)(pin.peer_parameters),pin.peer_parameters_size)
+  local source = conn.peer_parameters
+  if conn.listener == nilptr then source = pinned(conn.quic).peer_parameters end
+  local parameters = io_list(e,(@cstring)(source.bytes),source.size)
   return io_tup(e,args[0],io_done(e,parameters))
 end
 
@@ -1427,6 +1464,7 @@ local function pump_listener(listener: *Listener, now: uint64): uint32
     local expired = now - picoquic_get_cnx_start_time(cnx) > HANDSHAKE_LIMIT
     if (@pointer)(picoquic_get_callback_function(cnx)) == (@pointer)(server_event) then
       if expired or listener.stopped or picoquic_get_cnx_state(cnx) == picoquic_state_disconnected then
+        discard_handshake(cnx,listener)
         picoquic_delete_cnx(cnx)
       else
         handshake_packet(listener,cnx,now)
@@ -1574,7 +1612,7 @@ local function used_alpns(listener: *Listener)
     local name: *Alpn
     if ctx ~= nilptr then
       if callback == (@pointer)(server_event) and ctx ~= listener then
-        name = (@*Alpn)(ctx)
+        name = ((@*PendingHandshake)(ctx)).alpn
       elseif callback == (@pointer)(on_event) then
         name = ((@*Connection)(ctx)).selected_alpn
       end

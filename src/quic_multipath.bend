@@ -35,7 +35,7 @@ def negotiated_multipath_alpn(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_multipath.c"
 
-# Return the TLS-authenticated transport parameters from the peer after a dial.
+# Return the TLS-authenticated transport parameters from a connected peer.
 def peer_multipath_parameters(conn: MultipathConnection)
     -> IO(MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>>):
   import "./quic_multipath.c"

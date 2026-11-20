@@ -302,15 +302,6 @@ def run_probe(conn: Quic.MultipathConnection, host: String, port: U32) -> IO(Uni
     candidate : Quic.MultipathConnection & U32 <- probe(3000n,conn,host,port)
     run_paths(candidate)
 
-def same_alpn(a: List<&2,U32>, b: List<&2,U32>) -> Bool:
-  match a b:
-    case Nil{} Nil{}:
-      True{}
-    case Con{x,rest} Con{y,tail}:
-      U32.is_eq(x,y) && same_alpn(rest,tail)
-    case _ _:
-      False{}
-
 def checked_alpn(conn: Quic.MultipathConnection, equal: Bool) -> IO(Quic.MultipathConnection):
   match equal:
     case True{}:
@@ -321,7 +312,7 @@ def checked_alpn(conn: Quic.MultipathConnection, equal: Bool) -> IO(Quic.Multipa
 def compare_alpn(selected: Quic.MultipathConnection & List<&2,U32>, expected: List<&2,U32>)
     -> IO(Quic.MultipathConnection):
   (conn,actual) = selected
-  checked_alpn(conn,same_alpn(actual,expected))
+  checked_alpn(conn,same_bytes(actual,expected))
 
 def require_alpn(conn: Quic.MultipathConnection, expected: List<&2,U32>) -> IO(Quic.MultipathConnection):
   do IO<Quic.MultipathConnection>:
@@ -361,11 +352,15 @@ def validate_peer_parameters(pair: Quic.MultipathConnection & List<&2,U32>)
   (conn,parameters) = pair
   validate_nat_limit(conn,NatWire.read_parameters(parameters))
 
-def require_nat_limit(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
-  do IO<Quic.MultipathConnection>:
+def read_peer_parameters(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection & List<&2,U32>):
+  do IO<Quic.MultipathConnection & List<&2,U32>>:
     result : Quic.MultipathConnection & Result<&1,&1,U32 & String,List<&2,U32>> <-
       Quic.peer_multipath_parameters(conn)
-    pair : Quic.MultipathConnection & List<&2,U32> <- ok(List<&2,U32>,result)
+    ok(List<&2,U32>,result)
+
+def require_nat_limit(conn: Quic.MultipathConnection) -> IO(Quic.MultipathConnection):
+  do IO<Quic.MultipathConnection>:
+    pair : Quic.MultipathConnection & List<&2,U32> <- read_peer_parameters(conn)
     validate_peer_parameters(pair)
 
 def dial_result(result: Quic.ConnectResult(), mode: U32, host: String, port: U32) -> IO(Unit):
