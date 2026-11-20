@@ -682,6 +682,17 @@ check-quic-stream-reset-ack-control:
 	@test -x "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" || { echo 'Set UPSTREAM_QUIC_STREAM_RESET_ACK to the Iroh reset acknowledgement fixture.' >&2; exit 2; }
 	sh tests/quic_stream_finish_control.sh "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" reset-ack
 
+.PHONY: check-quic-stream-reset-ack-return check-quic-datagram-reset-ack-return check-quic-multipath-reset-ack-return check-quic-stream-reset-ack-return-control
+check-quic-stream-reset-ack-return: check-quic-datagram-reset-ack-return check-quic-multipath-reset-ack-return
+
+check-quic-datagram-reset-ack-return check-quic-multipath-reset-ack-return: check-%-reset-ack-return: $(BUILD)/iroh-bend-%-cancel
+	@test -x "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" || { echo 'Set UPSTREAM_QUIC_STREAM_RESET_ACK to the Iroh reset acknowledgement fixture.' >&2; exit 2; }
+	python3 -B tests/quic_stream_finish.py "$<" "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" reset-ack-return
+
+check-quic-stream-reset-ack-return-control:
+	@test -x "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" || { echo 'Set UPSTREAM_QUIC_STREAM_RESET_ACK to the Iroh reset acknowledgement fixture.' >&2; exit 2; }
+	sh tests/quic_stream_finish_control.sh "$(UPSTREAM_QUIC_STREAM_RESET_ACK)" reset-ack-return
+
 $(BUILD)/quic-datagram-cancel.c: tests/quic_datagram_cancel.bend tests/quic_datagram.bend src/quic_datagram.bend src/quic_datagram.nelua
 $(BUILD)/quic-multipath-cancel.c: tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
 $(BUILD)/quic-datagram-cancel.c $(BUILD)/quic-multipath-cancel.c: $(BUILD)/%-cancel.c: tests/quic_stream_cancel.bend src/quic_stream.bend src/quic_nat.bend tools/nelua-effect.sh

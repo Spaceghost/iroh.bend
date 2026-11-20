@@ -10,6 +10,7 @@ type Action is Data:
   FinAck{}
   ResetAck{}
   PendingNotice{message: String}
+  Gate{message: String}
   Read{}
   SendDatagram{byte: U32}
   ReadDatagram{}
@@ -63,27 +64,62 @@ def scenarios() -> List<&2,Check>:
    Check{Stop{max},Complete{}},Check{Drop{},Complete{}},
    Check{SendDatagram{250},Complete{}},Check{ReadDatagram{},Byte{251}}]
 
-def completion_checks(+query: Action, first: Action, second: Action, +after_send: Check, +notice: String) -> List<&2,Check>:
-  [Check{Open{0},Handle{0}},Check{query,Flag{0}},Check{Write{31,0},Complete{}},Check{Flush{},Complete{}},
-   Check{ReadDatagram{},Byte{41}},Check{first,Complete{}},after_send,
-   Check{query,Flag{0}},Check{PendingNotice{notice},Complete{}},Check{query,Flag{1}},
-   Check{Reset{Wire.Var{0,1}},Error{32,""}},Check{SendDatagram{42},Complete{}},
-   Check{Read{},Byte{33}},Check{Read{},Fin{}},Check{query,Flag{1}},Check{Drop{},Complete{}},
-   Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},Check{query,Flag{0}},
-   Check{second,Complete{}},after_send,Check{query,Flag{0}},
-   Check{PendingNotice{notice},Complete{}},Check{query,Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}},
-   Check{SendDatagram{52},Complete{}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{53}},
-   Check{Accept{1},Handle{0}},Check{query,Error{32,""}},Check{Read{},Byte{61}},
-   Check{Read{},Fin{}},Check{Drop{},Complete{}},Check{SendDatagram{63},Complete{}},Check{ReadDatagram{},Byte{64}}]
+def gate_before(enabled: Bool, message: String, rest: List<&2,Check>) -> List<&2,Check>:
+  match enabled:
+    case True{}:
+      Con{Check{Gate{message},Complete{}},rest}
+    case False{}:
+      rest
+
+def completion_round(+query: Action, end_stream: Action, after_send: Check, notice: String,
+    +lose_ack: Bool, next: List<&2,Check>) -> List<&2,Check>:
+  observed : List<&2,Check> = List.append(&2,Check,[Check{query,Flag{0}},Check{PendingNotice{notice},Complete{}},
+    Check{query,Flag{1}},Check{Reset{Wire.Var{0,1}},Error{32,""}}],next)
+  waiting : List<&2,Check> = gate_before(lose_ack,"WAIT_FOR_RECEIPT",observed)
+  gate_before(lose_ack,"HOLD_ACKS",Con{Check{end_stream,Complete{}},Con{after_send,waiting}})
+
+def completion_checks(+query: Action, first: Action, second: Action, +after_send: Check, +notice: String,
+    +lose_ack: Bool) -> List<&2,Check>:
+  last : List<&2,Check> = [Check{SendDatagram{52},Complete{}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{53}},
+    Check{Accept{1},Handle{0}},Check{query,Error{32,""}},Check{Read{},Byte{61}},
+    Check{Read{},Fin{}},Check{Drop{},Complete{}},Check{SendDatagram{63},Complete{}},Check{ReadDatagram{},Byte{64}}]
+  uni : List<&2,Check> = completion_round(query,second,after_send,notice,lose_ack,last)
+  reply : List<&2,Check> = List.append(&2,Check,[Check{SendDatagram{42},Complete{}},Check{Read{},Byte{33}},Check{Read{},Fin{}},
+    Check{query,Flag{1}},Check{Drop{},Complete{}},Check{ReadDatagram{},Byte{51}},Check{Open{1},Handle{0}},
+    Check{query,Flag{0}}],uni)
+  bidi : List<&2,Check> = completion_round(query,first,after_send,notice,lose_ack,reply)
+  List.append(&2,Check,[Check{Open{0},Handle{0}},Check{query,Flag{0}},Check{Write{31,0},Complete{}},
+    Check{Flush{},Complete{}},Check{ReadDatagram{},Byte{41}}],bidi)
 
 def finish_checks() -> List<&2,Check>:
-  completion_checks(FinAck{},FinalWrite{8192n},FinalWrite{0n},Check{Flush{},Complete{}},"FIN_PENDING")
+  completion_checks(FinAck{},FinalWrite{8192n},FinalWrite{0n},Check{Flush{},Complete{}},"FIN_PENDING",False{})
 
-def reset_ack_checks() -> List<&2,Check>:
-  completion_checks(ResetAck{},Reset{Wire.Var{1073741823,4294967295}},Reset{Wire.Var{0,0}},Check{FinAck{},Error{32,""}},"RESET_PENDING")
+def reset_ack_checks(lose_ack: Bool) -> List<&2,Check>:
+  completion_checks(ResetAck{},Reset{Wire.Var{1073741823,4294967295}},Reset{Wire.Var{0,0}},
+    Check{FinAck{},Error{32,""}},"RESET_PENDING",lose_ack)
 
 def Reply(-C: Type) -> Type:
   IO(C & State)
+
+def gate_state(result: Result<&1,&1,U32 & String,String>) -> State:
+  match result:
+    case Done{"+"}:
+      Complete{}
+    case _:
+      Unexpected{}
+
+def read_gate(-C: Type, conn: C, raw: File & Result<&1,&1,U32 & String,String>) -> Reply(C):
+  (file,result) = raw
+  do IO<C & State>:
+    File.close(file)
+    return (conn,gate_state(result))
+
+def gate(-C: Type, conn: C, message: String) -> Reply(C):
+  do IO<C & State>:
+    IO.print(message)
+    file : File <- IO.try(File,File.open("/dev/stdin","r"))
+    raw : File & Result<&1,&1,U32 & String,String> <- File.read(file,1)
+    read_gate(C,conn,raw)
 
 def answer(-C: Type, -T: Type, raw: C & Result<&1,&1,U32 & String,T>, convert: T -> State) -> Reply(C):
   match raw:
