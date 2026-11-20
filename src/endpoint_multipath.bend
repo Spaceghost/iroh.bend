@@ -80,6 +80,7 @@ type ProbeState is Data:
   DirectPath{path: U32}
   Waiting{since: U32}
   Backup{plan: BackupPlan, phase: BackupState}
+  Rechecking{relay: U32, direct: ProbeState}
 
 type RoutedConnection is Type:
   Routed{transport: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState}
@@ -191,11 +192,11 @@ def validation_wait(peers: List<&2,Endpoint.Address>) -> U32:
       1000
 
 def finish_check(outcome: Connection() & Result<&1,&1,U32 & String,U32>, rest: List<&2,Endpoint.Address>,
-    +path: U32, since: U32, now: U32, expired: Bool) -> IO(Connection() & ProbeState):
+    +path: U32, relay_path: U32, since: U32, now: U32, expired: Bool) -> IO(Connection() & ProbeState):
   match outcome expired:
     case (conn,Done{1}) _:
       do IO<Connection() & ProbeState>:
-        preferred : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0,1)
+        preferred : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,relay_path,1)
         return promote(preferred,path,rest,now)
     case (conn,Done{0}) False{}:
       IO.pure(Connection() & ProbeState,(conn,Validating{rest,path,since}))
@@ -206,16 +207,56 @@ def finish_check(outcome: Connection() & Result<&1,&1,U32 & String,U32>, rest: L
         kept : Connection() <- retire(conn,path)
         return (kept,Seeking{rest,now})
 
-def keep_direct(outcome: Connection() & Result<&1,&1,U32 & String,U32>, +path: U32,
+def demote_direct(outcome: Connection() & Result<&1,&1,U32 & String,Unit>, path: U32, now: U32)
+    -> IO(Connection() & ProbeState):
+  match outcome:
+    case (conn,Done{_}):
+      do IO<Connection() & ProbeState>:
+        kept : Connection() <- retire(conn,path)
+        return (kept,Waiting{now})
+    case (conn,Fail{_}):
+      IO.pure(Connection() & ProbeState,(conn,DirectPath{path}))
+
+def failover(outcome: Connection() & Result<&1,&1,U32 & String,U32>, path: U32, relay_path: U32, now: U32)
+    -> IO(Connection() & ProbeState):
+  match outcome:
+    case (conn,Done{1}):
+      do IO<Connection() & ProbeState>:
+        relay : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,relay_path,0)
+        demote_direct(relay,path,now)
+    case (conn,_):
+      IO.pure(Connection() & ProbeState,(conn,DirectPath{path}))
+
+def keep_direct(conn: Connection(), path: U32, +relay_path: U32, now: U32, healthy: Bool)
+    -> IO(Connection() & ProbeState):
+  match healthy:
+    case True{}:
+      IO.pure(Connection() & ProbeState,(conn,DirectPath{path}))
+    case False{}:
+      do IO<Connection() & ProbeState>:
+        available : Connection() & Result<&1,&1,U32 & String,U32> <- check_path(conn,relay_path)
+        failover(available,path,relay_path,now)
+
+def path_timeouts(conn: Connection(), path: U32) -> IO(Connection() & Result<&1,&1,U32 & String,U32>):
+  use_connection(Result<&1,&1,U32 & String,U32>,conn,c => Quic.multipath_path_timeouts(c,path))
+
+def direct_health(outcome: Connection() & Result<&1,&1,U32 & String,U32>, path: U32, relay_path: U32,
+    now: U32) -> IO(Connection() & ProbeState):
+  match outcome:
+    case (conn,Done{count}):
+      keep_direct(conn,path,relay_path,now,U32.is_lt(count,2))
+    case (conn,Fail{_}):
+      keep_direct(conn,path,relay_path,now,False{})
+
+def watch_direct(outcome: Connection() & Result<&1,&1,U32 & String,U32>, +path: U32, relay_path: U32,
     now: U32) -> IO(Connection() & ProbeState):
   match outcome:
     case (conn,Done{1}):
-      IO.pure(Connection() & ProbeState,(conn,DirectPath{path}))
-    case (conn,_):
       do IO<Connection() & ProbeState>:
-        relay : Connection() & Result<&1,&1,U32 & String,Unit> <- standby(conn,0,0)
-        kept : Connection() <- retire(without_status(relay),path)
-        return (kept,Waiting{now})
+        timeouts : Connection() & Result<&1,&1,U32 & String,U32> <- path_timeouts(conn,path)
+        direct_health(timeouts,path,relay_path,now)
+    case (conn,_):
+      keep_direct(conn,path,relay_path,now,False{})
 
 def retry_routes(conn: Connection(), candidates: List<&2,Endpoint.Address>, since: U32,
     +now: U32, elapsed: Bool) -> IO(Connection() & ProbeState):
@@ -331,8 +372,7 @@ def watch_backup(progress: Connection() & Result<&1,&1,U32 & String,U32>, +path:
   match progress:
     case (conn,Done{1}):
       do IO<BackupProgress()>:
-        timeouts : Connection() & Result<&1,&1,U32 & String,U32> <-
-          use_connection(Result<&1,&1,U32 & String,U32>,conn,c => Quic.multipath_path_timeouts(c,0))
+        timeouts : Connection() & Result<&1,&1,U32 & String,U32> <- path_timeouts(conn,0)
         check_direct_progress(timeouts,path)
     case (conn,_):
       do IO<BackupProgress()>:
@@ -360,36 +400,57 @@ def advance_backup(conn: Connection(), plan: BackupPlan, phase: BackupState, +no
     case ActiveBackup{path}:
       backup_progress(conn,ActiveBackup{path})
 
-def keep_backup(progress: BackupProgress(), plan: BackupPlan) -> Connection() & ProbeState:
-  (conn,next) = progress
-  (conn,Backup{plan,next})
+def keep_backup(progress: BackupProgress(), plan: BackupPlan, now: U32) -> Connection() & ProbeState:
+  match progress:
+    case (conn,ActiveBackup{path}):
+      (conn,Rechecking{path,Waiting{now}})
+    case (conn,next):
+      (conn,Backup{plan,next})
 
-def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState, +now: U32)
-    -> IO(Connection() & ProbeState):
+def advance_direct(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState,
+    relay_path: U32, +now: U32) -> IO(Connection() & ProbeState):
   match state:
-    case Disabled{}:
-      IO.pure(Connection() & ProbeState,(conn,Disabled{}))
     case Seeking{rest,since}:
       seek(conn,rest,since,now)
     case Validating{+rest,+path,+since}:
       do IO<Connection() & ProbeState>:
         status : Connection() & Result<&1,&1,U32 & String,U32> <- check_path(conn,path)
-        finish_check(status,rest,path,since,now,U32.is_ge(U32.sub(now,since),validation_wait(rest)))
+        finish_check(status,rest,path,relay_path,since,now,U32.is_ge(U32.sub(now,since),validation_wait(rest)))
     case DirectPath{+path}:
       do IO<Connection() & ProbeState>:
         status : Connection() & Result<&1,&1,U32 & String,U32> <- check_path(conn,path)
-        keep_direct(status,path,now)
+        watch_direct(status,path,relay_path,now)
     case Waiting{+since}:
       retry_routes(conn,candidates,since,now,U32.is_ge(U32.sub(now,since),1000))
+    case inactive:
+      IO.pure(Connection() & ProbeState,(conn,inactive))
+
+def keep_rechecking(progress: Connection() & ProbeState, relay_path: U32) -> Connection() & ProbeState:
+  (conn,next) = progress
+  (conn,Rechecking{relay_path,next})
+
+def advance(conn: Connection(), candidates: List<&2,Endpoint.Address>, state: ProbeState, +now: U32)
+    -> IO(Connection() & ProbeState):
+  match state:
     case Backup{+plan,phase}:
       do IO<Connection() & ProbeState>:
         progress : BackupProgress() <- advance_backup(conn,plan,phase,now)
-        return keep_backup(progress,plan)
+        return keep_backup(progress,plan,now)
+    case Rechecking{+relay_path,direct}:
+      do IO<Connection() & ProbeState>:
+        progress : Connection() & ProbeState <- advance_direct(conn,candidates,direct,relay_path,now)
+        return keep_rechecking(progress,relay_path)
+    case initial:
+      advance_direct(conn,candidates,initial,0,now)
 
 def selected(state: ProbeState) -> SelectedPath:
   match state:
     case DirectPath{id}:
       PromotedPath{id}
+    case Rechecking{_,DirectPath{id}}:
+      PromotedPath{id}
+    case Rechecking{id,_}:
+      RecoveredRelay{id}
     case Backup{_,ActiveBackup{id}}:
       RecoveredRelay{id}
     case _:

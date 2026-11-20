@@ -320,7 +320,7 @@ $(BUILD)/iroh-bend-relay-raw-transport: $(BUILD)/relay-raw-transport.c
 
 .PHONY: check-quic-datagram check-quic-rebind check-quic-migration
 .PHONY: check-picoquic-multipath check-quic-multipath check-quic-multipath-listener check-quic-multipath-session check-quic-multipath-early check-quic-multipath-early-streams check-endpoint-multipath
-.PHONY: check-endpoint-multipath-recovery
+.PHONY: check-endpoint-multipath-recovery check-endpoint-multipath-restore-direct
 UPSTREAM_DATAGRAM_V4 ?=
 UPSTREAM_DATAGRAM_V6 ?=
 UPSTREAM_DATAGRAM_ECHO ?=
@@ -392,6 +392,10 @@ check-endpoint-multipath: $(BUILD)/iroh-bend-endpoint-multipath
 check-endpoint-multipath-recovery: $(BUILD)/iroh-bend-endpoint-multipath-recovery
 	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh relay recovery fixture.' >&2; exit 2; }
 	python3 -B tests/endpoint_multipath.py "$<" "$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --recovery
+
+check-endpoint-multipath-restore-direct: $(BUILD)/iroh-bend-endpoint-multipath-recovery
+	@test -x "$(UPSTREAM_ENDPOINT_MULTIPATH)" || { echo 'Set UPSTREAM_ENDPOINT_MULTIPATH to the Iroh direct restoration fixture.' >&2; exit 2; }
+	python3 -B tests/endpoint_multipath.py "$<" "$(UPSTREAM_ENDPOINT_MULTIPATH)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)" --restore-direct
 
 $(BUILD)/endpoint-multipath.c: tests/endpoint_multipath.bend
 $(BUILD)/endpoint-multipath-recovery.c: tests/endpoint_multipath_recovery.bend

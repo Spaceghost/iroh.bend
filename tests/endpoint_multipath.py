@@ -86,25 +86,30 @@ def check_routed(client, fixture, host, mode, family, relay, peer_relay):
         raise TimeoutError("Bend did not promote the direct path")
 
 
-def check_recovery(client, fixture, host, mode, family, relay, peer_relay):
+def check_recovery(client, fixture, host, mode, family, relay, peer_relay, restore):
     with ExitStack() as stack:
-        server = stack.enter_context(process("env", "IROH_RELAY_RECOVERY=1", fixture, mode, peer_relay))
+        scenario = "2" if restore else "1"
+        server = stack.enter_context(process("env", f"IROH_RELAY_RECOVERY={scenario}", fixture, mode, peer_relay))
         target = (host, read_address(server))
         gate = bind(stack, host, family)
-        child = stack.enter_context(process(client, host, str(gate.getsockname()[1]), relay))
+        args = (client, host, str(gate.getsockname()[1]), relay)
+        child = stack.enter_context(process(*args, "restore") if restore else process(*args))
         ready = stack.enter_context(selectors.DefaultSelector())
         ready.register(gate, selectors.EVENT_READ)
         ready.register(child.stdout, selectors.EVENT_READ)
         remote = None
-        cut = False
+        phase = "direct"
         dropped = 0
-        deadline = time.monotonic() + 20
+        report = (b"PASS open stream survived direct UDP restoration and a second outage" if restore else
+                  b"PASS open stream continued on the relay after direct path loss")
+        expected_phase = "blocked-again" if restore else "blocked"
+        deadline = time.monotonic() + 35
         while time.monotonic() < deadline:
             events = sorted(ready.select(0.1), key=lambda event: event[0].fileobj != child.stdout)
             for key, _ in events:
                 if key.fileobj == gate:
                     packet, sender = gate.recvfrom(65536)
-                    if cut:
+                    if phase in ("blocked", "blocked-again"):
                         dropped += 1
                     elif sender[:2] == target:
                         if remote is not None:
@@ -114,16 +119,21 @@ def check_recovery(client, fixture, host, mode, family, relay, peer_relay):
                         gate.sendto(packet, target)
                     continue
                 line = child.stdout.readline().strip()
-                if line == b"CUT_DIRECT" and not cut and remote is not None:
-                    cut = True
-                elif line == b"PASS open stream continued on the relay after direct path loss" and dropped:
+                if line == b"CUT_DIRECT" and phase == "direct" and remote is not None:
+                    phase = "blocked"
+                elif line == b"RESTORE_DIRECT" and restore and phase == "blocked" and dropped:
+                    phase = "restored"
+                    remote = None
+                elif line == b"CUT_DIRECT" and restore and phase == "restored" and remote is not None:
+                    phase = "blocked-again"
+                elif line == report and phase == expected_phase and dropped:
                     if child.wait(timeout=5):
                         raise RuntimeError("Bend failed after recovering the relay path")
                     transcript, _ = server.communicate(timeout=5)
                     print(transcript.decode(), end="", flush=True)
                     if server.returncode:
                         raise RuntimeError("Iroh rejected the traffic after direct path loss")
-                    print(f"PASS same Bend stream recovered via relay on {host}", flush=True)
+                    print(f"{line.decode()} on {host}", flush=True)
                     return
                 else:
                     raise RuntimeError(f"Unexpected recovery output {line!r} after {dropped} dropped packets")
@@ -132,7 +142,8 @@ def check_recovery(client, fixture, host, mode, family, relay, peer_relay):
 
 if __name__ == "__main__":
     client, fixture, relay, peer_relay, *flags = sys.argv[1:]
-    recovery = flags == ["--recovery"]
+    restore = flags == ["--restore-direct"]
+    recovery = restore or flags == ["--recovery"]
     if bool(relay) != bool(peer_relay):
         raise SystemExit("Set both RELAY_URL and UPSTREAM_IROH_RELAY_URL for relay cases")
     if recovery and not relay:
@@ -142,7 +153,7 @@ if __name__ == "__main__":
         ("::1", "listen6", socket.AF_INET6),
     ):
         if recovery:
-            check_recovery(client, fixture, host, mode, family, relay, peer_relay)
+            check_recovery(client, fixture, host, mode, family, relay, peer_relay, restore)
             continue
         check(client, fixture, host, mode, family, "", "")
         if os.environ.get("CHECK_BINARY_ALPN") == "1":
