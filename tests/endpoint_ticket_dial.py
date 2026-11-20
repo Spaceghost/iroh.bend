@@ -7,6 +7,7 @@ import sys
 
 from urllib.parse import urlsplit, urlunsplit
 
+from endpoint_candidate_lookup import check_discovered_relay, check_pending_relay, check_supplied_addresses
 from endpoint_ticket_urls import ticket as encode_relays
 from quic_rebind import process
 
@@ -69,8 +70,13 @@ def main(client, fixture, relay_url):
     for family in ("listen", "listen6"):
         check(client, fixture, family, "wrong-id", error=b"peer endpoint key mismatch")
         check(client, fixture, family, "direct")
+        for race in (check_supplied_addresses, check_pending_relay):
+            with process(fixture, family, "direct") as peer:
+                race(client, read_ticket(peer), family, peer)
         check(client, fixture, family, "custom-direct")
         if relay_url:
+            with process(fixture, family, "relay", relay_url) as peer:
+                check_discovered_relay(client, read_ticket(peer), family, peer, relay_url)
             for mode in ("mixed", "relay", "fallback"):
                 check(client, fixture, family, mode, relay_url)
             check(client, fixture, family, "relay", relay_url, alternate_spelling=True)

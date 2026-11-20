@@ -50,7 +50,7 @@ def resolver_reply(query, dns_port):
         return packet
 
 
-def dns_proxy(stack, dns_port, gate, tcp=False, rcode=0, address=None):
+def dns_proxy(stack, dns_port, gate, tcp=False, rcode=0, address=None, relay_url=None):
     class TcpProxy(BaseRequestHandler):
         def handle(self):
             with self.request.makefile("rb") as stream:
@@ -66,8 +66,8 @@ def dns_proxy(stack, dns_port, gate, tcp=False, rcode=0, address=None):
             if tcp:
                 server.sendto(reply(query, 0x8380), self.client_address)
             elif gate(None, self.client_address):
-                if address:
-                    txt = ("addr=" + address).encode("ascii")
+                if address or relay_url:
+                    txt = ("addr=" + address if address else "relay=" + relay_url).encode("ascii")
                     answer = reply(query, 0x8180, [record(16, bytes([len(txt)]) + txt)])
                 elif rcode:
                     answer = reply(query, 0x8180 | rcode)

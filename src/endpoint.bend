@@ -363,17 +363,6 @@ def dial_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(Outc
 def dial(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(Outcome()):
   dial_routes(routes(records),identity,timeouts)
 
-# Try each published direct address before opening a relay path. The returned
-# QUIC connection exposes both streams and application datagrams.
-def connect_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
-  dial_plan(~Quic.DatagramConnection,~direct_quic,plan,identity,timeouts)
-
-def connect_ticket(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
-  with_ticket(~Connection(),~connect_routes,text,seed,alpn,timeouts)
-
-def connect(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
-  connect_routes(routes(records),identity,timeouts)
-
 def dns_records(reply: Result<&1,&1,U32 & String,Dns.Reply>) -> Result<&1,&1,U32 & String,List<&2,Dns.Attribute>>:
   match reply:
     case Done{Dns.Found{records}}:
@@ -786,6 +775,17 @@ def start_lookup_dial(plan: Routes, +identity: Identity, +timeouts: Timeouts, +s
 def connect_with_lookup(plan: Routes, +identity: Identity, timeouts: Timeouts, sources: List<&2,AddressLookup>)
     -> IO(ConnectResult()):
   before_connect(Connection(),identity,u => start_lookup_dial(plan,identity,timeouts,sources))
+
+# Dial the supplied transports with one pinned QUIC connection. The returned
+# connection exposes both streams and application datagrams.
+def connect_routes(plan: Routes, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
+  connect_with_lookup(plan,identity,timeouts,[])
+
+def connect_ticket(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts) -> IO(ConnectResult()):
+  with_ticket(~Connection(),~connect_routes,text,seed,alpn,timeouts)
+
+def connect(records: List<&2,Dns.Attribute>, identity: Identity, timeouts: Timeouts) -> IO(ConnectResult()):
+  connect_routes(routes(records),identity,timeouts)
 
 def connect_ticket_with_lookup(text: String, seed: List<&2,U32>, alpn: List<&2,U32>, timeouts: Timeouts,
     sources: List<&2,AddressLookup>) -> IO(ConnectResult()):

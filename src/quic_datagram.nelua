@@ -1687,6 +1687,10 @@ local function adopt_socket(e: Env, conn: *Connection, fd: cint): Term
   conn.remote_addr = addresses.remote_addr
   conn.local_size = addresses.local_size
   conn.remote_size = addresses.remote_size
+  -- Let the peer finish TLS even if the application waits before doing I/O.
+  local status = advance(conn,io_tick())
+  if status < 0 then return engine_error(e,conn,status) end
+  if status > 0 then return socket_error(e,conn,status) end
   return io_done(e,term_pak(iroh_dgram_Unit,0))
 end
 

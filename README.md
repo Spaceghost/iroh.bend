@@ -343,9 +343,9 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   `make check-endpoint-ticket` for the upstream snapshot and mixed-address
   round-trip checks.
 - `Endpoint.connect_ticket(text, seed, alpn, timeouts)` dials a ticket with the
-  caller's seed and ALPN. It pins the remote key from the ticket, tries the
-  published IP addresses in order, then tries its relay URLs. Custom addresses
-  can coexist with usable IP or relay addresses.
+  caller's seed and ALPN. It sends the same pinned QUIC handshake over the
+  supplied IP paths and any relay bridge that finishes opening. Custom
+  addresses can coexist with usable IP or relay addresses.
   `Endpoint.connect_ticket_with_lookup(text, seed, alpn, timeouts, sources)`
   starts every configured `DnsLookup{resolver}` and `PkarrLookup{relay, timeout_ms}`
   service as it begins dialing the ticket. A new direct address or an opened
@@ -720,7 +720,11 @@ IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.
 The other keeps that route silent and releases the working address through DNS
 or signed Pkarr after the first QUIC Initial. The DNS fixture captures both
 paths and checks their Initial destination and source connection IDs. Both
-fixtures exchange a bidirectional stream and an application datagram with Iroh.
+fixtures exchange streams and application datagrams with Iroh. The ordinary
+ticket dial also checks both Initial connection IDs across two supplied addresses.
+The relay ticket suite holds a WebSocket upgrade open until discovery yields a
+working direct path, and holds a direct path silent until discovery yields a
+working relay.
 Run `make check-endpoint-ticket-lookup` with the upstream lookup fixtures.
 [Upstream route selection](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/socket/remote_map/remote_state.rs)
 
