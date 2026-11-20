@@ -93,12 +93,14 @@ client requires a libcurl build with WebSocket support.
    The optional `control` argument exchanges the fixture's local and expected peer
    identities for `make check-quic-close-control`.
    See the [Iroh graceful-close test](https://github.com/n0-computer/iroh/blob/v1.5.0/iroh/src/endpoint.rs#L3161-L3198).
-   For the relay-only control, set `UPSTREAM_QUIC_RELAY_CLOSE` to a peer that accepts
+   For relay-only tests, set `UPSTREAM_QUIC_RELAY_CLOSE` to an Iroh peer that accepts
    `listen|dial RELAY_BASE send|receive CASE [control]`. It disables IP transports,
    registers with the supplied Iroh relay, and prints `READY relay` when ready to accept.
-   It checks that the stream used a relay path and that no direct path exists. Run
-   `make check-quic-relay-close-control` with `RELAY_URL` and `UPSTREAM_IROH_RELAY_URL`
-   pointing to the WebSocket route and HTTP base of the same relay.
+   The peer checks that its stream traversed a relay and that its connection has no IP path.
+   Set `RELAY_URL` to the WebSocket route and `UPSTREAM_IROH_RELAY_URL` to the HTTP base
+   of the same relay. Run `make check-quic-relay-close` for both native backends and
+   `make check-quic-relay-close-control` for the Iroh-to-Iroh comparison. Repeat with
+   the WSS route and HTTPS base to cover TLS.
    Run `make check-quic-stream-finish UPSTREAM_QUIC_STREAM_FINISH=/path/to/peer`
    to check FIN acknowledgements on both backends. The Iroh 1.5.0 fixture uses
    the same identities, ALPN, and command-line roles as the cancellation fixture.
@@ -501,6 +503,10 @@ Set `BEND`, `NELUA`, and `BUILD` to override the compilers and build output.
   reclaims routes after two idle minutes. After a relay disconnect it retries
   registration with backoff, preserving each peer’s local UDP route so QUIC
   can recover on the same connection.
+- `EndpointMultipath.bind_relay_identity(url, seed, alpns, early_data)` returns
+  a Picoquic listener once its relay registration succeeds. Pass a server-ordered
+  list of ALPN byte strings. Use `EndpointMultipath.accept_listener` to poll for
+  connections and `EndpointMultipath.close_listener` to release the registration.
 - `Endpoint.bind_direct_relay_identity` accepts direct IPv4 and IPv6 on one
   UDP port and registers the same identity with the relay in the background.
   Direct peers can connect as soon as binding succeeds. The listener retries
@@ -811,6 +817,11 @@ On Linux, relay shutdown forwards the datagrams already queued on each private
 loopback socket before releasing the WebSocket. Run `make check-relay-quic-drain`
 with `RELAY_URL` set to a running Iroh relay. The test verifies packet order,
 source ports, and delivery to two peers using relay protocols v1 and v2.
+Both native backends also exchange application closes with Iroh 1.5.0 over
+relay-only WS and WSS connections. Either endpoint can listen or initiate
+the close. The receiver checks the application code and raw reason after a
+bidirectional stream echo, including when the Bend sender releases its
+connection immediately after calling `close_with`.
 
 Ticket lookup passes two complementary tests against Iroh 1.5.0 on IPv4 and
 IPv6. One lets the supplied route connect while DNS or Pkarr is still pending.

@@ -250,6 +250,8 @@ $(BUILD)/relay-quic.c: tests/relay_quic.bend tests/endpoint_validation.bend test
 	cd "$(BUILD)/relay-quic-stage" && BEND_NO_TELEMETRY=1 $(BEND) tests/relay_quic.bend -o "$(abspath $@)"
 
 $(BUILD)/iroh-bend-relay-quic: $(BUILD)/relay-quic.c
+$(BUILD)/iroh-bend-quic-datagram-relay-close: $(BUILD)/quic-datagram-relay-close.c
+$(BUILD)/iroh-bend-relay-quic $(BUILD)/iroh-bend-quic-datagram-relay-close:
 	$(CLANG) -std=c11 -O2 $$($(PKG_CONFIG) --cflags $(DATAGRAM_LIBS) libcurl) $< \
 		-o $@ -pthread -lm $$($(PKG_CONFIG) --libs $(DATAGRAM_LIBS) libcurl)
 
@@ -583,7 +585,7 @@ $(BUILD)/endpoint-multipath.c $(BUILD)/endpoint-multipath-ticket.c $(BUILD)/endp
 	cd "$(@:.c=-stage)" && BEND_NO_TELEMETRY=1 $(BEND) "tests/$(subst -,_,$*).bend" -o "$(abspath $@)"
 
 # Build the endpoint integration fixture without compiler optimizations.
-$(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
+$(BUILD)/iroh-bend-quic-multipath-relay-close $(BUILD)/iroh-bend-endpoint-multipath $(BUILD)/iroh-bend-endpoint-multipath-ticket $(BUILD)/iroh-bend-endpoint-multipath-options $(BUILD)/iroh-bend-endpoint-multipath-recovery $(BUILD)/iroh-bend-endpoint-multipath-nat $(BUILD)/iroh-bend-endpoint-multipath-dual-stack $(BUILD)/iroh-bend-endpoint-multipath-listener $(BUILD)/iroh-bend-endpoint-multipath-inbound-nat: $(BUILD)/iroh-bend-%: $(BUILD)/%.c
 	$(CLANG) -std=gnu11 $(PICOQUIC_FLAGS) $(MULTIPATH_CURL_CFLAGS) \
 		$$($(PKG_CONFIG) --cflags openssl) "$<" -o "$@" $(PICOQUIC_LIBS) \
 		-pthread $(MULTIPATH_CURL_LIBS) $$($(PKG_CONFIG) --libs openssl)
@@ -719,8 +721,14 @@ check-quic-close-control:
 	@test -x "$(UPSTREAM_QUIC_CLOSE)" || { echo 'Set UPSTREAM_QUIC_CLOSE to the Iroh application close fixture.' >&2; exit 2; }
 	python3 -B tests/quic_connection_close.py "$(UPSTREAM_QUIC_CLOSE)" "$(UPSTREAM_QUIC_CLOSE)" --control
 
-.PHONY: check-quic-relay-close-control
+.PHONY: check-quic-relay-close check-quic-datagram-relay-close check-quic-multipath-relay-close check-quic-relay-close-control
+.NOTPARALLEL: check-quic-relay-close
+check-quic-relay-close: check-quic-datagram-relay-close check-quic-multipath-relay-close
 UPSTREAM_QUIC_RELAY_CLOSE ?=
+
+check-quic-datagram-relay-close check-quic-multipath-relay-close: check-%: $(BUILD)/iroh-bend-%
+	@test -x "$(UPSTREAM_QUIC_RELAY_CLOSE)" || { echo 'Set UPSTREAM_QUIC_RELAY_CLOSE to the Iroh relay-only close fixture.' >&2; exit 2; }
+	python3 -B tests/quic_relay_close.py "$<" "$(UPSTREAM_QUIC_RELAY_CLOSE)" "$(RELAY_URL)" "$(UPSTREAM_IROH_RELAY_URL)"
 
 check-quic-relay-close-control:
 	@test -x "$(UPSTREAM_QUIC_RELAY_CLOSE)" || { echo 'Set UPSTREAM_QUIC_RELAY_CLOSE to the Iroh relay-only close fixture.' >&2; exit 2; }
@@ -733,7 +741,10 @@ check-relay-quic-drain: $(BUILD)/iroh-bend-relay-quic-drain
 	@set -e; for role in outbound inbound; do for version in 1 2; do "$<" "$(RELAY_URL)" "$$role" "$$version"; done; done
 
 $(BUILD)/relay-quic-drain.c: tests/relay_quic_drain.bend $(RELAY_SOURCES) src/direct.bend src/relay_quic.bend src/relay_quic_inbound.bend src/ed25519.nelua src/relay_socket.nelua src/relay_quic.nelua
-$(BUILD)/relay-quic-drain.c: $(BUILD)/%.c: tools/nelua-effect.sh
+$(BUILD)/quic-datagram-relay-close.c: tests/quic_datagram_relay_close.bend tests/quic_datagram_cancel.bend tests/quic_datagram.bend
+$(BUILD)/quic-multipath-relay-close.c: tests/quic_multipath_relay_close.bend tests/quic_multipath_cancel.bend tests/quic_multipath_bend.bend tests/quic_multipath_listener.bend src/endpoint_multipath.bend src/quic_multipath.bend src/quic_multipath.nelua src/quic_nat_state.bend src/quic_nat_send.bend src/quic_nat_retry.bend src/quic_multipath_nat.bend
+$(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-multipath-relay-close.c: tests/quic_relay_close.bend tests/quic_connection_close.bend tests/quic_stream_cancel.bend $(RELAY_QUIC_SOURCES) $(addprefix src/,$(addsuffix .nelua,$(RELAY_QUIC_EFFECTS)))
+$(BUILD)/relay-quic-drain.c $(BUILD)/quic-datagram-relay-close.c $(BUILD)/quic-multipath-relay-close.c: $(BUILD)/%.c: tools/nelua-effect.sh
 	mkdir -p "$(@:.c=-stage)/src" "$(@:.c=-stage)/tests"
 	cp $(filter src/%.bend,$^) "$(@:.c=-stage)/src/"
 	cp $(filter tests/%.bend,$^) "$(@:.c=-stage)/tests/"
