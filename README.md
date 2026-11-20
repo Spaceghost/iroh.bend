@@ -16,7 +16,10 @@ Use Bend 2.0.39 and Clang. The native networking tests also use Nelua and
 client requires a libcurl build with WebSocket support.
 
 1. Run `make check` for the relay wire snapshots, malformed input, handshake
-   framing, BLAKE3 challenge vectors, and DNS query and TXT vectors.
+   framing, BLAKE3 challenge vectors, and DNS query and TXT vectors. It also
+   exercises the [Bend WebSocket codec](src/relay_websocket.bend) with partial
+   reads, fragmented messages, interleaved control frames, and size limits.
+   The live relay still uses libwebsockets for framing.
    Run `make check-dns-tcp` with Python 3 for the loopback DNS fallback test.
 2. Run `make check-relay-auth` and `make check-pkarr` for Ed25519 challenge and TLS-exporter proofs,
    canonical Pkarr signing, and rejection of tampered packets and wrong keys.

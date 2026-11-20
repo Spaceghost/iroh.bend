@@ -1,9 +1,9 @@
 BEND ?= bend
 BUILD ?= build
 
-.PHONY: check check-gpu check-dns-tcp
+.PHONY: check check-gpu check-dns-tcp check-relay-websocket
 
-check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate
+check: $(BUILD)/iroh-bend-check $(BUILD)/iroh-bend-handshake $(BUILD)/iroh-bend-discovery $(BUILD)/iroh-bend-rate check-relay-websocket
 	$(BUILD)/iroh-bend-check
 	$(BUILD)/iroh-bend-handshake
 	$(BUILD)/iroh-bend-discovery
@@ -24,6 +24,13 @@ $(BUILD)/iroh-bend-discovery: tests/discovery.bend src/discovery.bend src/relay.
 $(BUILD)/iroh-bend-rate: tests/relay_rate.bend src/relay_rate.bend src/relay_heartbeat.bend
 	mkdir -p $(BUILD)
 	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_rate.bend -o $@
+
+check-relay-websocket: $(BUILD)/iroh-bend-websocket
+	$(BUILD)/iroh-bend-websocket
+
+$(BUILD)/iroh-bend-websocket: tests/relay_websocket.bend src/relay_websocket.bend src/relay.bend
+	mkdir -p $(BUILD)
+	BEND_NO_TELEMETRY=1 $(BEND) tests/relay_websocket.bend -o $@
 
 check-dns-tcp: $(BUILD)/iroh-bend-discovery
 	python3 tests/discovery_tcp.py $(BUILD)/iroh-bend-discovery
