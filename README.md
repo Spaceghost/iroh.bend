@@ -655,8 +655,9 @@ Use `connect_nat_direct` and `step_nat_direct` in
 [`endpoint_multipath.bend`](src/endpoint_multipath.bend) to validate an Iroh
 candidate and retrieve the new path ID on a connection bootstrapped over UDP.
 
-The routed multipath endpoint (`connect_routed` and `step_routes`) negotiates
-NAT traversal on a relay bootstrap. It first tries published direct addresses.
+The routed multipath endpoint offers NAT traversal in the shared handshake
+started by `connect_routed`. When a relay wins, `step_routes` first probes
+the published direct addresses.
 When none validate, it selects local UDP sockets through the OS routes to
 authenticated peer candidates, one socket per address family. It keeps the
 relay available while validating the new path, then prefers the direct path

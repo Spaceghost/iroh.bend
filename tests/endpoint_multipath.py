@@ -1,3 +1,4 @@
+import errno
 import os
 import selectors
 import socket
@@ -68,12 +69,14 @@ def check_ticket_identity(client, fixture, host, mode):
 
 
 def check_single_path_peer(client, fixture, host, mode):
-    with process(fixture, "listen-single-path", host) as peer:
+    with process(fixture, "listen-single-path", host) as peer, ExitStack() as stack:
         port = read_address(peer)
-        direct = ip_ticket(ticket([], SERVER_KEY), mode, [port])
+        silent = silent_socket(stack, mode)
+        direct = ip_ticket(ticket([], SERVER_KEY), mode, [port, silent.getsockname()[1]])
         result = subprocess.run((client, "dial-ticket", direct, "direct", host, str(port)), capture_output=True, timeout=6)
         transcript, _ = peer.communicate(timeout=5)
-        if (result.returncode != 95 or b"peer did not negotiate QUIC multipath" not in result.stderr
+        initial_ids(silent.recv(65535))
+        if (result.returncode != errno.ENOTSUP or b"peer did not negotiate QUIC multipath" not in result.stderr
                 or peer.returncode or b"PEER_CLOSED" not in transcript):
             raise AssertionError(f"Multipath refusal failed: {result.stderr!r}, single-path peer {transcript!r}")
     print(f"PASS {mode} single-path peer received the multipath dialer's close", flush=True)
