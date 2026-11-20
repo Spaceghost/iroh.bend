@@ -438,26 +438,31 @@ def inbound_label(conn: Endpoint.Connection(), +label: U32) -> IO(U32):
         finished : Endpoint.Connection() & Unit <- Endpoint.use_connection(Unit,conn,c => inbound_exchange(c,known))
         inbound_served(finished,known)
 
-def second_peer(matches: Bool) -> U32:
-  match matches:
-    case True{}:
+def inbound_peer_label(first: Bool, second: Bool, third: Bool) -> U32:
+  match first second third:
+    case True{} _ _:
+      73
+    case _ True{} _:
       74
-    case False{}:
+    case _ _ True{}:
+      75
+    case _ _ _:
       0
 
-def identify_peer(key: List<&2,U32>, first: Bool) -> U32:
-  match first:
-    case True{}:
-      73
-    case False{}:
-      second_peer(TransportFixture.same_bytes(key,
-        [53,60,138,127,238,202,56,178,196,83,110,11,210,88,111,219,
-         24,208,112,229,14,5,159,29,67,248,191,239,185,122,124,225]))
+def identify_peer(+key: List<&2,U32>) -> U32:
+  inbound_peer_label(
+    TransportFixture.same_bytes(key,Fixture.dialer_public()),
+    TransportFixture.same_bytes(key,
+      [53,60,138,127,238,202,56,178,196,83,110,11,210,88,111,219,
+       24,208,112,229,14,5,159,29,67,248,191,239,185,122,124,225]),
+    TransportFixture.same_bytes(key,
+      [126,160,227,189,82,226,7,201,211,176,235,166,92,7,4,230,
+       111,202,45,142,22,90,23,82,24,177,116,252,65,96,228,19]))
 
 def inbound_identity(pair: Endpoint.Connection() & Result<&1,&1,U32 & String,List<&2,U32>>) -> IO(U32):
   match pair:
     case (conn,Done{+key}):
-      inbound_label(conn,identify_peer(key,TransportFixture.same_bytes(key,Fixture.dialer_public())))
+      inbound_label(conn,identify_peer(key))
     case (conn,Fail{(code,message)}):
       do IO<U32>:
         _ : Result<&1,&1,U32 & String,Unit> <- Endpoint.disconnect(conn)
@@ -508,12 +513,67 @@ def listen_inbound(url: String, reconnect: Bool) -> IO(Unit):
     inbound : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
     inbound_scenario(reconnect,inbound)
 
+def mixed_peer_bit(label: U32) -> U32:
+  match label:
+    case 73:
+      1
+    case 74:
+      2
+    case 75:
+      4
+    case _:
+      0
+
+def mixed_total(total: U32) -> IO(Unit):
+  match total:
+    case 7:
+      IO.print("PASS Bend authenticated three peers through the same listener")
+    case _:
+      IO.die(Unit,1,"expected three distinct peer identities")
+
+def serve_mixed(pair: Endpoint.RelayedListener & Endpoint.Connection(), first: Endpoint.Connection(),
+    second: Endpoint.Connection()) -> IO(Unit):
+  (listener,third) = pair
+  do IO<Unit>:
+    a : U32 <- serve_inbound_peer(first)
+    b : U32 <- serve_inbound_peer(second)
+    c : U32 <- serve_inbound_peer(third)
+    IO.try(Unit,Endpoint.close_relay_identity(listener))
+    mixed_total(U32.or(mixed_peer_bit(a),U32.or(mixed_peer_bit(b),mixed_peer_bit(c))))
+
+def accept_mixed_third(pair: Endpoint.RelayedListener & Endpoint.Connection(), first: Endpoint.Connection()) -> IO(Unit):
+  (listener,second) = pair
+  do IO<Unit>:
+    third : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    serve_mixed(third,first,second)
+
+def accept_mixed_second(pair: Endpoint.RelayedListener & Endpoint.Connection()) -> IO(Unit):
+  (listener,first) = pair
+  do IO<Unit>:
+    second : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    accept_mixed_third(second,first)
+
+def accept_mixed(bound: Endpoint.RelayedListener & U32) -> IO(Unit):
+  (listener,port) = bound
+  do IO<Unit>:
+    IO.print(String.append("direct and relay identity listener ready ",U32.show(port)))
+    first : Endpoint.RelayedListener & Endpoint.Connection() <- accept_inbound(12000n,listener)
+    accept_mixed_second(first)
+
+def listen_mixed(url: String) -> IO(Unit):
+  do IO<Unit>:
+    bound : Endpoint.RelayedListener & U32 <- IO.try(Endpoint.RelayedListener & U32,
+      Endpoint.bind_direct_relay_identity(0,url,List.replicate(U32,32n,42),Fixture.alpn(),0))
+    accept_mixed(bound)
+
 def run(args: List<String>) -> IO(Unit):
   match args:
     case [_, "listen-relay-identity", url]:
       listen_inbound(url,False{})
     case [_, "listen-relay-reconnect", url]:
       listen_inbound(url,True{})
+    case [_, "listen-direct-relay", url]:
+      listen_mixed(url)
     case Con{_,Con{"listen",Con{url,Nil{}}}}:
       listen(url)
     case Con{_,Con{"dial",Con{url,Nil{}}}}:
